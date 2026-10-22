@@ -510,7 +510,7 @@ fn requestBodyNode(comptime reg: *const schema.Registry, comptime R: type) ?Node
     else
         return null;
     var content: []const Member = &.{.{ .key = "schema", .value = reg.schema(.{ .T = T, .direction = .input }) }};
-    const examples = namedExamples(T);
+    const examples = namedExamples(T, .input);
     if (examples.len > 0) content = content ++ [_]Member{.{ .key = "examples", .value = .{ .object = examples } }};
     return json.object(&.{
         .{ .key = "required", .value = .{ .boolean = true } },
@@ -518,9 +518,9 @@ fn requestBodyNode(comptime reg: *const schema.Registry, comptime R: type) ?Node
     });
 }
 
-/// The `.examples` of the `Doc(T)` of a body, by their names: those of a
-/// request or a response with that body.
-fn namedExamples(comptime T: type) []const Member {
+/// The `.examples` of the `Doc(T)` of a body, by their names, as they go
+/// `way`: those of a request or a response with that body.
+fn namedExamples(comptime T: type, comptime way: example.Way) []const Member {
     const container = switch (@typeInfo(T)) {
         .@"struct" => |s| !s.is_tuple,
         .@"union" => |u| u.tag_type != null,
@@ -538,7 +538,7 @@ fn namedExamples(comptime T: type) []const Member {
         }
         var members: []const Member = &.{};
         if (e.summary) |text| members = members ++ [_]Member{string("summary", text)};
-        members = members ++ [_]Member{.{ .key = "value", .value = example.value(T, e.value, false, std.fmt.comptimePrint("{s}.openapi.examples[{d}]", .{ schema.typeName(T), i })) }};
+        members = members ++ [_]Member{.{ .key = "value", .value = example.value(T, e.value, way, std.fmt.comptimePrint("{s}.openapi.examples[{d}]", .{ schema.typeName(T), i })) }};
         m.* = .{ .key = e.name, .value = .{ .object = members } };
     }
     const final = out;
@@ -636,7 +636,7 @@ fn routeText(comptime doc: anytype, comptime name: []const u8) ?[]const u8 {
 /// A JSON body of type `T`, with the `.examples` of its `Doc`.
 fn jsonAnswer(comptime reg: *const schema.Registry, comptime status: u16, comptime description: ?[]const u8, comptime T: type, comptime from: []const u8) Answer {
     const body = reg.schema(.{ .T = T, .direction = .output });
-    return .{ .status = status, .description = description, .media = "application/json", .shape = body, .examples = namedExamples(T), .from = from };
+    return .{ .status = status, .description = description, .media = "application/json", .shape = body, .examples = namedExamples(T, .output), .from = from };
 }
 
 /// A body of the media type `media` that a handler or a middleware writes
@@ -861,7 +861,7 @@ fn errorStatuses(comptime H: type, comptime E: type, comptime at: []const u8) []
         if (res.status < 200 or res.status > 599)
             fail(schema.typeName(H) ++ ".mapError(error." ++ name ++ ") gives the status " ++ std.fmt.comptimePrint("{d}", .{res.status}) ++
                 ", which is not a final status of HTTP; give it one of 200 to 599");
-        const body: Node = if (shown) example.value(Body, res.body, problem, schema.typeName(H) ++ ".mapError(error." ++ name ++ ")") else .null;
+        const body: Node = if (shown) example.value(Body, res.body, if (problem) .problem else .output, schema.typeName(H) ++ ".mapError(error." ++ name ++ ")") else .null;
         if (res.status == 500 and res.from_fallback) {
             if (internal == null) internal = body;
             continue;

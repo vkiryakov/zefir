@@ -525,6 +525,28 @@ test "examples: of a type, as the server writes it; of a field, its example then
         "},\"examples\":[{\"title\":\"Buy milk\",\"dueDate\":\"2026-10-30\",\"priority\":\"normal\"}]}", comptime componentOf(&.{output(Task)}, "Task"));
 }
 
+/// A constant in the JSON it writes, which a body it reads leaves out.
+const Note = struct {
+    comptime kind: []const u8 = "note",
+    title: []const u8,
+
+    pub const openapi: Doc(@This()) = .{ .example = .{ .title = "Buy milk" } };
+};
+
+/// A field whose default holds that constant.
+const Folder = struct {
+    first: Note = .{ .title = "Read me" },
+};
+
+test "examples and defaults of a type with a comptime field: without it when read, with it when written" {
+    try expectJson("{\"type\":\"object\",\"required\":[\"title\"],\"properties\":{\"title\":{\"type\":\"string\"}},\"additionalProperties\":false," ++
+        "\"examples\":[{\"title\":\"Buy milk\"}]}", comptime componentOf(&.{input(Note)}, "Note"));
+    try expectJson("{\"type\":\"object\",\"required\":[\"kind\",\"title\"],\"properties\":{\"kind\":{\"type\":\"string\",\"const\":\"note\"},\"title\":{\"type\":\"string\"}}," ++
+        "\"examples\":[{\"kind\":\"note\",\"title\":\"Buy milk\"}]}", comptime componentOf(&.{output(Note)}, "Note"));
+    // The default of a field, read.
+    try expectJson("{\"$ref\":\"#/components/schemas/Note\",\"default\":{\"title\":\"Read me\"}}", comptime propertyOf(Folder, "first"));
+}
+
 test "examples: one that breaks a rule of its type or of its field stops the build, with the rule's message" {
     try testing.expectEqualStrings(
         "zefir.openapi: Task.openapi.example: title must be at most 20 characters (validation.max_length); give an example that passes the rules of Task",

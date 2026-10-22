@@ -3,16 +3,30 @@
 //! errors. `value` follows the writer of zefir-http's responses: fields by
 //! their outside names (`v.rename`) in the order of their declaration, a
 //! union as an object of one key, a float that is not finite as `null`. It
-//! runs no transforms: an example shows what the type holds.
+//! runs no transforms: an example shows what the type holds. A value that a
+//! request holds has no comptime fields: the server's reader takes none.
 const std = @import("std");
 const v = @import("validator");
 const json = @import("json.zig");
 const declarations = @import("openapi.zig");
 
-/// The JSON of `x`, a value of `T`, as the server writes it; with
-/// `problem`, inside the body of an `http.Problem`, whose null fields it
-/// leaves out. `where` names the value in a message.
-pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime where: []const u8) json.Node {
+/// How a value goes: in a request, in a response, or in a response inside
+/// the body of an `http.Problem`.
+pub const Way = enum {
+    /// Read: without the comptime fields of a struct, which the server's
+    /// reader does not take.
+    input,
+    /// Written: every field, a comptime one as its constant.
+    output,
+    /// Written inside the body of an `http.Problem`, whose null fields the
+    /// server leaves out.
+    problem,
+};
+
+/// The JSON of `x`, a value of `T`, as it goes `way`: as a request holds
+/// it, as the server writes it, or inside the body of an `http.Problem`.
+/// `where` names the value in a message.
+pub fn value(comptime T: type, comptime x: T, comptime way: Way, comptime where: []const u8) json.Node {
     comptime {
         @setEvalBranchQuota(1_000_000);
         switch (@typeInfo(T)) {
@@ -23,7 +37,7 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
                 if (@as(f64, @floatCast(x)) != x) @compileError("zefir.openapi: " ++ where ++ ": " ++ @typeName(T) ++ " " ++ std.fmt.comptimePrint("{}", .{x}) ++ " has no JSON number");
                 return .{ .raw = std.fmt.comptimePrint("{}", .{@as(f64, @floatCast(x))}) };
             },
-            .optional => |o| return if (x) |payload| value(o.child, payload, problem, where) else .null,
+            .optional => |o| return if (x) |payload| value(o.child, payload, way, where) else .null,
             .@"enum" => |e| {
                 if (declarations.writesItself(T)) writesItself(T, where);
                 for (e.field_names) |name| {
@@ -32,27 +46,27 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
                 return .{ .raw = std.fmt.comptimePrint("{d}", .{@backingInt(x)}) };
             },
             .pointer => |p| switch (p.size) {
-                .one => return value(p.child, x.*, problem, where),
-                .slice => return if (p.child == u8) string(x, where) else items(p.child, x, problem, where),
-                .many => if (p.sentinel() != null) return value([]const p.child, std.mem.span(x), problem, where),
+                .one => return value(p.child, x.*, way, where),
+                .slice => return if (p.child == u8) string(x, where) else items(p.child, x, way, where),
+                .many => if (p.sentinel() != null) return value([]const p.child, std.mem.span(x), way, where),
                 .c => {},
             },
-            .array => |a| return if (a.child == u8) string(&x, where) else items(a.child, &x, problem, where),
+            .array => |a| return if (a.child == u8) string(&x, where) else items(a.child, &x, way, where),
             .@"struct" => |s| {
                 if (declarations.writesItself(T)) writesItself(T, where);
                 if (s.is_tuple) {
                     var out: [s.field_types.len]json.Node = undefined;
-                    for (s.field_types, &out, 0..) |F, *item, i| item.* = value(F, x[i], problem, where);
+                    for (s.field_types, &out, 0..) |F, *item, i| item.* = value(F, x[i], way, where);
                     const final = out;
                     return .{ .array = &final };
                 }
                 var members: []const json.Member = &.{};
-                for (s.field_names, s.field_types) |name, F| {
-                    if (F == void) continue;
+                for (s.field_names, s.field_types, s.field_attrs) |name, F, attrs| {
+                    if (F == void or (way == .input and attrs.@"comptime")) continue;
                     const field = @field(x, name);
-                    if (problem and @typeInfo(F) == .optional and field == null) continue;
+                    if (way == .problem and @typeInfo(F) == .optional and field == null) continue;
                     const key = v.nameOf(T, @field(std.meta.FieldEnum(T), name));
-                    members = members ++ [_]json.Member{.{ .key = key, .value = value(F, field, problem, where ++ "." ++ key) }};
+                    members = members ++ [_]json.Member{.{ .key = key, .value = value(F, field, way, where ++ "." ++ key) }};
                 }
                 return .{ .object = members };
             },
@@ -60,7 +74,7 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
                 if (declarations.writesItself(T)) writesItself(T, where);
                 const tag = @tagName(std.meta.activeTag(x));
                 const P = @FieldType(T, tag);
-                const payload: json.Node = if (P == void) .{ .object = &.{} } else value(P, @field(x, tag), problem, where ++ "." ++ tag);
+                const payload: json.Node = if (P == void) .{ .object = &.{} } else value(P, @field(x, tag), way, where ++ "." ++ tag);
                 return .{ .object = &.{.{ .key = tag, .value = payload }} };
             },
             else => {},
@@ -69,9 +83,9 @@ pub fn value(comptime T: type, comptime x: T, comptime problem: bool, comptime w
     }
 }
 
-fn items(comptime Item: type, comptime list: []const Item, comptime problem: bool, comptime where: []const u8) json.Node {
+fn items(comptime Item: type, comptime list: []const Item, comptime way: Way, comptime where: []const u8) json.Node {
     var out: [list.len]json.Node = undefined;
-    for (list, &out, 0..) |item, *node, i| node.* = value(Item, item, problem, std.fmt.comptimePrint("{s}[{d}]", .{ where, i }));
+    for (list, &out, 0..) |item, *node, i| node.* = value(Item, item, way, std.fmt.comptimePrint("{s}[{d}]", .{ where, i }));
     const final = out;
     return .{ .array = &final };
 }
@@ -245,22 +259,25 @@ test "value: the bytes of ctx.response.json and of an error's http.Problem" {
     defer server.deinit(testing.io);
     try server.start(testing.io);
 
-    try expectSame(&backend, "/every", comptime value(Every, sample, false, "every"));
-    try expectSame(&backend, "/number", comptime value(f32, 1.5e-7, false, "number"));
-    try expectSame(&backend, "/list", comptime value([]const ?Priority, &.{ .low, null }, false, "list"));
+    try expectSame(&backend, "/every", comptime value(Every, sample, .output, "every"));
+    try expectSame(&backend, "/number", comptime value(f32, 1.5e-7, .output, "number"));
+    try expectSame(&backend, "/list", comptime value([]const ?Priority, &.{ .low, null }, .output, "list"));
     // The body of an error: no detail, no instance, no field of a violation.
-    try expectSame(&backend, "/missing", comptime value(Problem, not_found, true, "problem"));
+    try expectSame(&backend, "/missing", comptime value(Problem, not_found, .problem, "problem"));
 }
 
-test "value: the fields by their outside names; a problem leaves its null fields out" {
+test "value: the fields by their outside names; a problem leaves its null fields out, a request its comptime fields" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try compact(comptime value(Line, .{ .display_name = "a" }, false, "line"), &out.writer);
+    try compact(comptime value(Line, .{ .display_name = "a" }, .output, "line"), &out.writer);
     try testing.expectEqualStrings("{\"displayName\":\"a\",\"done\":false}", out.written());
     out.clearRetainingCapacity();
-    try compact(comptime value(Problem, not_found, true, "problem"), &out.writer);
+    try compact(comptime value(struct { comptime kind: []const u8 = "line", line: Line }, .{ .line = .{ .display_name = "a" } }, .input, "request"), &out.writer);
+    try testing.expectEqualStrings("{\"line\":{\"displayName\":\"a\",\"done\":false}}", out.written());
+    out.clearRetainingCapacity();
+    try compact(comptime value(Problem, not_found, .problem, "problem"), &out.writer);
     try testing.expectEqualStrings("{\"type\":\"about:blank\",\"title\":\"Not found\",\"status\":404,\"code\":\"todos.not_found\",\"errors\":[{\"code\":\"validation.min\",\"message\":\"must be at least 1\"}]}", out.written());
     out.clearRetainingCapacity();
-    try compact(comptime value(Problem, not_found, false, "problem"), &out.writer);
+    try compact(comptime value(Problem, not_found, .output, "problem"), &out.writer);
     try testing.expectEqualStrings("{\"type\":\"about:blank\",\"title\":\"Not found\",\"status\":404,\"detail\":null,\"instance\":null,\"code\":\"todos.not_found\",\"errors\":[{\"code\":\"validation.min\",\"message\":\"must be at least 1\",\"field\":null}]}", out.written());
 }

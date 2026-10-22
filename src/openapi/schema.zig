@@ -51,6 +51,16 @@ fn modeOf(comptime u: Use) Mode {
     };
 }
 
+/// How the examples and defaults of a schema in `mode` go: one written
+/// both ways shows them written with their nulls.
+fn wayOf(comptime mode: Mode) example.Way {
+    return switch (mode) {
+        .input => .input,
+        .output, .both => .output,
+        .problem => .problem,
+    };
+}
+
 /// The types of a document. `use` each type the document shows, `finish`
 /// once, then `schema` gives the schema of a use, and `components` the
 /// schemas of the named types.
@@ -378,7 +388,7 @@ pub const Registry = struct {
             .required = required,
             .properties = properties,
             .closed = mode == .input and policyOf(T, r) == .reject,
-            .examples = typeExamples(T, mode == .problem),
+            .examples = typeExamples(T, wayOf(mode)),
         };
     }
 
@@ -389,15 +399,15 @@ pub const Registry = struct {
         // null.
         const Value = if (mode == .problem and @typeInfo(F) == .optional) @typeInfo(F).optional.child else F;
         var p = typeParts(r, Value, mode, false, where, stack);
-        if (attrs.@"comptime") p.keywords = [_]json.Member{.{ .key = "const", .value = example.value(F, attrs.defaultValue(F).?, false, where) }} ++ p.keywords;
+        if (attrs.@"comptime") p.keywords = [_]json.Member{.{ .key = "const", .value = example.value(F, attrs.defaultValue(F).?, wayOf(mode), where) }} ++ p.keywords;
         const doc = fieldDocOf(T, name);
         if (doc.description) |text| p.description = &.{text};
         p = withRules(p, rulesOf(T, name));
         p.deprecated = doc.deprecated;
         if (mode == .input and !declarations.writesItself(F)) {
-            if (attrs.defaultValue(F)) |default| p.default = example.value(F, default, false, where);
+            if (attrs.defaultValue(F)) |default| p.default = example.value(F, default, .input, where);
         }
-        const examples = fieldExamples(T, name, mode == .problem);
+        const examples = fieldExamples(T, name, wayOf(mode));
         p.examples = (if (examples.example) |one| &[_]json.Node{one} else &[_]json.Node{}) ++ examples.examples;
         return p;
     }
@@ -411,7 +421,7 @@ pub const Registry = struct {
             const named = json.object(&.{ .{ .key = "type", .value = .{ .string = "string" } }, .{ .key = "enum", .value = .{ .array = names } } });
             const number = json.object(&.{.{ .key = "type", .value = .{ .string = "integer" } }});
             const ways: []const json.Node = if (nullable) &.{ named, number, null_schema } else &.{ named, number };
-            return .{ .kind = &.{.{ .key = "anyOf", .value = .{ .array = ways } }}, .description = typeTexts(T), .deprecated = typeDeprecated(T), .examples = typeExamples(T, false) };
+            return .{ .kind = &.{.{ .key = "anyOf", .value = .{ .array = ways } }}, .description = typeTexts(T), .deprecated = typeDeprecated(T), .examples = typeExamples(T, wayOf(mode)) };
         }
         if (nullable) names = names ++ [_]json.Node{.null};
         return .{
@@ -419,7 +429,7 @@ pub const Registry = struct {
             .description = typeTexts(T),
             .deprecated = typeDeprecated(T),
             .keywords = &.{.{ .key = "enum", .value = .{ .array = names } }},
-            .examples = typeExamples(T, false),
+            .examples = typeExamples(T, wayOf(mode)),
         };
     }
 
@@ -448,7 +458,7 @@ pub const Registry = struct {
             .kind = &.{.{ .key = "oneOf", .value = .{ .array = variants } }},
             .description = typeTexts(T),
             .deprecated = typeDeprecated(T),
-            .examples = typeExamples(T, mode == .problem),
+            .examples = typeExamples(T, wayOf(mode)),
         };
     }
 };
@@ -480,9 +490,9 @@ pub fn parameter(comptime Dto: type, comptime field: []const u8, comptime source
         p = withRules(p, rulesAs(Dto, field, Value));
         const attrs = fieldAttrs(Dto, field);
         if (attrs.defaultValue(F)) |default| {
-            if (@typeInfo(F) != .optional or default != null) p.default = example.value(F, default, false, where);
+            if (@typeInfo(F) != .optional or default != null) p.default = example.value(F, default, .input, where);
         }
-        const examples = fieldExamples(Dto, field, false);
+        const examples = fieldExamples(Dto, field, .input);
         p.examples = examples.examples;
         const doc = fieldDocOf(Dto, field);
         var description: []const []const u8 = if (doc.description) |text| &.{text} else &.{};
@@ -667,11 +677,10 @@ fn contains(comptime list: []const []const u8, comptime key: []const u8) bool {
 
 // ------------------------------------------------------------------ examples
 
-/// The `examples` of the schema of `T`: its `Doc(T).example`, written as
-/// the server writes it, inside an `http.Problem` with `problem`. Every
-/// example of a struct, those of `.examples` too, passes the rules of the
-/// struct, or the build stops.
-fn typeExamples(comptime T: type, comptime problem: bool) []const json.Node {
+/// The `examples` of the schema of `T`: its `Doc(T).example`, as it goes
+/// `way`. Every example of a struct, those of `.examples` too, passes the
+/// rules of the struct, or the build stops.
+fn typeExamples(comptime T: type, comptime way: example.Way) []const json.Node {
     const doc = docOf(T) orelse return &.{};
     if (!@hasField(@TypeOf(doc), "example")) return &.{};
     if (@typeInfo(T) == .@"struct") {
@@ -683,15 +692,15 @@ fn typeExamples(comptime T: type, comptime problem: bool) []const json.Node {
         }
     }
     const x = doc.example orelse return &.{};
-    return &.{example.value(T, x, problem, typeName(T) ++ ".openapi.example")};
+    return &.{example.value(T, x, way, typeName(T) ++ ".openapi.example")};
 }
 
 /// The examples of a field: its `.example` and its `.examples`.
 const FieldExamples = struct { example: ?json.Node = null, examples: []const json.Node = &.{} };
 
-/// The examples of the field `name` of `T`, written as the server writes
-/// them; each passes the rules of the field, or the build stops.
-fn fieldExamples(comptime T: type, comptime name: []const u8, comptime problem: bool) FieldExamples {
+/// The examples of the field `name` of `T`, as they go `way`; each passes
+/// the rules of the field, or the build stops.
+fn fieldExamples(comptime T: type, comptime name: []const u8, comptime way: example.Way) FieldExamples {
     const F = @FieldType(T, name);
     const doc = fieldDocOf(T, name);
     if (!@hasField(@TypeOf(doc), "example")) return .{};
@@ -699,12 +708,12 @@ fn fieldExamples(comptime T: type, comptime name: []const u8, comptime problem: 
     var out: FieldExamples = .{};
     if (doc.example) |x| {
         if (fieldExampleProblem(T, name, x, where ++ ".example")) |text| @compileError(text);
-        out.example = example.value(F, x, problem, where ++ ".example");
+        out.example = example.value(F, x, way, where ++ ".example");
     }
     for (doc.examples, 0..) |x, i| {
         const at = std.fmt.comptimePrint("{s}.examples[{d}]", .{ where, i });
         if (fieldExampleProblem(T, name, x, at)) |text| @compileError(text);
-        out.examples = out.examples ++ [_]json.Node{example.value(F, x, problem, at)};
+        out.examples = out.examples ++ [_]json.Node{example.value(F, x, way, at)};
     }
     return out;
 }

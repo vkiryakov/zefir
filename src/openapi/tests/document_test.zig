@@ -820,20 +820,33 @@ const bodies = struct {
 
     const LoginForm = struct { user: []const u8, password: []const u8 };
 
+    /// A constant in the JSON it writes, which a body it reads leaves out.
+    const Note = struct {
+        comptime kind: []const u8 = "note",
+        text: []const u8,
+
+        pub const openapi: Doc(@This()) = .{ .examples = &.{.{ .name = "short", .value = .{ .text = "Call back" } }} };
+    };
+
     const TodosController = struct {
         pub const http_routes = http.routes(.{ .prefix = "/todos", .methods = .{
             .create = http.post("", .{ .body = CreateTodoRequest, .responses = .{ .created = .{} } }),
             .login = http.post("/login", .{ .form = LoginForm, .responses = .{ .see_other = .{} } }),
+            .note = http.post("/notes", .{ .body = Note }),
         } });
         pub const openapi: ControllerDoc(@This()) = .{ .routes = .{
             .create = .{ .summary = "Create a todo" },
             .login = .{ .summary = "Sign in" },
+            .note = .{ .summary = "Add a note" },
         } };
 
         pub fn create(_: *TodosController, _: *http.Context) error{}!http.Json(TodoResponse) {
             return .{ .value = .{ .id = 1 }, .status = 201 };
         }
         pub fn login(_: *TodosController, _: *http.Context) error{}!void {}
+        pub fn note(_: *TodosController, _: *http.Context) error{}!http.Json(Note) {
+            return .{ .value = .{ .text = "Call back" } };
+        }
     };
 
     var controller: TodosController = .{};
@@ -849,6 +862,10 @@ test "request bodies: JSON and a form; the named examples of a body's type, on r
     try expectJson("{\"description\":\"Created\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/TodoResponse\"},\"examples\":{\"first\":{\"value\":{\"id\":1}}}}}}", comptime at(create, &.{ "responses", "201" }));
     try expectJson("{\"required\":true,\"content\":{\"application/x-www-form-urlencoded\":{\"schema\":{\"$ref\":\"#/components/schemas/LoginForm\"}}}}", comptime at(doc.root, &.{ "paths", "/todos/login", "post", "requestBody" }));
     try expectJson("{\"type\":\"object\",\"required\":[\"user\",\"password\"],\"properties\":{\"user\":{\"type\":\"string\"},\"password\":{\"type\":\"string\"}},\"additionalProperties\":false}", comptime at(doc.root, &.{ "components", "schemas", "LoginForm" }));
+    // A comptime field is in what the server writes, not in what it reads.
+    const note = comptime at(doc.root, &.{ "paths", "/todos/notes", "post" });
+    try expectJson("{\"short\":{\"value\":{\"text\":\"Call back\"}}}", comptime at(note, &.{ "requestBody", "content", "application/json", "examples" }));
+    try expectJson("{\"short\":{\"value\":{\"kind\":\"note\",\"text\":\"Call back\"}}}", comptime at(note, &.{ "responses", "200", "content", "application/json", "examples" }));
 }
 
 test "Document.write: the bytes of the file, laid out, a newline at the end" {
