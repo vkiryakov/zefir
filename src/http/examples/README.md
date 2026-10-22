@@ -2145,8 +2145,9 @@ response, a status or a body, and nothing after it runs. An error of `run`
 goes to the error handler. An element of a list of middleware is one of:
 
 - a function: a `run` alone, such as `mw.requestId`;
-- a type with any of the phases as `pub fn`, and a `pub const name` for the
-  log and the messages of the build, such as `auth.requirePermission("todos")`;
+- a type with any of the phases as `pub fn`, such as `auth.requireUser`, and
+  a `pub const name` for the log and the messages of the build, if its own
+  name will not do, such as `auth.requirePermission("todos")`;
 - `http.onResponse(f)` and `http.onFinish(f)`, which make a phase of a
   function;
 - an object of the application with any of the phases: in the server's
