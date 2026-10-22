@@ -26,7 +26,7 @@ set -eu
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats orm mongo nats http openapi zefir"
+modules="core log confy validator rpc rpc-nats orm mongo nats http jwt openapi zefir"
 imports() {
     case $1 in
     core) ;;
@@ -53,10 +53,14 @@ imports() {
     # http imports core and validator; the examples of its guide read
     # their settings with confy and log with log.
     http) echo core validator confy log ;;
+    # jwt imports validator alone; the examples of its guide, an http
+    # middleware and an rpc authenticator, also import core, confy, log,
+    # http and rpc.
+    jwt) echo validator core confy log http rpc ;;
     # openapi reads the server through http and the rules through the
     # validator.
     openapi) echo http validator ;;
-    zefir) echo core log confy validator rpc rpc-nats orm mongo nats http openapi ;;
+    zefir) echo core log confy validator rpc rpc-nats orm mongo nats http jwt openapi ;;
     esac
 }
 

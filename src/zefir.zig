@@ -10,6 +10,7 @@ pub const orm = @import("orm");
 pub const mongo = @import("mongo");
 pub const nats = @import("nats");
 pub const http = @import("http");
+pub const jwt = @import("jwt");
 pub const openapi = @import("openapi");
 
 test {
@@ -38,4 +39,21 @@ test "zefir.log writes a confy.Secret as one [REDACTED], wherever it sits" {
     try std.testing.expectStringEndsWith(out.written(), ",\"config\":{\"host\":\"db\",\"password\":\"[REDACTED]\",\"tokens\":\"[REDACTED]\"," ++
         "\"backup\":\"[REDACTED]\",\"db\":{\"key\":\"[REDACTED]\"}},\"direct\":\"[REDACTED]\"}\n");
     comptime std.debug.assert(log.isSensitive(confy.Secret));
+}
+
+test "zefir.log writes a jwt.Key and a jwt.SigningKey as [REDACTED]" {
+    const std = @import("std");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const logger: log.Logger = try .init(std.testing.allocator, std.testing.io, .{ .output = .{ .writer = &out.writer } });
+    defer logger.deinit();
+    var signing_key: jwt.SigningKey = try .hmac(.HS256, "SECRET-SECRET-SECRET-SECRET-SECRET!", .{ .id = "2026-10" });
+    defer signing_key.deinit();
+    var key = signing_key.verificationKey();
+    defer key.deinit();
+    logger.info("Keys", .{ .key = key, .signing_key = signing_key });
+    try std.testing.expect(std.mem.find(u8, out.written(), "SECRET") == null);
+    try std.testing.expectStringEndsWith(out.written(), ",\"key\":\"[REDACTED]\",\"signing_key\":\"[REDACTED]\"}\n");
+    comptime std.debug.assert(log.isSensitive(jwt.Key));
+    comptime std.debug.assert(log.isSensitive(jwt.SigningKey));
 }
