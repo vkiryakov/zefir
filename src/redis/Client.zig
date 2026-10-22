@@ -167,7 +167,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
 }
 
 /// Closes the client, if `close` has not, and frees it: the copies of the
-/// URL and of the password wiped. Release every Conn and close every
+/// URL and of the password wiped. Release every Conn and deinit every
 /// Subscriber first.
 pub fn deinit(c: *Client) void {
     calls.checkHome(c);
@@ -175,7 +175,7 @@ pub fn deinit(c: *Client) void {
         @panic("zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client");
     }
     if (std.debug.runtime_safety and !c.subscribers.isEmpty(c.io)) {
-        @panic("zefir-redis: Client.deinit() with a Subscriber open: close every Subscriber before the client");
+        @panic("zefir-redis: Client.deinit() with a Subscriber left: deinit every Subscriber before the client");
     }
     c.close(c.io);
     c.pool.deinit();
@@ -201,7 +201,7 @@ pub fn connect(c: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnostics
 }
 
 /// Ends the client's work, in this order: the subscribers end, and their
-/// `next` returns null, while their memory waits for their own `close`;
+/// `next` returns null, while their memory waits for their `deinit`;
 /// new calls, and those waiting for a connection, get `error.Closed`;
 /// connections being opened stop; the calls in flight and the Conns given
 /// out get up to `close_timeout` to end, a Conn by its release, and after
@@ -381,10 +381,10 @@ pub fn acquire(c: *Client, io: Io, op: OperationContext) Error!Conn {
 ///
 /// ```zig
 /// var sub = try client.subscribe(io, op, .{ .channels = &.{"orders"} });
-/// defer sub.close(io);
+/// defer sub.deinit();
 /// ```
 pub fn subscribe(c: *Client, io: Io, op: OperationContext, options: requests.SubscribeOptions) Error!Subscriber {
-    return .{ .client = c, .state = .init(try subscription.subscribe(c, io, op, options)) };
+    return .{ .client = c, .state = try subscription.subscribe(c, io, op, options) };
 }
 
 fn opener(c: *Client) Pool.Opener {

@@ -1984,9 +1984,10 @@ pub fn main(init: std.process.Init) !void {
 
     // The listener: a channel by its name, and channels by a pattern. It
     // has a connection of its own, and subscribe returns once the server
-    // confirmed each name. It must stay where it is until close.
+    // confirmed each name. It must stay where it is until its deinit,
+    // which comes once the listener is done.
     var sub = try client.subscribe(io, op, .{ .channels = &.{"orders:ready"}, .patterns = &.{"offers:*"} });
-    defer sub.close(io);
+    defer sub.deinit();
     app.info("Subscribed", .{ .subscribers = client.stats().subscribers });
     var heard_all: std.Io.Event = .unset;
     var listener = try io.concurrent(listen, .{ io, &sub, app, &heard_all });
@@ -2049,9 +2050,13 @@ $ zig build run
   `pattern` is the pattern it matched, null for a channel subscribed by its
   name.
 - **`close(io)`** may come from any task: the `next` that waits in another
-  task returns null, and `close` frees the subscriber once it has. The
-  client's `close` ends every subscriber the same way, and their own
-  `close` then frees them.
+  task returns null, and so does every later one, and `close` returns once
+  it has, and closes the connection. A message that the listener holds
+  meanwhile stays as it came until its next `next`. The client's `close`
+  ends every subscriber the same way.
+- **`deinit()`** frees the subscriber, and closes it first if nobody has.
+  It comes once nothing reads the subscriber: after the task that listens,
+  as `listener` above, has been awaited, and before the client's `deinit`.
 - **The channels stay as they were made.** To change them, close the
   subscriber and subscribe again.
 - **Silence.** After `idle_ping` without a word from the server, 15 s by
@@ -2534,7 +2539,7 @@ command has not gone out, so nothing ran.
 
 A second `close` waits for the first. `deinit` closes the client if
 `close` has not, and frees it, wiping its copy of the password. Release
-every Conn and close every subscriber before `deinit`: in safe builds a
+every Conn and deinit every subscriber before `deinit`: in safe builds a
 Conn or a subscriber left panics, and so do a client moved after
 `connect`, a call on another `std.Io` than the one of `init`, and a Conn,
 an iterator or a subscriber called from two tasks at once.

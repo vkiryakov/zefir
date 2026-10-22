@@ -56,7 +56,7 @@ fn messages(io: Io) !void {
     try s.open(io);
     defer s.close();
     var sub = try subscribed(io, &s.client, .{ .channels = &.{"e2e:pubsub:orders"}, .patterns = &.{"e2e:pubsub:events.*"} });
-    defer sub.close(io);
+    defer sub.deinit();
     try testing.expectEqual(@as(usize, 1), s.client.stats().subscribers);
 
     try testing.expectEqual(@as(u64, 1), try s.run(cmd.publish("e2e:pubsub:orders", "new")));
@@ -96,7 +96,7 @@ fn slow(io: Io) !void {
     // The limit of Redis and Valkey.
     defer outputLimit(io, &client, "pubsub 32mb 8mb 60") catch {};
     var sub = try subscribed(io, &client, .{ .channels = &.{"e2e:pubsub:slow"} });
-    defer sub.close(io);
+    defer sub.deinit();
 
     // 64 MiB while the subscriber reads nothing: far more than the sockets
     // between them hold, the ports of docker included, so the server keeps
@@ -149,7 +149,7 @@ fn paused(io: Io) !void {
     try connectedTo(io, &client, e2e.servers.stall_port, &buffer);
     defer client.deinit();
     var sub = try subscribed(io, &client, .{ .channels = &.{"e2e:pubsub:stall"}, .idle_ping = .fromMilliseconds(500) });
-    defer sub.close(io);
+    defer sub.deinit();
 
     try e2e.docker(&.{ "pause", e2e.servers.stall_container });
     defer e2e.unpause(e2e.servers.stall_container) catch {};
@@ -175,7 +175,7 @@ fn restarted(io: Io) !void {
     // A short idle_ping, should the end of the stream not come through the
     // ports of docker: the PING finds the connection gone.
     var sub = try subscribed(io, &client, .{ .channels = &.{"e2e:pubsub:restart"}, .idle_ping = .fromSeconds(1) });
-    defer sub.close(io);
+    defer sub.deinit();
 
     try e2e.restart(e2e.servers.restart_container);
     try testing.expectError(error.ConnectionLost, sub.next(io));
@@ -196,7 +196,7 @@ fn clientCloses(io: Io) !void {
     try s.open(io);
     defer s.close();
     var sub = try subscribed(io, &s.client, .{ .channels = &.{"e2e:pubsub:close"} });
-    defer sub.close(io);
+    defer sub.deinit();
     var reading = try io.concurrent(nextOf, .{ &sub, io });
     defer if (reading.cancel(io)) |_| {} else |_| {};
     // Long enough for next to wait on the socket.

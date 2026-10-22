@@ -38,7 +38,8 @@ pub const State = struct {
     /// In the client's `Registry`.
     node: List.Node = .{},
     gpa: Allocator,
-    /// The connection, once its handshake is done; `destroy` closes it.
+    /// The connection, once its handshake is done; the subscriber's
+    /// `close` closes it, else `destroy` does.
     conn: ?*Connection = null,
     /// The opening of the connection, for an end to stop.
     attempt: connect_.Attempt = .{},
@@ -55,7 +56,7 @@ pub const State = struct {
     early_bytes: std.ArrayList(u8) = .empty,
     early_given: usize = 0,
     /// The bytes of the message that `next` gave last, which live until
-    /// the next call.
+    /// the next call, or until `destroy` when no call comes.
     buffer: std.ArrayList(u8) = .empty,
     /// How many of the subscriber's PINGs have their reply still to come.
     pongs_due: u32 = 0,
@@ -181,7 +182,7 @@ pub const State = struct {
 };
 
 /// The subscribers of a client, each from the start of its `subscribe`
-/// until its `close`, for the client's `close` to end them.
+/// until its `deinit`, for the client's `close` to end them.
 pub const Registry = struct {
     mutex: Io.Mutex = .init,
     list: List = .{},
@@ -216,6 +217,28 @@ pub const Registry = struct {
         r.open += 1;
     }
 
+    /// Ends `state` for the subscriber's own `close`, which no longer
+    /// counts it as open.
+    pub fn end(r: *Registry, io: Io, state: *State) void {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        if (state.counted) {
+            state.counted = false;
+            r.open -= 1;
+        }
+        state.end(io);
+    }
+
+    /// Takes the connection of `state`, ended, for `close` to close it: no
+    /// end cuts it after this.
+    pub fn disconnect(r: *Registry, io: Io, state: *State) ?*Connection {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        const conn = state.conn;
+        state.conn = null;
+        return conn;
+    }
+
     /// Unregisters `state`, which is about to be freed, and ends it.
     pub fn remove(r: *Registry, io: Io, state: *State) void {
         r.mutex.lockUncancelable(io);
@@ -226,7 +249,7 @@ pub const Registry = struct {
     }
 
     /// For the client's `close`: no subscriber comes after it, and every
-    /// one ends. Their memory stays theirs until their `close`.
+    /// one ends. Their memory stays theirs until their `deinit`.
     pub fn closeAll(r: *Registry, io: Io) void {
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
@@ -245,8 +268,8 @@ pub const Registry = struct {
         return r.list.first == null;
     }
 
-    /// How many subscribers `subscribe` returned and `close` has not
-    /// freed.
+    /// How many subscribers `subscribe` returned and their `close` has not
+    /// ended.
     pub fn count(r: *Registry, io: Io) usize {
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);

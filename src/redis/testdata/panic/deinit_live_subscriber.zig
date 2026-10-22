@@ -1,7 +1,7 @@
 //! Debug build: `Client.deinit` while a `redis.Subscriber` of the client is
-//! open panics: every subscriber is closed before the client. build.zig
-//! runs this program and checks the panic message on stderr and the exit
-//! code 3 of the panic handler below.
+//! left panics: every subscriber is freed by its `deinit` before the
+//! client. build.zig runs this program and checks the panic message on
+//! stderr and the exit code 3 of the panic handler below.
 const std = @import("std");
 const redis = @import("redis");
 
@@ -24,6 +24,6 @@ pub fn main(init: std.process.Init) !void {
     const sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
     _ = sub;
 
-    // The mistake: the client goes before its Subscriber is closed.
+    // The mistake: the client goes before its Subscriber's deinit.
     client.deinit();
 }

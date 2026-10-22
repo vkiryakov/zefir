@@ -120,7 +120,7 @@ fn shutdownIdle(io: Io) !void {
     defer client.deinit();
     try client.start(io);
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
-    defer sub.close(io);
+    defer sub.deinit();
     var reading = try io.concurrent(nextOf, .{ &sub, io });
     defer if (reading.cancel(io)) |_| {} else |_| {};
     try redis.testing.sleepAtLeast(io, .fromMilliseconds(50));

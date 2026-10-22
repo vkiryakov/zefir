@@ -76,7 +76,7 @@ fn hundredThousand(io: Io) !void {
             std.debug.print("  subscribe: {t}: {s}\n", .{ err, d.message() });
             return err;
         };
-        defer sub.close(io);
+        defer sub.deinit();
         var reading: Reading = .{ .sub = &sub };
         var reader = try io.concurrent(Reading.run, .{ &reading, io });
         defer if (reader.cancel(io)) |_| {} else |_| {};

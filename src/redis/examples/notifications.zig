@@ -57,9 +57,10 @@ pub fn main(init: std.process.Init) !void {
 
     // The listener: a channel by its name, and channels by a pattern. It
     // has a connection of its own, and subscribe returns once the server
-    // confirmed each name. It must stay where it is until close.
+    // confirmed each name. It must stay where it is until its deinit,
+    // which comes once the listener is done.
     var sub = try client.subscribe(io, op, .{ .channels = &.{"orders:ready"}, .patterns = &.{"offers:*"} });
-    defer sub.close(io);
+    defer sub.deinit();
     app.info("Subscribed", .{ .subscribers = client.stats().subscribers });
     var heard_all: std.Io.Event = .unset;
     var listener = try io.concurrent(listen, .{ io, &sub, app, &heard_all });

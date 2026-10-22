@@ -448,7 +448,7 @@ pub fn build(b: *std.Build) void {
         .{ "deinit_live_conn", "panic: zefir-redis: Client.deinit() with a Conn not released: release every Conn before the client" },
         .{ "iterator_two_tasks", "panic: zefir-redis: an Iterator used by two tasks at once: one task at a time calls next" },
         .{ "subscriber_two_tasks", "panic: zefir-redis: a Subscriber used by two tasks at once: one task at a time calls next" },
-        .{ "deinit_live_subscriber", "panic: zefir-redis: Client.deinit() with a Subscriber open: close every Subscriber before the client" },
+        .{ "deinit_live_subscriber", "panic: zefir-redis: Client.deinit() with a Subscriber left: deinit every Subscriber before the client" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("redis-panic-{s}", .{case[0]}),

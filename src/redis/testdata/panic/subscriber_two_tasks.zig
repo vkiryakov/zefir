@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     // A short idle_ping: the first next sends PING soon, and goes on
     // waiting after its +PONG.
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromMilliseconds(20) });
-    defer sub.close(io);
+    defer sub.deinit();
     var call = try io.concurrent(first, .{ io, &sub });
     defer call.cancel(io);
     // Once the server has the PING, the first next waits in its loop.

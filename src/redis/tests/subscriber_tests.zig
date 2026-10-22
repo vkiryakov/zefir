@@ -5,7 +5,8 @@
 //! `next`, of channels and of patterns, binary and larger than the read
 //! buffer, the PING of a silent connection, and how a subscriber ends: a
 //! server that stops answering or closes, a message too large, a canceled
-//! task; `close` from another task and the client's `close`. The waits of
+//! task; `close` from another task, also while the reading task holds a
+//! message, which stays as it came, and the client's `close`. The waits of
 //! `next` run on the `Io` of `windows_like_io.zig` too, which cannot time a
 //! read and where a shutdown of a socket does not end the read that waits
 //! on it. Every test runs under a time limit of 5 s.
@@ -53,7 +54,7 @@ fn subscribes(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{ "orders", "news" }, .patterns = &.{"events.*"} });
-    defer sub.close(io);
+    defer sub.deinit();
     const stats = client.stats();
     try testing.expectEqual(@as(usize, 1), stats.subscribers);
     try testing.expectEqual(@as(usize, 1), stats.connections);
@@ -79,9 +80,9 @@ fn oneList(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var channels = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
-    defer channels.close(io);
+    defer channels.deinit();
     var patterns = try client.subscribe(io, .of(.root), .{ .patterns = &.{"events.*"} });
-    defer patterns.close(io);
+    defer patterns.deinit();
     try testing.expectEqual(@as(usize, 2), server.received(io));
     try testing.expectEqual(@as(u32, 2), (try server.entry(io, 0)).connection);
     try testing.expectEqual(@as(u32, 3), (try server.entry(io, 1)).connection);
@@ -89,12 +90,12 @@ fn oneList(io: Io) !void {
 }
 
 /// Expects `result` of a subscribe to be the error `expected`. A
-/// subscriber that came instead is closed: the client must not go with a
-/// subscriber open.
-fn expectRefused(io: Io, expected: redis.Error, result: redis.Error!redis.Subscriber) !void {
+/// subscriber that came instead is freed: the client must not go with a
+/// subscriber left.
+fn expectRefused(expected: redis.Error, result: redis.Error!redis.Subscriber) !void {
     if (result) |sub| {
         var left = sub;
-        left.close(io);
+        left.deinit();
         std.debug.print("expected error.{t}, found a subscriber\n", .{expected});
         return error.TestExpectedError;
     } else |err| try testing.expectEqual(expected, err);
@@ -106,8 +107,8 @@ fn subscribeTo(client: *Client, io: Io, options: redis.SubscribeOptions) redis.E
 }
 
 /// A subscribe in a task of its own, which the test awaits once. If the
-/// test fails first, `abandon` cancels it and closes the subscriber it may
-/// have made: a client must not go with a subscriber open.
+/// test fails first, `abandon` cancels it and frees the subscriber it may
+/// have made: a client must not go with a subscriber left.
 const Subscribing = struct {
     future: Io.Future(redis.Error!redis.Subscriber),
     awaited: bool = false,
@@ -125,7 +126,7 @@ const Subscribing = struct {
         if (s.awaited) return;
         if (s.future.cancel(io)) |sub| {
             var left = sub;
-            left.close(io);
+            left.deinit();
         } else |_| {}
     }
 };
@@ -160,7 +161,7 @@ fn oneWrite(io: Io) !void {
     try peers.expectCommand(&peer, &.{ "PSUBSCRIBE", "events.*" });
     try peer.send(">3\r\n$9\r\nsubscribe\r\n$6\r\norders\r\n:1\r\n>3\r\n$10\r\npsubscribe\r\n$8\r\nevents.*\r\n:2\r\n");
     var sub = try subscribing.await(io);
-    defer sub.close(io);
+    defer sub.deinit();
     try testing.expectEqual(@as(usize, 1), client.stats().subscribers);
 }
 
@@ -181,7 +182,7 @@ fn refusedChannel(io: Io) !void {
     try peers.shakeHands(&peer, io, .zero);
     try peers.expectCommand(&peer, &.{ "SUBSCRIBE", "news" });
     try peer.send("-NOPERM User default has no permissions to access the 'news' channel\r\n");
-    try expectRefused(io, error.ServerError, subscribing.await(io));
+    try expectRefused(error.ServerError, subscribing.await(io));
     try testing.expect(d.isCode("NOPERM"));
     try testing.expectEqualStrings("NOPERM User default has no permissions to access the 'news' channel", d.message());
     // The client closed the connection: the peer reads its end.
@@ -203,7 +204,7 @@ fn lateConfirmation(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
-    try expectRefused(io, error.Timeout, client.subscribe(io, within(io, .fromMilliseconds(150)), .{ .channels = &.{"orders"}, .diagnostics = &d }));
+    try expectRefused(error.Timeout, client.subscribe(io, within(io, .fromMilliseconds(150)), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     try testing.expectEqualStrings("the deadline passed before the server confirmed the subscription", d.message());
     try testing.expectEqual(@as(usize, 0), client.stats().subscribers);
 }
@@ -218,20 +219,20 @@ fn refusedAtOnce(io: Io) !void {
     var client: Client = try .init(testing.allocator, io, .{ .url = server.url() });
     defer client.deinit();
     var d: Diagnostics = .{};
-    try expectRefused(io, error.Unavailable, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
+    try expectRefused(error.Unavailable, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     try testing.expectEqualStrings("connect() has not succeeded", d.message());
     try client.connect(io, .root, null);
-    try expectRefused(io, error.InvalidArgument, client.subscribe(io, .of(.root), .{ .diagnostics = &d }));
+    try expectRefused(error.InvalidArgument, client.subscribe(io, .of(.root), .{ .diagnostics = &d }));
     try testing.expectEqualStrings("redis.Client.subscribe: no channels and no patterns: give one or more", d.message());
-    try expectRefused(io, error.InvalidArgument, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromMicroseconds(500), .diagnostics = &d }));
+    try expectRefused(error.InvalidArgument, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromMicroseconds(500), .diagnostics = &d }));
     try testing.expectEqualStrings("redis.Client.subscribe: .idle_ping is under 1 ms: give 1 ms or more", d.message());
-    try expectRefused(io, error.InvalidArgument, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromSeconds(-1), .diagnostics = &d }));
+    try expectRefused(error.InvalidArgument, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromSeconds(-1), .diagnostics = &d }));
     try testing.expectEqualStrings("redis.Client.subscribe: .idle_ping is under 1 ms: give 1 ms or more", d.message());
-    try expectRefused(io, error.InvalidArgument, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .max, .diagnostics = &d }));
+    try expectRefused(error.InvalidArgument, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .max, .diagnostics = &d }));
     try testing.expectEqualStrings("redis.Client.subscribe: .idle_ping is longer than 9223372036854775807 ms, the most the client counts", d.message());
-    try expectRefused(io, error.DeadlineExceeded, client.subscribe(io, within(io, .zero), .{ .channels = &.{"orders"}, .diagnostics = &d }));
+    try expectRefused(error.DeadlineExceeded, client.subscribe(io, within(io, .zero), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     client.close(io);
-    try expectRefused(io, error.Closed, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
+    try expectRefused(error.Closed, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     try testing.expectEqualStrings("the client is closed", d.message());
     try testing.expectEqual(@as(usize, 0), server.received(io));
 }
@@ -282,7 +283,7 @@ fn messages(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .patterns = &.{"events.*"} });
-    defer sub.close(io);
+    defer sub.deinit();
     try expectMessage(.{ .channel = "orders", .payload = "new" }, try sub.next(io));
     try expectMessage(.{ .channel = "events.new", .payload = "x", .pattern = "events.*" }, try sub.next(io));
     try expectMessage(.{ .channel = "orders", .payload = "a\r\nb\x00c" }, try sub.next(io));
@@ -309,7 +310,7 @@ fn between(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .patterns = &.{"events.*"} });
-    defer sub.close(io);
+    defer sub.deinit();
     try expectMessage(.{ .channel = "orders", .payload = "early" }, try sub.next(io));
     try expectMessage(.{ .channel = "orders", .payload = "later" }, try sub.next(io));
     try server.finish(io);
@@ -349,7 +350,7 @@ fn pings(io: Io) !void {
     var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
     defer client.deinit();
     var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
-    defer sub.close(io);
+    defer sub.deinit();
 
     const start = time.now(io);
     var reading = try io.concurrent(nextOf, .{ &sub, io });
@@ -379,7 +380,7 @@ fn deaf(io: Io) !void {
     var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
     defer client.deinit();
     var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
-    defer sub.close(io);
+    defer sub.deinit();
 
     const start = time.now(io);
     var reading = try io.concurrent(nextOf, .{ &sub, io });
@@ -409,7 +410,7 @@ fn halves(io: Io) !void {
     // loaded machine may run the peer's second send long after its 50 ms:
     // idle_ping is far longer than the pause.
     var sub = try subscribeThrough(io, &peer, &client, .fromSeconds(1));
-    defer sub.close(io);
+    defer sub.deinit();
 
     var reading = try io.concurrent(nextOf, .{ &sub, io });
     defer stopReading(&reading, io);
@@ -437,7 +438,7 @@ fn closedByServer(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
-    defer sub.close(io);
+    defer sub.deinit();
     try expectMessage(.{ .channel = "orders", .payload = "last" }, try sub.next(io));
     try testing.expectError(error.ConnectionLost, sub.next(io));
     try testing.expect(std.mem.indexOf(u8, sub.diagnostics().message(), "closed the connection, as a server does to a subscriber that falls behind its messages") != null);
@@ -468,13 +469,13 @@ fn broken(io: Io) !void {
     defer client.deinit();
 
     var orders = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
-    defer orders.close(io);
+    defer orders.deinit();
     try testing.expectError(error.ReplyTooLarge, orders.next(io));
     try testing.expectEqualStrings("a message is larger than max_reply_bytes (65536) or nests deeper than 64 levels", orders.diagnostics().message());
     try testing.expectError(error.Closed, orders.next(io));
 
     var news = try client.subscribe(io, .of(.root), .{ .channels = &.{"news"} });
-    defer news.close(io);
+    defer news.deinit();
     try testing.expectError(error.ProtocolViolation, news.next(io));
     try testing.expectEqualStrings("the server sent a reply that the subscriber did not ask for", news.diagnostics().message());
     try testing.expectError(error.Closed, news.next(io));
@@ -500,7 +501,7 @@ fn canceled(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
-    defer sub.close(io);
+    defer sub.deinit();
     var reading = try io.concurrent(nextCanceled, .{ &sub, io });
     defer reading.cancel(io) catch {};
     // Long enough for next to wait on the socket.
@@ -525,7 +526,7 @@ fn closeWhileWaiting(io: Io) !void {
     // An idle_ping far beyond what the test waits: the cut wakes next, not
     // its PING.
     var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .idle_ping = .fromSeconds(3) });
-    defer sub.close(io);
+    defer sub.deinit();
     var reading = try io.concurrent(nextOf, .{ &sub, io });
     defer stopReading(&reading, io);
     // Long enough for next to wait on the socket.
@@ -540,7 +541,111 @@ fn closeWhileWaiting(io: Io) !void {
     try server.finish(testing.io);
 }
 
-test "the client's close ends every subscriber: next returns null, the subscriber's close frees it after, and subscribe is Closed" {
+/// An allocator for the client that keeps what it frees: a freed block is
+/// filled with 0xAA and kept until `deinit`, so that a read after a free
+/// sees 0xAA, where it would crash with the block returned to the system.
+const Quarantine = struct {
+    child: std.mem.Allocator,
+    /// For the lock: tasks of the client free from other threads.
+    io: Io,
+    mutex: Io.Mutex = .init,
+    kept: std.ArrayList(Block) = .empty,
+
+    const Block = struct { memory: []u8, alignment: std.mem.Alignment };
+
+    fn allocator(q: *Quarantine) std.mem.Allocator {
+        return .{ .ptr = q, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const q: *Quarantine = @ptrCast(@alignCast(context));
+        return q.child.rawAlloc(len, alignment, ret_addr);
+    }
+
+    /// No block changes in place: one that grows or shrinks moves, and its
+    /// old place goes through `free`.
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const q: *Quarantine = @ptrCast(@alignCast(context));
+        @memset(memory, 0xAA);
+        q.mutex.lockUncancelable(q.io);
+        defer q.mutex.unlock(q.io);
+        q.kept.append(q.child, .{ .memory = memory, .alignment = alignment }) catch q.child.rawFree(memory, alignment, ret_addr);
+    }
+
+    fn deinit(q: *Quarantine) void {
+        for (q.kept.items) |block| q.child.rawFree(block.memory, block.alignment, @returnAddress());
+        q.kept.deinit(q.child);
+    }
+};
+
+/// Takes the next message of `sub`, sets `holding`, and once `go` is set,
+/// checks that the message is still as it came, and that the `next` after
+/// it returns null.
+fn holdMessage(sub: *redis.Subscriber, io: Io, holding: *Io.Event, go: *Io.Event, expected: redis.Subscriber.Message) !void {
+    const message = (try sub.next(io)) orelse return error.TestExpectedMessage;
+    holding.set(io);
+    try go.wait(io);
+    try expectMessage(expected, message);
+    try testing.expectEqual(@as(?redis.Subscriber.Message, null), try sub.next(io));
+}
+
+/// `steps` give the subscriber of `options` one message, `expected`, which
+/// the reading task holds while this task closes the subscriber. The
+/// client's memory is a quarantine: had close freed the message, it would
+/// read as 0xAA.
+fn closeWhileHeld(io: Io, steps: []const FakeServer.Step, options: redis.SubscribeOptions, expected: redis.Subscriber.Message) !void {
+    var quarantine: Quarantine = .{ .child = testing.allocator, .io = io };
+    defer quarantine.deinit();
+    var server: FakeServer = try .start(testing.allocator, io, steps);
+    defer server.stop(io);
+    var client: Client = try .init(quarantine.allocator(), io, .{ .url = server.url() });
+    defer client.deinit();
+    try client.connect(io, .root, null);
+    var sub = try client.subscribe(io, .of(.root), options);
+    defer sub.deinit();
+    var holding: Io.Event = .unset;
+    var go: Io.Event = .unset;
+    var reading = try io.concurrent(holdMessage, .{ &sub, io, &holding, &go, expected });
+    defer reading.cancel(io) catch {};
+    try holding.wait(io);
+    sub.close(io);
+    go.set(io);
+    try reading.await(io);
+    try server.finish(io);
+}
+
+test "a message that the reading task holds while another task closes the subscriber stays as it came until its next next, which returns null" {
+    try within5s(testing.io, heldMessage, .{testing.io});
+}
+
+fn heldMessage(io: Io) !void {
+    try closeWhileHeld(io, &.{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .send(.message("orders", "order 1001 is packed")),
+    }, .{ .channels = &.{"orders"} }, .{ .channel = "orders", .payload = "order 1001 is packed" });
+}
+
+test "a message that came between the confirmations, held by the reading task while another task closes the subscriber, stays as it came too" {
+    try within5s(testing.io, heldEarlyMessage, .{testing.io});
+}
+
+fn heldEarlyMessage(io: Io) !void {
+    try closeWhileHeld(io, &.{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .send(.message("orders", "early")),
+        .expect(.{ "PSUBSCRIBE", "events.*" }, psubscribed),
+    }, .{ .channels = &.{"orders"}, .patterns = &.{"events.*"} }, .{ .channel = "orders", .payload = "early" });
+}
+
+test "the client's close ends every subscriber: next returns null, stats count each until its own close, and subscribe is Closed" {
     try within5s(testing.io, clientCloses, .{testing.io});
 }
 
@@ -554,9 +659,9 @@ fn clientCloses(io: Io) !void {
     try connected(io, &client, .{ .url = server.url() });
     defer client.deinit();
     var orders = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
-    defer orders.close(io);
+    defer orders.deinit();
     var news = try client.subscribe(io, .of(.root), .{ .channels = &.{"news"} });
-    defer news.close(io);
+    defer news.deinit();
     var reading = try io.concurrent(nextOf, .{ &orders, io });
     defer stopReading(&reading, io);
     try redis.testing.sleepAtLeast(io, .fromMilliseconds(100));
@@ -565,13 +670,14 @@ fn clientCloses(io: Io) !void {
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1000);
     try testing.expectEqual(@as(?redis.Subscriber.Message, null), try reading.await(io));
     try testing.expectEqual(@as(?redis.Subscriber.Message, null), try news.next(io));
-    // Their memory is theirs until their close.
+    // They count until their own close, and their memory is theirs until
+    // their deinit.
     try testing.expectEqual(@as(usize, 2), client.stats().subscribers);
     orders.close(io);
     news.close(io);
     try testing.expectEqual(@as(usize, 0), client.stats().subscribers);
     var d: Diagnostics = .{};
-    try expectRefused(io, error.Closed, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
+    try expectRefused(error.Closed, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     try server.finish(io);
 }
 
@@ -597,7 +703,7 @@ fn closeWhileSubscribing(io: Io) !void {
     }
     const start = time.now(io);
     client.close(io);
-    try expectRefused(io, error.Closed, subscribing.await(io));
+    try expectRefused(error.Closed, subscribing.await(io));
     try testing.expect(start.durationTo(time.now(io)).toMilliseconds() < 1000);
     try testing.expectEqualStrings("the client was closed while it subscribed", d.message());
     try testing.expectEqual(@as(usize, 0), client.stats().subscribers);
