@@ -1420,7 +1420,7 @@ document with its file, as `service_test.zig` does:
   on Windows.
 - **Another file fails the test** with the first line that differs, its
   number and both texts, and
-  `error: openapi.json is out of date; run `zig build openapi``.
+  ``error: openapi.json is out of date; run `zig build openapi` ``.
 - **With `ZEFIR_OPENAPI_UPDATE=1`** in its environment it writes the file
   instead: that is `zig build openapi`.
 
