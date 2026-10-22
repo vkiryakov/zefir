@@ -2759,7 +2759,8 @@ holds in full:
     every cursor of the client.
 11. The errors are those of `odm.DriverError`, and no text holds a
     password.
-12. Nothing is sent twice: odm decides on retries, never the driver.
+12. Nothing is sent twice: whether to retry is for the application to
+    decide, by `odm.outcome`.
 13. The capabilities are exactly the optional methods that the client
     has.
 
