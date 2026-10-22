@@ -9,6 +9,7 @@ pub const rpc_nats = @import("rpc-nats");
 pub const mongo_bson = @import("mongo-bson");
 pub const odm = @import("odm");
 pub const mongo = @import("mongo");
+pub const redis = @import("redis");
 pub const nats = @import("nats");
 pub const http = @import("http");
 pub const jwt = @import("jwt");
