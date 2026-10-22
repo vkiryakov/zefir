@@ -246,7 +246,8 @@ jobs:
 
   # The end-to-end tests of odm against mongod in Docker: the conformance
   # suite on mongo.OdmDriver and the registry on mongo-plain and
-  # mongo-auth; ubuntu only, as mongo-e2e. One server version: mongo-e2e
+  # mongo-auth, then the programs of its guide, checked against the guide;
+  # ubuntu only, as mongo-e2e. One server version: mongo-e2e
   # runs the driver on each, and odm does not depend on it. It is not a
   # required check. It runs when odm or mongo is among the modules to
   # test, as tests/odm stands on both. The stress tests of tests/odm run on

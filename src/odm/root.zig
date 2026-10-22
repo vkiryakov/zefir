@@ -34,6 +34,12 @@
 //!    way, and the same event again changes nothing.
 //! 5. Shutdown: `shutdown(io, deadline)` closes everything by the
 //!    deadline, then `deinit(io)` frees it.
+//!
+//! The guide, src/odm/examples/README.md, starts with what is not in v1,
+//! and goes from models and queries to tenants, credentials rotated on the
+//! fly, errors, shutdown, security, tests on `odm.testing.FakeDriver` and
+//! the conformance suite for authors of drivers, with programs that run
+//! against mongod.
 
 const std = @import("std");
 const errors = @import("errors.zig");

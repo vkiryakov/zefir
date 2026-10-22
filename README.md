@@ -61,8 +61,9 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-grpc`                       | gRPC interoperability                                                                                                                                                                                                         | 📋 Planned                                         |
 | **Database & Persistence**         |                                                                                                                                                                                                                               |                                                   |
 | `zefir-mongo`                      | Async MongoDB driver on `std.Io`: standalone mongod, SCRAM, pooling, BSON, collections; no TLS yet                                                                                                                            | ✅ Done · [docs](src/mongo/examples/README.md)     |
+| `zefir-mongo-bson`                 | BSON, the format of MongoDB's documents: Zig values to BSON and back, raw documents, Extended JSON; shared by `zefir-mongo` and `zefir-odm`                                                                                   | ✅ Done · [docs](src/mongo/examples/README.md)     |
 | `zefir-redis`                      | Redis and Valkey client on `std.Io`: one standalone server, RESP3, connection pooling, typed replies, pipelines, WATCH transactions, Lua scripts, streams with consumer groups, pub/sub; no TLS yet, so trusted networks only | ✅ Done · [docs](src/redis/examples/README.md)     |
-| `zefir-odm`                        | MongoDB ODM (Object Data Mapper): typed schemas, models, CRUD, aggregation                                                                                                                                                    | 📋 Planned                                         |
+| `zefir-odm`                        | Typed ODM for MongoDB: models as structs, queries checked at compile time, tenants on shared and own servers, connections replaced on the fly, any driver that passes its conformance suite                                   | ✅ Done · [docs](src/odm/examples/README.md)       |
 | `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                                                                                                                                      | 📋 Planned                                         |
 | **Security**                       |                                                                                                                                                                                                                               |                                                   |
 | `zefir-jwt`                        | JSON Web Tokens of the services themselves: signing and verification (HS256/384/512, ES256/384, EdDSA), keys from the settings, typed claims                                                                                  | ✅ Done · [docs](src/jwt/examples/README.md)       |
@@ -501,6 +502,19 @@ zig build down       # stop the servers
 ```
 
 `MONGO_VERSION` picks the image, 9.0.4 by default: `MONGO_VERSION=7.0.45 zig build e2e`. Whenever CI tests mongo, it builds the package on the three systems and runs its end-to-end tests on Linux against 7.0, 8.0 and 9.0; a change to `tests/mongo/` or to `docker-compose.yml` counts as a change to mongo.
+
+The end-to-end tests of odm, with the programs of its guide, are a package of the same kind in `tests/odm`, against mongo-plain and mongo-auth of the same profile:
+
+```sh
+cd tests/odm
+zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
+zig build examples   # only the programs of the guide and their check
+zig build stress     # the stress tests, in Debug and in ReleaseSafe
+zig build check      # build all of it without running it; no servers needed
+zig build down       # stop the servers
+```
+
+The package stands on odm and on mongo, whose `OdmDriver` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 9.0; a change to `tests/odm/` or to `docker-compose.yml` counts as a change to odm.
 
 The end-to-end tests of redis, with the programs of its guide, are a package of the same kind in `tests/redis`, against the Redis and Valkey servers of the profile `redis` of the same `docker-compose.yml`:
 

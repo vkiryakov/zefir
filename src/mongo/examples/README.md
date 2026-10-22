@@ -122,6 +122,7 @@ while (try adults.next(io, op)) |doc| {
 - [The pool, closing and statistics](#the-pool-closing-and-statistics)
 - [Logs](#logs)
 - [Tests without MongoDB](#tests-without-mongodb)
+- [Under zefir-odm](#under-zefir-odm)
 
 Programs that `zig build e2e` in `tests/mongo` builds and runs against
 mongod, checking what they print against this guide:
@@ -2130,3 +2131,36 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
 - The build of zefir runs these tests, and those of
   [deadlines](#deadlines-and-cancellation) and of
   [a write cut short](#a-write-cut-short), in `zig build test-mongo`.
+
+## Under zefir-odm
+
+zefir-mongo is also the reference driver of zefir-odm, the typed ODM of
+Zefir: models as structs, filters and updates that the compiler checks,
+and tenants with databases of their own on shared servers or on servers
+of their own, whose connections change their credentials while requests
+go on. odm reaches a database only through its driver contract, and
+`mongo.OdmDriver` implements that contract on `mongo.Client` and
+`mongo.Collection`. A service makes one,
+`var driver: mongo.OdmDriver = .init(gpa);`, and gives `driver.driver()`
+to `odm.Registry.init`; the driver lives longer than the registry.
+
+- **A client per connection.** Each connection of odm's registry, and
+  each generation of it, is a `mongo.Client` of its own, with its pool,
+  SCRAM and the options of its connection string, as this guide
+  describes them. The driver opens it with a `close_timeout` of 0: odm
+  waits for the sessions of a generation itself before it closes it.
+- **The operations are those of this guide.** odm's insert is an ordered
+  `insertMany`; its updates are `updateOne`, `updateMany` and
+  `replaceOne`; its find is `find`, or `findOne` when it asks for one
+  document; then `countDocuments`, `createIndexes`, `aggregate` and
+  `runCommand`. odm builds the BSON, and the driver builds no command of
+  its own.
+- **The errors keep their names**, and their diagnostics their texts and
+  codes; a write that a unique index refused, codes 11000, 11001 and
+  12582, is odm's `DuplicateKey`, with the index of the document.
+- **It is zefir compatible**: it passes both groups of odm's conformance
+  suite against mongod, and group C, the rules of the contract, against
+  `mongo.testing.FakeServer`.
+
+The guide of odm, [src/odm/examples/README.md](../../odm/examples/README.md),
+starts from its quick start.
