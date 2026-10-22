@@ -247,6 +247,58 @@ test "success responses: each row of the table of design §7" {
     try testing.expectEqualStrings("/items /items/{id} /items/export.csv /items/receipt /items/old", comptime keysOf(paths));
 }
 
+/// Statuses that go without content: a JSON route that also answers 204,
+/// 205 and 304, a middleware that declares a body on its 204, and an error
+/// that mapError answers with 304.
+const bodiless = struct {
+    const Item = struct { id: u64 };
+    /// Only the 204 of the middleware names it: no schema of its own.
+    const Unused = struct { note: []const u8 };
+
+    const Conditional = struct {
+        pub const openapi: MiddlewareDoc = .{ .responses = .{ .no_content = .{ .description = "Nothing to sync.", .json = Unused } } };
+
+        pub fn run(_: *http.Context) error{}!http.MiddlewareResult {
+            return .next;
+        }
+    };
+
+    const ItemsController = struct {
+        pub const http_routes = http.routes(.{ .prefix = "/items", .methods = .{
+            .sync = http.put("/sync", .{ .responses = .{ .ok = .{}, .no_content = .{}, .reset_content = .{}, .not_modified = .{} }, .middleware = .{Conditional} }),
+        } });
+        pub const openapi: ControllerDoc(@This()) = .{ .routes = .{ .sync = .{ .summary = "Sync the items" } } };
+
+        pub fn sync(_: *ItemsController, _: *http.Context) error{ItemUnchanged}!http.Json(Item) {
+            return .{ .value = .{ .id = 1 } };
+        }
+    };
+
+    const AppErrors = struct {
+        pub fn mapError(err: anyerror) http.ErrorResponse(http.Problem) {
+            return switch (err) {
+                error.ItemUnchanged => .{ .status = 304, .body = .{ .title = "Not modified", .status = 304, .code = "items.unchanged" } },
+                else => .fallback(err, .{ .title = http.defaultTitle(err), .status = http.defaultStatus(err), .code = http.defaultCode(err) }),
+            };
+        }
+    };
+
+    var items: ItemsController = .{};
+    var app_errors: AppErrors = .{};
+    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items}, .error_handler = &app_errors });
+};
+
+test "204, 205 and 304 have no content, whatever the handler, a middleware or mapError gives them" {
+    const doc = comptime document(bodiless.Options, .{ .info = info });
+    const responses = comptime at(doc.root, &.{ "paths", "/items/sync", "put", "responses" });
+    try expectJson(comptime "{\"200\":{\"description\":\"OK\",\"content\":" ++ item_json ++ "}," ++
+        "\"204\":{\"description\":\"Nothing to sync.\"}," ++
+        "\"205\":{\"description\":\"Reset Content\"}," ++
+        "\"304\":{\"description\":\"Not Modified\"}," ++ internal_500 ++ "}", responses);
+    // The body of the middleware's 204 is in no response: no schema of it.
+    try testing.expectEqualStrings("Item Problem Violation", comptime keysOf(at(doc.root, &.{ "components", "schemas" })));
+}
+
 /// The answers to errors: an error handler of the application, with a body
 /// of its own.
 const errs = struct {

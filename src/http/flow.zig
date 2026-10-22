@@ -852,7 +852,7 @@ fn isContentField(name: []const u8) bool {
 
 /// Sends the response: its status (204 without a body, 200 with one,
 /// unless the handler set it), its fields with `Content-Type`, and its
-/// body; none for HEAD, 204 and 304. A body held whole goes with its
+/// body; none for HEAD, 204, 205 and 304. A body held whole goes with its
 /// length; the value of an `http.Json(T)` and what a stream left in the
 /// buffer go through it (`Response`). The head commits the response; a
 /// write that fails cuts it.
@@ -1012,6 +1012,44 @@ test "a !void handler is 204; http.Json is 200 or its status" {
     try testing.expectEqual(203, page.status);
     try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type").?);
     try testing.expectEqualStrings("<p>todo</p>", page.body);
+}
+
+/// A form a client resets after it is sent: 205, by the value of an
+/// `http.Json(T)` or with a body written.
+const FormsController = struct {
+    pub const http_routes = routes.routes(.{
+        .prefix = "/v1/forms",
+        .methods = .{
+            .reset = routes.post("/reset", .{ .responses = .{ .reset_content = .{} } }),
+            .clear = routes.post("/clear", .{ .responses = .{ .reset_content = .{} } }),
+        },
+    });
+
+    pub fn reset(_: *FormsController, _: *Context) !Json(Todo) {
+        return .{ .value = .{ .id = 1, .title = "Buy milk" }, .status = 205 };
+    }
+    pub fn clear(_: *FormsController, ctx: *Context) !void {
+        try ctx.response.status(205).text("cleared");
+    }
+};
+
+test "205 goes with an empty body, Content-Length: 0, whatever the handler wrote" {
+    const io = testing.io;
+    var forms: FormsController = .{};
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var server: Server = try .init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&forms} });
+    defer server.deinit(io);
+    try server.start(io);
+
+    for ([_][]const u8{ "/v1/forms/reset", "/v1/forms/clear" }) |target| {
+        var res = try backend.request(io, .{ .method = .POST, .target = target });
+        defer res.deinit();
+        try testing.expectEqual(205, res.status);
+        try testing.expectEqualStrings("0", res.header("content-length").?);
+        try testing.expectEqualStrings("", res.body);
+        try testing.expect(!res.aborted);
+    }
 }
 
 test "404, 405 with Allow, HEAD without a body, OPTIONS 204 with Allow" {

@@ -37,7 +37,7 @@ pub const Kind = enum { rest, sse };
 
 /// A response that a route declares in `.responses`, besides those of its
 /// errors: `.created = .{}`, `.ok = .{ .content_type = "text/csv" }`,
-/// `.conflict = .{ .json = T }`.
+/// `.conflict = .{ .json = T }`. 204, 205 and 304 never have a body.
 pub const RouteResponse = struct {
     status: std.http.Status,
     /// The media type of a body that the handler writes itself, such as
@@ -178,6 +178,8 @@ pub fn options(comptime path: []const u8, comptime opts: anytype) type {
 ///   handler writes itself;
 /// - `.{ .json = T }`: a JSON body of type `T`, which the handler writes
 ///   itself with `ctx.response.json`.
+/// 204, 205 and 304 go without a body, whatever the handler writes, the
+/// value of an `http.Json(T)` too: they take only `.{}`.
 pub fn Route(comptime method: std.http.Method, comptime kind: Kind, comptime path: []const u8, comptime opts: anytype) type {
     @setEvalBranchQuota(route_quota);
     const O = @TypeOf(opts);
@@ -346,6 +348,10 @@ fn entryOf(comptime status: std.http.Status, comptime entry: anytype, comptime w
         } else @compileError(form);
     }
     if (out.content_type != null and out.json != void) @compileError(form);
+    const code = @backingInt(status);
+    if ((code == 204 or code == 205 or code == 304) and (out.content_type != null or out.json != void))
+        @compileError("zefir.http: " ++ where ++ ": .responses." ++ @tagName(status) ++ " declares a body, but a " ++ std.fmt.comptimePrint("{d}", .{code}) ++
+            " response has none; write ." ++ @tagName(status) ++ " = .{}");
     return out;
 }
 

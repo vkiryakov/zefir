@@ -176,9 +176,10 @@ fn answersOf(comptime R: type, comptime Value: type) []const Answer {
     var out: [R.responses.len]Answer = undefined;
     for (R.responses, &out) |r, *answer| {
         const status = @backingInt(r.status);
+        // 204 and 205 go without the value.
         const media: ?[]const u8 = if (r.content_type) |text|
             mediaType(text)
-        else if (r.json != void or (Value != void and status >= 200 and status <= 299))
+        else if (r.json != void or (Value != void and status >= 200 and status <= 299 and status != 204 and status != 205))
             "application/json"
         else
             null;
@@ -435,10 +436,10 @@ fn declaresStatus(t: *const Table, status: u16, error_path: bool) bool {
     return false;
 }
 
-/// Whether a body of `actual` is one of `declared`: 204 and 304 send none,
-/// whatever was set.
+/// Whether a body of `actual` is one of `declared`: 204, 205 and 304 send
+/// none, whatever was set.
 fn sameMedia(status: u16, declared: ?[]const u8, actual: ?[]const u8) bool {
-    if (status == 204 or status == 304) return true;
+    if (status == 204 or status == 205 or status == 304) return true;
     const d = declared orelse return actual == null;
     const a = actual orelse return false;
     return std.ascii.eqlIgnoreCase(d, a);
@@ -555,6 +556,8 @@ const TodosV1Controller = struct {
         .see_other = .{},
         .conflict = .{ .json = Conflict },
         .ok = .{ .content_type = "text/csv; charset=utf-8" },
+        .no_content = .{},
+        .reset_content = .{},
     } });
     const Remove = routes.delete("/{id}", .{ .path = TodoPath });
     const Events = sse.get("/events", .{ .events = TodoEvent });
@@ -625,6 +628,9 @@ test "tableOf: .responses as declared, a void route's 204, an SSE route's stream
         .{ 409, "application/json" },
         // A media type without its parameters.
         .{ 200, "text/csv" },
+        // .{} on 204 and 205 of a JSON route: no body, as on the wire.
+        .{ 204, null },
+        .{ 205, null },
     };
     try testing.expectEqual(want.len, create.responses.len);
     for (want, create.responses) |w, r| {

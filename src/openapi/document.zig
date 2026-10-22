@@ -17,7 +17,9 @@
 //! - its responses: those of its `.responses`, else its default one; those
 //!   the middleware of its chain write themselves; and those of its
 //!   errors, as the error handler's `mapError` answers each, with the body
-//!   it gives as an example.
+//!   it gives as an example. 204, 205 and 304 have no content, whatever
+//!   the handler, a middleware or `mapError` gives them: zefir-http sends
+//!   none.
 //!
 //! The document holds the controllers of `.controllers`, all of them, those
 //! of `.include`, or all but those of `.exclude`; never a `Docs`, the
@@ -169,19 +171,25 @@ fn use(comptime reg: *schema.Registry, comptime d: http.Description, comptime r:
     } else if (R.responses.len == 0) {
         if (r.Value != void) reg.use(.{ .T = r.Value, .direction = .output });
     } else for (R.responses) |res| {
+        const status = @backingInt(res.status);
+        if (bodiless(status)) continue;
         if (res.json != void) {
             reg.use(.{ .T = res.json, .direction = .output });
-        } else if (res.content_type == null and r.Value != void and success(@backingInt(res.status))) {
+        } else if (res.content_type == null and r.Value != void and success(status)) {
             reg.use(.{ .T = r.Value, .direction = .output });
         }
     }
     for (r.chain) |e| {
         const doc = middlewareDoc(e) orelse continue;
         for (middlewareResponses(doc)) |m| {
-            if (m.json != void) reg.use(.{ .T = m.json, .direction = .output });
+            if (m.json != void and !bodiless(m.status)) reg.use(.{ .T = m.json, .direction = .output });
         }
     }
-    if (errorStatuses(d.ErrorHandler, r.Errors, where(r)).len > 0) reg.use(errorUse(d));
+    for (errorStatuses(d.ErrorHandler, r.Errors, where(r))) |e| {
+        if (bodiless(e.status)) continue;
+        reg.use(errorUse(d));
+        break;
+    }
 }
 
 /// The use of the body of the answers to errors.
@@ -565,7 +573,9 @@ fn answersOf(comptime reg: *const schema.Registry, comptime d: http.Description,
         const doc = middlewareDoc(e) orelse continue;
         for (middlewareResponses(doc)) |m| {
             const from = "the middleware " ++ e.name;
-            out = out ++ [_]Answer{if (m.content_type) |media|
+            out = out ++ [_]Answer{if (bodiless(m.status))
+                .{ .status = m.status, .description = m.description, .from = from }
+            else if (m.content_type) |media|
                 textAnswer(m.status, m.description, media, from)
             else if (m.json != void)
                 jsonAnswer(reg, m.status, m.description, m.json, from)
@@ -574,21 +584,19 @@ fn answersOf(comptime reg: *const schema.Registry, comptime d: http.Description,
         }
     }
     const media = if (d.ErrorBody == http.Problem) "application/problem+json" else "application/json";
-    const body = reg.schema(errorUse(d));
+    const from = "its errors, as " ++ schema.typeName(d.ErrorHandler) ++ ".mapError answers them";
     for (errorStatuses(d.ErrorHandler, r.Errors, where(r))) |e| {
-        out = out ++ [_]Answer{.{
-            .status = e.status,
-            .media = media,
-            .shape = body,
-            .examples = e.examples,
-            .from = "its errors, as " ++ schema.typeName(d.ErrorHandler) ++ ".mapError answers them",
-        }};
+        out = out ++ [_]Answer{if (bodiless(e.status))
+            .{ .status = e.status, .from = from }
+        else
+            .{ .status = e.status, .media = media, .shape = reg.schema(errorUse(d)), .examples = e.examples, .from = from }};
     }
     return out;
 }
 
 /// The responses of the route itself: those of its `.responses`, else its
-/// default one, with the descriptions of its `ControllerDoc`.
+/// default one, with the descriptions of its `ControllerDoc`; 204, 205 and
+/// 304 without content, the value of an `http.Json(T)` too.
 fn routeAnswers(comptime reg: *const schema.Registry, comptime r: http.RouteDescription, comptime version: DocumentOptions.Version) []const Answer {
     const R = r.Route;
     const doc = @field(r.Controller.openapi.routes, r.handler);
@@ -602,7 +610,9 @@ fn routeAnswers(comptime reg: *const schema.Registry, comptime r: http.RouteDesc
     for (R.responses, &out) |res, *answer| {
         const status = @backingInt(res.status);
         const text = routeText(doc, @tagName(res.status));
-        answer.* = if (res.content_type) |media|
+        answer.* = if (bodiless(status))
+            .{ .status = status, .description = text, .from = from }
+        else if (res.content_type) |media|
             textAnswer(status, text, media, from)
         else if (res.json != void)
             jsonAnswer(reg, status, text, res.json, from)
@@ -808,6 +818,12 @@ fn phrase(comptime status: u16) []const u8 {
 
 fn success(comptime status: u16) bool {
     return status >= 200 and status <= 299;
+}
+
+/// A status that goes without content, whatever is written: 204, 205 and
+/// 304, as zefir-http sends them.
+fn bodiless(comptime status: u16) bool {
+    return status == 204 or status == 205 or status == 304;
 }
 
 // ------------------------------------------------------------------ the answers to errors

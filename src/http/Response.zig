@@ -241,10 +241,10 @@ pub const Internal = struct {
         return i.code orelse if (i.body == .none) 204 else 200;
     }
 
-    /// Whether the body goes on the wire: not for HEAD, 204 and 304.
+    /// Whether the body goes on the wire: not for HEAD, 204, 205 and 304.
     fn sendsBody(i: *const Internal) bool {
         const code = i.statusCode();
-        return i.sink.?.exchange.method != .HEAD and code != 204 and code != 304;
+        return i.sink.?.exchange.method != .HEAD and code != 204 and code != 205 and code != 304;
     }
 
     /// The fields of the head, `Content-Type` first when there is one.
@@ -276,9 +276,11 @@ fn outOfMemory() error{WriteFailed} {
 }
 
 /// How the body of a response with `code` is delimited: its `length`, or
-/// a stream when it is not known; 204 and 304 have none.
+/// a stream when it is not known; 204 and 304 have none, and 205 an empty
+/// one (RFC 9110, 15.3.6).
 fn kindOf(code: u16, length: ?u64) Exchange.BodyKind {
     if (code == 204 or code == 304) return .none;
+    if (code == 205) return .{ .length = 0 };
     return if (length) |n| .{ .length = n } else .stream;
 }
 

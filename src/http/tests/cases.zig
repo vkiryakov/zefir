@@ -63,6 +63,7 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_responses_status.zig", .expect = "zefir.http: http.post(\"\"): .responses.okay: the keys of .responses are names of std.http.Status, such as .ok, .created or .see_other" },
     .{ .file = dir ++ "route_responses_entry.zig", .expect = "zefir.http: http.post(\"\"): .responses.created must be .{}, .{ .content_type = \"text/csv\" } or .{ .json = T }" },
     .{ .file = dir ++ "route_responses_json_route.zig", .expect = "zefir.http: UsersV1Controller.create: .responses.created has a body of its own, but the handler returns http.Json(UserResponse), whose value is the body of its 2xx responses; write .created = .{}" },
+    .{ .file = dir ++ "route_responses_no_body.zig", .expect = "zefir.http: http.put(\"/sync\"): .responses.no_content declares a body, but a 204 response has none; write .no_content = .{}" },
     .{ .file = dir ++ "input_not_route.zig", .expect = "zefir.http: ctx.input takes a route, such as ctx.input(Get) with const Get = http.get(\"/{id}\", .{ .path = dto.TodoIdPath }); got u32" },
     .{ .file = dir ++ "sse_input_rest_route.zig", .expect = "zefir.http: ctx.input of an http.sse.Context takes the route of its stream, made by http.sse.get; got http.post(\"/import\")" },
     // The events of a stream and its manager.
