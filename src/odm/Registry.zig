@@ -289,9 +289,9 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
     if (names.connectionId(id)) |problem| return fail(d, error.InvalidArgument, "odm: {s}", .{problem});
     // A known id needs no client.
     r.mutex.lockUncancelable(io);
-    const known = r.refusal(id);
+    const vacant = r.mayRegister(id);
     r.mutex.unlock(io);
-    if (known) |err| return refuse(d, err, id);
+    vacant catch |err| return refuse(d, err, id);
 
     const print = fingerprint.of(&r.key, config.uri, config.password);
     const c = try Connection.create(r.gpa, id, print);
@@ -303,19 +303,19 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
     c.current = g;
 
     r.mutex.lockUncancelable(io);
-    const lost = r.refusal(id);
-    if (lost == null) {
+    const still = r.mayRegister(id);
+    if (still) |_| {
         r.connections.append(&c.node);
         r.generations.append(&g.node);
         if (std.debug.runtime_safety) r.home.store(@intFromPtr(r), .monotonic);
-    }
+    } else |_| {}
     r.mutex.unlock(io);
-    if (lost) |err| {
+    still catch |err| {
         // Another call took the id meanwhile: this client goes.
         client.close(io);
         client.deinit();
         return refuse(d, err, id);
-    }
+    };
 }
 
 /// Connects the connection `id`: the network and the login, under the
@@ -697,11 +697,10 @@ fn find(r: *Registry, id: []const u8) ?*Connection {
     return null;
 }
 
-/// Why a registration of `id` cannot go on, under the lock.
-fn refusal(r: *Registry, id: []const u8) ?Error {
+/// Whether a registration of `id` may go on, under the lock.
+fn mayRegister(r: *Registry, id: []const u8) Error!void {
     if (r.state != .running) return error.ShuttingDown;
     if (r.find(id) != null) return error.ConnectionExists;
-    return null;
 }
 
 fn refuse(d: ?*Diagnostics, err: Error, id: []const u8) Error {
