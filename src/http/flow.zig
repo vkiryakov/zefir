@@ -717,6 +717,11 @@ fn ErrorPathOf(comptime H: type) type {
             if (@hasDecl(H, "handle")) {
                 const self: *H = @ptrCast(@alignCast(object));
                 const result = H.handle(self, ctx, err, &reply);
+                // The response has gone out whole: the one `handle` wrote,
+                // or the server's 500 that the Debug check put in its place,
+                // after which the writes of `handle` fail. As for a handler,
+                // what `handle` returned changes nothing then.
+                if (res.state == .finished) return .finish;
                 const action: errors.ErrorAction = if (@typeInfo(@TypeOf(result)) == .error_union) result catch |failure| failed: {
                     log.warn("{s}.handle failed with error.{t} on error.{t}; the response is mapError's, as handle left it (request {s})", .{ name, failure, err, ctx.requestId() });
                     break :failed .respond;
@@ -1775,6 +1780,58 @@ test "review focus 5: on a route of the document, the 408 and 400 of a body that
         try testing.expectEqual(case[1], ctx.response.internal.status_sent.?);
         try testing.expectEqualStrings("text/plain; charset=utf-8", ctx.response.internal.content_type.?);
     }
+}
+
+/// A controller of the document whose route fails with an error that the
+/// error handler answers with a page it streams itself.
+const PagesController = struct {
+    pub const openapi = .{};
+
+    pub fn gone(_: *PagesController, _: *Context) error{Gone}!void {
+        return error.Gone;
+    }
+};
+
+/// Gives `Gone` 404; its `handle` streams a page of HTML, which the route
+/// does not declare.
+const PageErrors = struct {
+    pub fn mapError(err: anyerror) errors.ErrorResponse(ApiError) {
+        return switch (err) {
+            error.Gone => .{ .status = 404, .body = .{ .code = "pages.gone", .message = "The page is gone" } },
+            else => .fallback(err, .{ .code = errors.defaultCode(err), .message = errors.defaultTitle(err) }),
+        };
+    }
+
+    pub fn handle(_: *PageErrors, ctx: *Context, _: anyerror, _: *errors.ErrorResponse(ApiError)) !errors.ErrorAction {
+        var out = try ctx.response.status(404).stream(.{ .content_type = "text/html" });
+        try out.writeAll("<p>The page is gone</p>");
+        try out.finish();
+        return .handled;
+    }
+};
+
+test "a page that handle streams and the Debug check refuses: the server's 500 goes out whole, and nothing cuts it" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const level = testing.log_level;
+    testing.log_level = .err; // the line of the check is a warning
+    defer testing.log_level = level;
+    const Gone = routes.get("/gone", .{});
+    const table = comptime check.tableOf(PagesController, "gone", Gone, &.{}, PageErrors);
+    const info: routes.RouteInfo = .{ .method = .GET, .pattern = "/v1/pages/gone", .controller = "PagesController", .handler = "gone" };
+    var page_errors: PageErrors = .{};
+    var counting: CountingExchange = .init();
+    var ctx = counting.context(arena_state.allocator());
+    ctx.internal.error_handler = .of(PageErrors, &page_errors);
+    ctx.response.internal.before_head = .{ .ptr = &ctx, .call = beforeHead };
+    check.begin(&ctx, &info, table);
+    respond(&ctx, &counting.exchange, error.Gone);
+    // One head and one end: of the server's 500 in Debug, which went out
+    // when the page began; of the page elsewhere.
+    try counting.expect(1, 1, 0);
+    try testing.expect(!ctx.response.internal.aborted);
+    try testing.expectEqual(.finished, ctx.response.state());
+    try testing.expectEqual(if (check.enabled) 500 else 404, ctx.response.internal.status_sent.?);
 }
 
 test "the server logs through std.log.scoped(.http) and needs no logger" {
