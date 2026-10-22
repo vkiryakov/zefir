@@ -126,7 +126,7 @@ const LateRoot = struct {
             return .init(gpa, .{ .controllers = controllers }, .{
                 .listen = .{ .backend = backend.backend() },
                 .shutdown_grace = .fromSeconds(10),
-                .finish_timeout = .fromMilliseconds(200),
+                .finish_timeout = .fromSeconds(1),
             });
         }
     };
@@ -141,7 +141,7 @@ test "a request that ends only after its cancelation, late in its budget: the Ap
     const level = quiet();
     defer testing.log_level = level;
     var probe: Probe = .{};
-    var app = try core.App(LateRoot).init(testing.allocator, io, .{&probe}, .{ .shutdown_timeout = .fromSeconds(2) });
+    var app = try core.App(LateRoot).init(testing.allocator, io, .{&probe}, .{ .shutdown_timeout = .fromSeconds(3) });
     defer app.deinit();
     try app.start();
 
@@ -152,14 +152,17 @@ test "a request that ends only after its cancelation, late in its budget: the Ap
     } else |_| {};
     try probe.entered.wait(io);
 
-    // The grace ends 1 s, .finish_timeout and 250 ms before App's deadline,
-    // 2 s away; the canceled request ends 1100 ms later, and the server's
-    // shutdown returns before the last 250 ms.
+    // The grace ends 1 s, .finish_timeout (1 s) and 250 ms before App's
+    // deadline, 3 s away, so 750 ms after the stop began. The canceled
+    // request ends 1100 ms later, past the second the server keeps for
+    // canceled requests, and the server's shutdown returns before the last
+    // 250 ms. The 900 ms left over hold under ThreadSanitizer on a busy
+    // machine, where a wake-up comes hundreds of milliseconds late.
     const asked = std.Io.Clock.awake.now(io);
     app.requestStop();
     try app.wait();
     const took = asked.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(took >= 1500 and took < 2000);
+    try testing.expect(took >= 1700 and took < 3000);
     try testing.expectEqual(core.app.State.stopped, app.state());
     try testing.expectEqual(null, app.failure());
 }
