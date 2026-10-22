@@ -43,6 +43,8 @@ const schema = @import("model/schema.zig");
 const codec = @import("model/codec.zig");
 const filter_ = @import("query/filter.zig");
 const options_ = @import("query/options.zig");
+const update_ = @import("query/update.zig");
+const values = @import("query/values.zig");
 const leases = @import("registry/generation.zig");
 const cursors = @import("Cursor.zig");
 const Session = @import("Session.zig");
@@ -128,6 +130,71 @@ pub fn Collection(comptime T: type) type {
             const memory = call.begin(c.session, io);
             defer call.end();
             return call.finish(countIn(T, c.session, io, ctx, memory, filter));
+        }
+
+        /// Changes the first document that `filter` matches by `update`, a
+        /// literal of operators or an `odm.Update(T)`:
+        /// `.{ .set = .{ .status = .blocked }, .inc = .{ .age = 1 } }`. The
+        /// rules of the model do not check it.
+        pub fn updateOne(c: Self, io: Io, ctx: core.Context, filter: anytype, update: anytype) Error!UpdateResult {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(updateIn(T, c.session, io, ctx, memory, filter, update, .one));
+        }
+
+        /// As `updateOne`, on every document that `filter` matches.
+        pub fn updateMany(c: Self, io: Io, ctx: core.Context, filter: anytype, update: anytype) Error!UpdateResult {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(updateIn(T, c.session, io, ctx, memory, filter, update, .many));
+        }
+
+        /// Changes the first document that `filter` matches by `update`, or,
+        /// when none does, inserts the document that the server builds from
+        /// the equalities of the filter and the operators of the update. Both
+        /// are literals: the build checks that the document it may insert
+        /// gets every required field of the model, its id too when the
+        /// application gives it; `set_on_insert` works here only. The rules
+        /// of the model do not check it.
+        pub fn upsertOne(c: Self, io: Io, ctx: core.Context, filter: anytype, update: anytype) Error!UpsertResult(T) {
+            comptime {
+                update_.checkUpsert(T, @TypeOf(filter), @TypeOf(update));
+                requireWholeId(T, @TypeOf(filter), @TypeOf(update));
+            }
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(upsertIn(T, c.session, io, ctx, memory, filter, update));
+        }
+
+        /// Replaces the first document that `filter` matches by
+        /// `replacement`, after the `field_rules` of the model. The server
+        /// keeps the document's `_id`, so `replacement`'s id is not read,
+        /// and its optionals that are null leave the document.
+        pub fn replaceOne(c: Self, io: Io, ctx: core.Context, filter: anytype, replacement: T) Error!UpdateResult {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(replaceIn(T, c.session, io, ctx, memory, filter, &replacement));
+        }
+
+        /// Deletes the first document that `filter` matches.
+        pub fn deleteOne(c: Self, io: Io, ctx: core.Context, filter: anytype) Error!DeleteResult {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(deleteIn(T, c.session, io, ctx, memory, filter, false));
+        }
+
+        /// Deletes every document that `filter` matches: `.{}` deletes all
+        /// the documents of the collection.
+        pub fn deleteMany(c: Self, io: Io, ctx: core.Context, filter: anytype) Error!DeleteResult {
+            var call: Call = undefined;
+            const memory = call.begin(c.session, io);
+            defer call.end();
+            return call.finish(deleteIn(T, c.session, io, ctx, memory, filter, true));
         }
     };
 }
@@ -249,6 +316,23 @@ pub fn encodeFilter(comptime T: type, memory: Allocator, filter: anytype, d: *Di
     };
 }
 
+/// The BSON of `update`, an update of `T` for `use`, in `memory`;
+/// `EncodeFailed` or `InvalidArgument` with a text in `d`.
+fn encodeUpdate(comptime T: type, memory: Allocator, update: anytype, comptime use: update_.Use, d: *Diagnostics) Error!bson.RawDocument {
+    return update_.encode(T, memory, update, use) catch |err| switch (err) {
+        error.EncodeFailed => fail(d, err, "odm: the update did not become BSON: a string is not UTF-8, a pattern of pull holds NUL, or documents nest deeper than 100", .{}),
+        error.InvalidArgument => {
+            // Only an odm.Update gives it: no with, or two with that
+            // conflict, which the compiler cannot see.
+            const built = comptime @hasDecl(@TypeOf(update), "odm_update_model");
+            if (built and update.last == null) return fail(d, err, "odm: the odm.Update({s}) changes nothing: it has no with", .{@typeName(T)});
+            if (built) return fail(d, err, "odm: two with of the odm.Update({s}) change one path, or two paths of which one holds the other", .{@typeName(T)});
+            return fail(d, err, "odm: the update breaks a rule of odm", .{});
+        },
+        error.OutOfMemory => err,
+    };
+}
+
 /// The projection that a read of `T` into `P` sends, or null when `P` is
 /// the model itself.
 pub fn projectionOf(comptime T: type, comptime P: type, memory: Allocator) Error!?bson.RawDocument {
@@ -327,6 +411,81 @@ fn findIn(comptime T: type, comptime P: type, s: *Session, io: Io, ctx: core.Con
         .batch_size = parts.batch_size,
     };
     return openCursor(T, P, s, io, ctx, memory, &request);
+}
+
+fn updateIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, update: anytype, comptime mode: Client.UpdateMode) Error!UpdateResult {
+    const request: Client.UpdateRequest = .{
+        .ns = namespace(T, s),
+        .filter = try encodeFilter(T, memory, filter, &s.diag),
+        .update = try encodeUpdate(T, memory, update, .update, &s.diag),
+        .mode = mode,
+    };
+    const result = try s.generation.client.update(io, ctx, &request, callOptions(s, memory));
+    return .{ .matched = result.matched, .modified = result.modified };
+}
+
+fn upsertIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, update: anytype) Error!UpsertResult(T) {
+    const request: Client.UpdateRequest = .{
+        .ns = namespace(T, s),
+        .filter = try encodeFilter(T, memory, filter, &s.diag),
+        .update = try encodeUpdate(T, memory, update, .upsert, &s.diag),
+        .mode = .one,
+        .upsert = true,
+    };
+    const result = try s.generation.client.update(io, ctx, &request, callOptions(s, memory));
+    const id: ?Id(T) = if (result.upserted_id) |server| try upsertedId(T, update_.upsertId(T, filter, update), server, &s.diag) else null;
+    return .{ .matched = result.matched, .modified = result.modified, .upserted_id = id };
+}
+
+/// The id of the document that an upsert inserted: the one that its
+/// literals gave, else the ObjectId that the server made.
+fn upsertedId(comptime T: type, given: ?Id(T), server: bson.Value, d: *Diagnostics) Error!Id(T) {
+    if (given) |id| return id;
+    // An id that the application gives comes whole from the literals
+    // (requireWholeId), so only an ObjectId comes from the server.
+    if (comptime Id(T) == bson.ObjectId) switch (server) {
+        .object_id => |id| return id,
+        else => {},
+    };
+    d.set(null, null, "odm: the server gave the document that the upsert inserted an _id of BSON type {t}, not an ObjectId", .{server});
+    d.cause = error.WrongType;
+    d.setPath("_id");
+    return error.DecodeFailed;
+}
+
+/// Stops the build when the id of `T` is one that the application gives,
+/// and the literals of an upsert give it by the paths of its fields, not
+/// whole: the result of upsertOne holds the id that they give.
+fn requireWholeId(comptime T: type, comptime F: type, comptime U: type) void {
+    if (schema.idKind(T) != .given) return;
+    const id = schema.idName(T);
+    const Field = @FieldType(T, id);
+    if (@hasField(F, id)) {
+        const V = @FieldType(F, id);
+        if (!filter_.isConditions(values.top(T, id), V) or @hasField(V, "eq")) return;
+    }
+    if (@hasField(U, "set_on_insert") and @hasField(@FieldType(U, "set_on_insert"), id)) {
+        if (!values.isLiteral(@FieldType(@FieldType(U, "set_on_insert"), id), Field)) return;
+    }
+    @compileError("odm: upsertOne of " ++ @typeName(T) ++ " gives its id '" ++ id ++ "' by paths into it: give the whole " ++ @typeName(Field) ++ " by equality in the filter or in set_on_insert");
+}
+
+fn replaceIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, replacement: *const T) Error!UpdateResult {
+    try check(replacement, &s.diag, null);
+    const request: Client.UpdateRequest = .{
+        .ns = namespace(T, s),
+        .filter = try encodeFilter(T, memory, filter, &s.diag),
+        .update = try encodeDocument(T, memory, replacement, .replace, &s.diag, null),
+        .mode = .replace,
+    };
+    const result = try s.generation.client.update(io, ctx, &request, callOptions(s, memory));
+    return .{ .matched = result.matched, .modified = result.modified };
+}
+
+fn deleteIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, filter: anytype, many: bool) Error!DeleteResult {
+    const request: Client.DeleteRequest = .{ .ns = namespace(T, s), .filter = try encodeFilter(T, memory, filter, &s.diag), .many = many };
+    const result = try s.generation.client.delete(io, ctx, &request, callOptions(s, memory));
+    return .{ .deleted = result.deleted };
 }
 
 fn insertOneIn(comptime T: type, s: *Session, io: Io, ctx: core.Context, memory: Allocator, doc: *const Insert(T)) Error!InsertOneResult(T) {

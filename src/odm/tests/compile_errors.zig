@@ -87,6 +87,22 @@ const Slug = struct {
     pub const odm_schema: odm.Schema(Slug) = .{ .collection = "slugs", .id = .id };
 };
 
+// The approved cases of the sketch, through the public API. The session is
+// never used: the build stops first.
+
+test "compile error: users.find on a field that is not there" {
+    var session: odm.Session = undefined;
+    const users = session.collection(User);
+    var cursor = try users.find(std.testing.io, .root, .{ .agee = .{ .gte = 18 } }, .{});
+    cursor.deinit(std.testing.io);
+}
+
+test "compile error: users.updateOne with inc of a string field" {
+    var session: odm.Session = undefined;
+    const users = session.collection(User);
+    _ = try users.updateOne(std.testing.io, .root, .{ .name = "Ann" }, .{ .inc = .{ .email = 1 } });
+}
+
 /// The methods of the contract for a client of type `T`, which a fixture
 /// takes one by one.
 fn Methods(comptime T: type) type {
@@ -873,6 +889,20 @@ test "compile error: a path through a list in the filter of an upsert" {
 
 test "compile error: or in the filter of an upsert" {
     comptime update.checkUpsert(Account, @TypeOf(.{ .@"or" = .{ .{ .email = "a" }, .{ .email = "b" } } }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}
+
+/// A model whose id is a document, which the application gives.
+const Pair = struct {
+    id: Key,
+    n: i32 = 0,
+
+    pub const Key = struct { a: i32, b: i32 };
+    pub const odm_schema: odm.Schema(Pair) = .{ .collection = "pairs", .id = .id };
+};
+
+test "compile error: an upsert that gives its id by paths" {
+    var session: odm.Session = undefined;
+    _ = try session.collection(Pair).upsertOne(std.testing.io, .root, .{ .id = .{ .a = 1, .b = 2 } }, .{ .set = .{ .n = 1 } });
 }
 
 // odm.Filter and odm.Update.

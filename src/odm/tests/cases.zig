@@ -17,6 +17,10 @@ const open = "pub fn open(self: *@This(), io: std.Io, config: *const odm.Connect
 const next = "pub fn next(self: *@This(), io: std.Io, ctx: core.Context, d: ?*odm.Diagnostics) odm.DriverError!?bson.RawDocument";
 
 pub const compile_errors = [_]Case{
+    // The approved cases of the sketch, through the public API, as an
+    // application writes them.
+    .{ .name = "compile error: users.find on a field that is not there", .expect = "odm: tests.compile_errors.User has no field 'agee'; did you mean 'age'?" },
+    .{ .name = "compile error: users.updateOne with inc of a string field", .expect = "odm: inc needs a number; tests.compile_errors.User.email is []const u8" },
     // The driver contract: odm.Client.init.
     .{ .name = "compile error: a client without insert", .expect = "odm.Client.init: tests.compile_errors.NoInsert has no method insert; expected " ++ insert },
     .{ .name = "compile error: insert of another signature", .expect = "odm.Client.init: tests.compile_errors.OtherInsert.insert has another signature; expected " ++ insert },
@@ -136,6 +140,7 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: an optional value in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's equality on tests.compile_errors.Account.nickname needs a []const u8; got ?[]const u8: it goes into the document the upsert may insert, and odm does not store null" },
     .{ .name = "compile error: an item of a list in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's tests.compile_errors.Account.tags = item would put the item where the list goes in the document it may insert; match the whole list with .eq, or the item with .elem_match" },
     .{ .name = "compile error: a path through a list in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's path items.sku goes through the list tests.compile_errors.Account.items, and the document it may insert would get a document there, not a list; use .elem_match" },
+    .{ .name = "compile error: an upsert that gives its id by paths", .expect = "odm: upsertOne of tests.compile_errors.Pair gives its id 'id' by paths into it: give the whole tests.compile_errors.Pair.Key by equality in the filter or in set_on_insert" },
     .{ .name = "compile error: or in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: or in the filter: the server takes equalities from it into the document it may insert, and odm checks only the fields of the filter itself; put the conditions in the fields of the filter" },
     // odm.Filter and odm.Update.
     .{ .name = "compile error: a filter of another model", .expect = "odm: this filter is an odm.Filter(tests.compile_errors.Account), not of tests.compile_errors.User" },
