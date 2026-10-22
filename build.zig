@@ -206,9 +206,15 @@ pub fn build(b: *std.Build) void {
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
     const openapi_app = addHttpCompileChecks(b, test_http, http, validator, target, optimize);
+    // `zig build openapi` rewrites every OpenAPI document of zefir's tests
+    // and guides from the code: the tests that compare them with their
+    // files, run with ZEFIR_OPENAPI_UPDATE=1.
+    const openapi_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests and guides from the code");
     // The examples of the zefir-http guide: the middleware of an
     // application (authentication, CORS) and their tests. Like an
-    // application, they may read settings with confy and log with log.
+    // application, they may read settings with confy and log with log, and
+    // they declare the texts of their OpenAPI document through the
+    // umbrella module, as `zefir.openapi`.
     const http_examples = b.addTest(.{
         .name = "http-examples",
         .root_module = b.createModule(.{
@@ -222,11 +228,12 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "confy", .module = confy },
                 .{ .name = "log", .module = log },
                 .{ .name = "http", .module = http },
+                .{ .name = "zefir", .module = zefir },
             },
         }),
     });
     test_http.dependOn(&addRun(b, http_examples, tsan).step);
-    addHttpGuide(b, test_http, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http }, target, optimize, tsan);
+    addHttpGuide(b, test_http, openapi_step, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http, .zefir = zefir }, target, optimize, tsan);
     // Outside Debug the server does not check the declarations of a route
     // (src/http/check.zig): check_release.zig runs on a ReleaseSafe copy
     // of the module and of its imports, whatever -Doptimize says.
@@ -264,10 +271,6 @@ pub fn build(b: *std.Build) void {
     }, target, optimize, tsan);
 
     addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize, openapi_app);
-    // `zig build openapi` rewrites every OpenAPI document of zefir's tests
-    // and guides from the code: the tests that compare them with their
-    // files, run with ZEFIR_OPENAPI_UPDATE=1.
-    const openapi_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests and guides from the code");
     addOpenapiGoldens(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
     addOpenapiGuide(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
 
@@ -1438,6 +1441,7 @@ const HttpGuideModules = struct {
     confy: *std.Build.Module,
     log: *std.Build.Module,
     http: *std.Build.Module,
+    zefir: *std.Build.Module,
 };
 
 /// The examples of src/http/examples/README.md, the guide of zefir-http,
@@ -1447,10 +1451,15 @@ const HttpGuideModules = struct {
 /// aborting and with code 4 past its time limit; it must exit with 0.
 /// readme_test.zig then checks that README.md shows every file as it is
 /// and every run as it printed. The service, main.zig, imports zio: only
-/// tests/http builds and runs it.
+/// tests/http builds and runs it. The tests of the app find its page and
+/// its OpenAPI document by their absolute paths, `paths`, and run where
+/// every test runs (see addOpenapiGoldens); `zig build openapi`,
+/// `update_step`, runs them with ZEFIR_OPENAPI_UPDATE=1, which rewrites
+/// openapi.json.
 fn addHttpGuide(
     b: *std.Build,
     test_http: *std.Build.Step,
+    update_step: *std.Build.Step,
     m: HttpGuideModules,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
@@ -1463,7 +1472,11 @@ fn addHttpGuide(
         .{ .name = "confy", .module = m.confy },
         .{ .name = "log", .module = m.log },
         .{ .name = "http", .module = m.http },
+        .{ .name = "zefir", .module = m.zefir },
     };
+    const paths = b.addOptions();
+    paths.addOption([]const u8, "public_dir", b.root.joinString(b.allocator, dir ++ "public") catch @panic("OOM"));
+    paths.addOption([]const u8, "openapi_json", b.root.joinString(b.allocator, dir ++ "openapi.json") catch @panic("OOM"));
     const todos_test = b.addTest(.{
         .name = "http-todos-examples",
         .root_module = b.createModule(.{
@@ -1474,7 +1487,11 @@ fn addHttpGuide(
             .imports = imports,
         }),
     });
+    todos_test.root_module.addOptions("paths", paths);
     test_http.dependOn(&addRun(b, todos_test, tsan).step);
+    const update = addRun(b, todos_test, tsan);
+    update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update_step.dependOn(&update.step);
 
     const readme = b.createModule(.{
         .root_source_file = b.path(dir ++ "readme_test.zig"),

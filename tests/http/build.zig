@@ -103,6 +103,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "validator", .module = zefir.module("zefir-validator") },
                     .{ .name = "confy", .module = zefir.module("zefir-confy") },
                     .{ .name = "log", .module = zefir.module("zefir-log") },
+                    .{ .name = "zefir", .module = zefir.module("zefir") },
                     .{ .name = "zio", .module = zio.module("zio") },
                 },
             }) }},

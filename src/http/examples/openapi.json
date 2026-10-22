@@ -1,0 +1,1900 @@
+{
+  "openapi": "3.1.2",
+  "info": {
+    "title": "Todos API",
+    "version": "1.0.0",
+    "description": "The todos of each user: made, changed, deleted, exported as CSV and followed live."
+  },
+  "servers": [
+    {
+      "url": "/api"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Todos",
+      "description": "The todos of the signed-in user."
+    },
+    {
+      "name": "Session",
+      "description": "Signing a browser in and out, with the cookie session."
+    }
+  ],
+  "paths": {
+    "/v1/todos": {
+      "get": {
+        "operationId": "TodosV1.list",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "List todos",
+        "description": "A page of the todos that pass the filter of the query.",
+        "security": [
+          {
+            "bearer": [
+              "todos"
+            ]
+          },
+          {
+            "session": [
+              "todos"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "done",
+            "in": "query",
+            "required": false,
+            "description": "Only the todos that are done, or only those that are not; without it, both.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "description": "The page, from 1.",
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1
+            }
+          },
+          {
+            "name": "perPage",
+            "in": "query",
+            "required": false,
+            "description": "How many todos a page holds.",
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "required": false,
+            "description": "Only the todos that have every one of these tags: ?tags=home&tags=shop, or ?tags=home,shop. The server changes the value before it checks it.",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Only the todos whose title holds these words, in any case. Leading and trailing spaces are removed. Converted to lowercase.",
+            "example": "milk",
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoNotFound": {
+                    "value": {
+                      "code": "todos.not_found",
+                      "message": "Todo not found",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Invalid request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "DeadlineExceeded": {
+                    "value": {
+                      "code": "timeout",
+                      "message": "Gateway Timeout",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "TodosV1.create",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "Create a todo",
+        "description": "A retry with the same Idempotency-Key returns the todo it made.",
+        "security": [
+          {
+            "bearer": [
+              "todos"
+            ]
+          },
+          {
+            "session": [
+              "todos"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Send the same key again to get the todo made the first time, not a second one. Leading and trailing spaces are removed.",
+            "example": "3f2b9c1e-7d4a-4f0e-9a61-2c8d5b7e1f30",
+            "schema": {
+              "type": "string",
+              "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+              "maxLength": 64
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTodoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The todo that the first request with this key made.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoNotFound": {
+                    "value": {
+                      "code": "todos.not_found",
+                      "message": "Todo not found",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoLimitReached": {
+                    "value": {
+                      "code": "todos.limit_reached",
+                      "message": "The plan allows no more todos",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PayloadTooLarge": {
+                    "value": {
+                      "code": "payload_too_large",
+                      "message": "Content Too Large",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "UnsupportedMediaType": {
+                    "value": {
+                      "code": "unsupported_media_type",
+                      "message": "Unsupported Media Type",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Invalid request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "DeadlineExceeded": {
+                    "value": {
+                      "code": "timeout",
+                      "message": "Gateway Timeout",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/todos/{id}": {
+      "get": {
+        "operationId": "TodosV1.get",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "Get a todo",
+        "security": [
+          {
+            "bearer": [
+              "todos"
+            ]
+          },
+          {
+            "session": [
+              "todos"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The id of the todo.",
+            "example": 1,
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoNotFound": {
+                    "value": {
+                      "code": "todos.not_found",
+                      "message": "Todo not found",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Invalid request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "DeadlineExceeded": {
+                    "value": {
+                      "code": "timeout",
+                      "message": "Gateway Timeout",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "TodosV1.update",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "Change a todo",
+        "security": [
+          {
+            "bearer": [
+              "todos"
+            ]
+          },
+          {
+            "session": [
+              "todos"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The id of the todo.",
+            "example": 1,
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateTodoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TodoResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoNotFound": {
+                    "value": {
+                      "code": "todos.not_found",
+                      "message": "Todo not found",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PayloadTooLarge": {
+                    "value": {
+                      "code": "payload_too_large",
+                      "message": "Content Too Large",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "UnsupportedMediaType": {
+                    "value": {
+                      "code": "unsupported_media_type",
+                      "message": "Unsupported Media Type",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Invalid request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "DeadlineExceeded": {
+                    "value": {
+                      "code": "timeout",
+                      "message": "Gateway Timeout",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "TodosV1.delete",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "Delete a todo",
+        "security": [
+          {
+            "bearer": [
+              "todos",
+              "todos:delete"
+            ]
+          },
+          {
+            "session": [
+              "todos",
+              "todos:delete"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The id of the todo.",
+            "example": 1,
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoNotFound": {
+                    "value": {
+                      "code": "todos.not_found",
+                      "message": "Todo not found",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Invalid request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "DeadlineExceeded": {
+                    "value": {
+                      "code": "timeout",
+                      "message": "Gateway Timeout",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/todos/export.csv": {
+      "get": {
+        "operationId": "TodosV1.exportCsv",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "Export todos as CSV",
+        "security": [
+          {
+            "bearer": [
+              "todos"
+            ]
+          },
+          {
+            "session": [
+              "todos"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "All todos, a row each.",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "TodoNotFound": {
+                    "value": {
+                      "code": "todos.not_found",
+                      "message": "Todo not found",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Gateway Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "DeadlineExceeded": {
+                    "value": {
+                      "code": "timeout",
+                      "message": "Gateway Timeout",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/todos/events": {
+      "get": {
+        "operationId": "TodosV1.events",
+        "tags": [
+          "Todos"
+        ],
+        "summary": "Live updates",
+        "description": "Server-sent events: each change of the user's todos, as it happens. A browser's EventSource sends the cookie session.",
+        "security": [
+          {
+            "bearer": [
+              "todos"
+            ]
+          },
+          {
+            "session": [
+              "todos"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The events of the stream, each with the schema of its data: todo.created (TodoResponse), todo.updated (TodoResponse), todo.deleted (TodoIdPath).",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Overloaded": {
+                    "value": {
+                      "code": "unavailable",
+                      "message": "Service Unavailable",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session": {
+      "post": {
+        "operationId": "Session.login",
+        "tags": [
+          "Session"
+        ],
+        "summary": "Sign in",
+        "description": "Sets the cookie session to the token of the form and sends the browser to the page, /. A form that a page of another site posts gets 403.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginForm"
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "Signed in: the cookie session is set, and the browser goes on to /."
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PermissionDenied": {
+                    "value": {
+                      "code": "permission_denied",
+                      "message": "Forbidden",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PayloadTooLarge": {
+                    "value": {
+                      "code": "payload_too_large",
+                      "message": "Content Too Large",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "UnsupportedMediaType": {
+                    "value": {
+                      "code": "unsupported_media_type",
+                      "message": "Unsupported Media Type",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Invalid request",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "Session.logout",
+        "tags": [
+          "Session"
+        ],
+        "summary": "Sign out",
+        "description": "Clears the cookie session and ends the streams of live updates of the user.",
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "Unauthenticated": {
+                    "value": {
+                      "code": "unauthenticated",
+                      "message": "Unauthorized",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": [],
+                      "traceId": ""
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "details",
+          "traceId"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Violation"
+            }
+          },
+          "traceId": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateTodoRequest": {
+        "type": "object",
+        "description": "A new todo of the signed-in user.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "What to do. Leading and trailing spaces are removed.",
+            "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+            "maxLength": 200
+          },
+          "priority": {
+            "$ref": "#/components/schemas/Priority",
+            "description": "How urgent it is.",
+            "default": "normal"
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The day it is due. Leading and trailing spaces are removed.",
+            "format": "date",
+            "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)$",
+            "default": null
+          },
+          "tags": {
+            "type": "array",
+            "description": "Labels of the todo, to find it by.",
+            "default": [],
+            "items": {
+              "type": "string",
+              "description": "Leading and trailing spaces are removed. Converted to lowercase.",
+              "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+              "maxLength": 30
+            }
+          }
+        },
+        "additionalProperties": false,
+        "examples": [
+          {
+            "title": "Buy milk",
+            "priority": "normal",
+            "dueDate": "2026-10-30",
+            "tags": [
+              "home"
+            ]
+          }
+        ]
+      },
+      "LoginForm": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The token of the user. Leading and trailing spaces are removed.",
+            "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false
+      },
+      "Priority": {
+        "type": "string",
+        "enum": [
+          "low",
+          "normal",
+          "high"
+        ]
+      },
+      "TodoIdPath": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "The id of the todo.",
+            "minimum": 1,
+            "examples": [
+              1
+            ]
+          }
+        }
+      },
+      "TodoListResponse": {
+        "type": "object",
+        "description": "A page of the todos of the signed-in user, in the order they were made.",
+        "required": [
+          "items",
+          "page",
+          "perPage",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The todos of the page.",
+            "items": {
+              "$ref": "#/components/schemas/TodoResponse"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "The page, from 1.",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "perPage": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "How many todos a page holds.",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "total": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "How many todos pass the filter, on all the pages.",
+            "minimum": 0
+          }
+        }
+      },
+      "TodoResponse": {
+        "type": "object",
+        "description": "A todo, as the API shows it.",
+        "required": [
+          "id",
+          "title",
+          "done",
+          "priority",
+          "dueDate",
+          "tags"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "uint64",
+            "description": "The id of the todo.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "What to do."
+          },
+          "done": {
+            "type": "boolean",
+            "description": "Whether it is done."
+          },
+          "priority": {
+            "$ref": "#/components/schemas/Priority",
+            "description": "How urgent it is."
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The day it is due; null for none."
+          },
+          "tags": {
+            "type": "array",
+            "description": "Labels of the todo, in lower case.",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UpdateTodoRequest": {
+        "type": "object",
+        "description": "What to change in a todo: a field that is not sent, or is null, stays as it is.",
+        "properties": {
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to do. Leading and trailing spaces are removed.",
+            "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+            "maxLength": 200,
+            "default": null
+          },
+          "done": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether it is done.",
+            "default": null
+          },
+          "priority": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Priority"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How urgent it is.",
+            "default": null
+          },
+          "dueDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The day it is due. Leading and trailing spaces are removed.",
+            "format": "date",
+            "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)$",
+            "default": null
+          }
+        },
+        "additionalProperties": false,
+        "examples": [
+          {
+            "title": null,
+            "done": true,
+            "priority": null,
+            "dueDate": null
+          }
+        ]
+      },
+      "Violation": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "field"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "description": "The token of a user: Authorization: Bearer <token>.",
+        "scheme": "bearer"
+      },
+      "session": {
+        "type": "apiKey",
+        "description": "The token of a user in the cookie session, which POST /api/session sets.",
+        "name": "session",
+        "in": "cookie"
+      }
+    }
+  }
+}

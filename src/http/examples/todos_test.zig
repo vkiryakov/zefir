@@ -1,23 +1,22 @@
 //! Tests of the example app without a network: `http.testing.Backend`
 //! serves the same server, the same controllers and the same middleware
-//! from memory. The app is built as `main` builds it, its settings read
-//! with confy from an environment of the test's own, and its access log
-//! written where the test can read it.
+//! from memory, as `Service.start` builds them for `main`. The settings are
+//! read with confy from an environment of the test's own, and the access
+//! log is written where the test can read it. The tests reach every route,
+//! and in a Debug build the server checks each request and each response
+//! against what its route declares; the last test compares the OpenAPI
+//! document with openapi.json.
 
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
 const log = @import("log");
+const zefir = @import("zefir");
 const auth = @import("auth.zig");
-const Cors = @import("cors.zig").Cors;
-const dto = @import("dto.zig");
-const errors = @import("errors.zig");
-const mw = @import("middleware.zig");
-const Billing = @import("Billing.zig");
-const HealthController = @import("HealthController.zig");
-const SessionController = @import("SessionController.zig");
-const TodoRepository = @import("TodoRepository.zig");
-const TodosV1Controller = @import("TodosV1Controller.zig");
+const Service = @import("Service.zig");
+/// Where the files of the app are, as the build gives them: the directory
+/// of the page and openapi.json.
+const paths = @import("paths");
 
 const testing = std.testing;
 
@@ -29,29 +28,17 @@ const Config = struct {
     },
 };
 
-/// The app as `main` builds it, on the backend in memory and without the
-/// static files, whose directory the module's own tests cover.
+/// The app as `main` builds it, on the backend in memory.
 const App = struct {
     arena: std.heap.ArenaAllocator,
     config: Config = undefined,
     /// What the access log wrote, a record per line.
     records: std.Io.Writer.Allocating,
     logger: log.Logger = undefined,
-    repo: TodoRepository,
-    billing: Billing = .{},
-    live: http.sse.Manager(dto.LiveEvent),
     users: [2]auth.TokenAuth.User = undefined,
-    token_auth: auth.TokenAuth = undefined,
     origins: [1][]const u8 = .{"http://localhost:5173"},
-    cors: Cors = undefined,
-    access_log: mw.AccessLog = undefined,
-    plans: mw.PlanLookup = undefined,
-    app_errors: errors.AppErrors = .{},
-    todos_v1: TodosV1Controller = undefined,
-    sessions: SessionController = undefined,
-    health: HealthController = .{},
     backend: http.testing.Backend,
-    server: http.Server = undefined,
+    service: Service = undefined,
 
     /// Starts the app; `app` stays where it is until `stop`.
     fn start(app: *App) !void {
@@ -59,8 +46,6 @@ const App = struct {
         app.* = .{
             .arena = .init(gpa),
             .records = .init(gpa),
-            .repo = .init(gpa),
-            .live = .init(gpa, .{}),
             .backend = .init(gpa),
         };
         errdefer app.free();
@@ -82,36 +67,19 @@ const App = struct {
             .{ .token = app.config.auth.ann_token, .id = "ann", .permissions = &.{ "todos", "todos:delete" } },
             .{ .token = app.config.auth.bob_token, .id = "bob", .permissions = &.{"todos"} },
         };
-        app.token_auth = .{ .users = &app.users };
-        app.cors = .{ .origins = &app.origins };
-        app.access_log = .{ .logger = app.logger.scoped("access") };
-        app.plans = .{ .billing = &app.billing, .repo = &app.repo };
-        app.todos_v1 = .{ .repo = &app.repo, .live = &app.live, .plans = &app.plans };
-        app.sessions = .{ .token_auth = &app.token_auth, .live = &app.live };
-        app.server = try .init(gpa, .{
-            .backend = app.backend.backend(),
-            .prefix = "/api",
-            .controllers = .{ &app.todos_v1, &app.sessions, &app.health },
-            .middleware = .{ mw.requestId, &app.access_log, http.onResponse(mw.securityHeaders), &app.cors, &app.token_auth },
-            .error_handler = &app.app_errors,
-        });
-        app.server.start(testing.io) catch |err| {
-            app.server.deinit(testing.io);
-            return err;
-        };
+        app.service = .{ .users = &app.users, .origins = &app.origins, .public_dir = paths.public_dir, .logger = app.logger };
+        try app.service.start(gpa, testing.io, app.backend.backend());
     }
 
-    /// Stops the server first: what it borrowed goes after it.
+    /// Stops the service first: what it borrowed goes after it.
     fn stop(app: *App) void {
-        app.server.deinit(testing.io);
+        app.service.deinit(testing.allocator, testing.io);
         app.logger.deinit();
         app.free();
     }
 
     fn free(app: *App) void {
         app.backend.deinit();
-        app.live.deinit(testing.io);
-        app.repo.deinit();
         app.records.deinit();
         app.arena.deinit();
     }
@@ -337,4 +305,28 @@ test "the access log writes a record for every request, the refused ones too" {
     var lines = std.mem.splitScalar(u8, app.records.written(), '\n');
     try testing.expect(std.mem.find(u8, lines.next().?, "[access] Request method=GET path=/api/health status=200 user=- err=- request=test-1") != null);
     try testing.expect(std.mem.find(u8, lines.next().?, "[access] Request method=GET path=/api/v1/todos status=401 user=- err=Unauthenticated request=test-1") != null);
+}
+
+test "the OpenAPI document is openapi.json, which the service serves with a page of it" {
+    var app: App = undefined;
+    try app.start();
+    defer app.stop();
+
+    // With ZEFIR_OPENAPI_UPDATE=1 in the environment, `zig build openapi`
+    // writes the file instead.
+    try zefir.openapi.testing.expectFile(testing.io, app.service.docs.document, paths.openapi_json);
+
+    var document = try app.request(.GET, "/api/openapi.json", &.{}, "");
+    defer document.deinit();
+    try testing.expectEqual(200, document.status);
+    try testing.expectEqualStrings("application/json", document.header("content-type").?);
+    try testing.expectEqualStrings("no-cache", document.header("cache-control").?);
+    // A client that has it already gets 304, without a body.
+    var again = try app.request(.GET, "/api/openapi.json", &.{.{ "if-none-match", document.header("etag").? }}, "");
+    defer again.deinit();
+    try testing.expectEqual(304, again.status);
+    var page = try app.request(.GET, "/api/docs", &.{}, "");
+    defer page.deinit();
+    try testing.expectEqual(200, page.status);
+    try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type").?);
 }
