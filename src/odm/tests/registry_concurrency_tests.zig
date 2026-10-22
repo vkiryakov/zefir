@@ -183,7 +183,6 @@ test "a drain that runs out while gates hold pings" {
         var registry: Registry = .init(testing.allocator, io, fake.driver(), .{ .drain_timeout = .fromMilliseconds(100) });
         defer registry.deinit(io);
         var gate: FakeDriver.Gate = .{};
-        defer gate.open(io);
         try fake.plan("fake://held", .{ .gate = &gate });
         try registry.registerConnection(io, "c1", .{ .uri = "fake://held" });
         try registry.connect(io, .root, "c1");
@@ -192,6 +191,10 @@ test "a drain that runs out while gates hold pings" {
         {
             var group: Io.Group = .init;
             defer group.cancel(io);
+            // Before the cancel: on macOS, std drops a cancel request that
+            // comes during the stack trace std.testing.allocator takes at an
+            // allocation, and a ping that lost its cancel would wait here.
+            defer gate.open(io);
             for (0..8) |_| try group.concurrent(io, pingHeld, .{ &registry, io, &closed, &done });
             try gate.waitFor(io, 8);
             try testing.expectEqual(@as(usize, 8), (try registry.connectionStats(io, "c1")).leases);

@@ -74,7 +74,7 @@ pub const Outcome = struct {
         return o.done.load(.acquire);
     }
 
-    /// The result, once the call returned; error.Timeout after 5 s.
+    /// The result, once the call returned; error.Timeout after 30 s.
     pub fn wait(o: *Outcome, io: Io) !CallError!void {
         try eventually(io, o, isDone);
         return o.result;
@@ -82,13 +82,14 @@ pub const Outcome = struct {
 };
 
 /// Until `holds(arg, io)`, looking every millisecond; error.Timeout after
-/// 5 s on the .awake clock, so that a call that never returns fails the
-/// test.
+/// 30 s on the .awake clock, so that a call that never returns fails the
+/// test. Under ThreadSanitizer on a loaded machine, the drain behind the
+/// 22 tasks of the concurrency test took up to 9 s.
 pub fn eventually(io: Io, arg: anytype, comptime holds: fn (@TypeOf(arg), Io) bool) !void {
-    const give_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+    const give_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(30));
     while (!holds(arg, io)) {
         if (Io.Clock.awake.now(io).nanoseconds >= give_up.nanoseconds) {
-            std.debug.print("the registry did not get there in 5 s\n", .{});
+            std.debug.print("the registry did not get there in 30 s\n", .{});
             return error.Timeout;
         }
         try io.sleep(.fromMilliseconds(1), .awake);

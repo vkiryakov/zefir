@@ -52,6 +52,11 @@ const Load = struct {
     allowed: []const anyerror,
     /// Whether a session is one that the scenario may give.
     check: ?*const fn (session: *const odm.Session, io: Io) bool = null,
+    /// Ends the tasks after their round. A test sets it on every way out of
+    /// the block of its group, before the group's cancel: on macOS, std
+    /// drops a cancel request that comes during the stack trace that
+    /// std.testing.allocator takes at an allocation, and a task that lost
+    /// its cancel would run on.
     stop: std.atomic.Value(bool) = .init(false),
     rounds: std.atomic.Value(usize) = .init(0),
     /// The rounds of the tenants of c1 on its first generation, and on a
@@ -112,12 +117,12 @@ const Load = struct {
     }
 };
 
-/// Until `counter` reaches `n`; error.Timeout after 10 s.
+/// Until `counter` reaches `n`; error.Timeout after 30 s, as `eventually`.
 fn atLeast(io: Io, counter: *std.atomic.Value(usize), n: usize) !void {
-    const give_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(10));
+    const give_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(30));
     while (counter.load(.acquire) < n) {
         if (Io.Clock.awake.now(io).nanoseconds >= give_up.nanoseconds) {
-            std.debug.print("{d} of {d} after 10 s\n", .{ counter.load(.acquire), n });
+            std.debug.print("{d} of {d} after 30 s\n", .{ counter.load(.acquire), n });
             return error.Timeout;
         }
         try io.sleep(.fromMilliseconds(1), .awake);
@@ -160,6 +165,12 @@ test "sessions finish on the old generation while a replacement waits for them" 
         {
             var group: Io.Group = .init;
             defer group.cancel(io);
+            // On any way out the tasks end by themselves, and none waits at
+            // the gate.
+            defer {
+                load.stop.store(true, .release);
+                gate.open(io);
+            }
             try load.start(&group, io, 32, &tenants);
             // Calls of the tenants a and b wait at the gate of c1.
             try gate.waitFor(io, 4);
@@ -220,6 +231,10 @@ test "a drain that runs out closes the calls of the old generation by force" {
         {
             var group: Io.Group = .init;
             defer group.cancel(io);
+            defer {
+                load.stop.store(true, .release);
+                gate.open(io);
+            }
             try load.start(&group, io, 32, &tenants);
             try gate.waitFor(io, 4);
             const start = Io.Clock.awake.now(io);
@@ -257,6 +272,7 @@ test "a tenant removed in the middle of its requests" {
         {
             var group: Io.Group = .init;
             defer group.cancel(io);
+            defer load.stop.store(true, .release);
             try load.start(&group, io, 32, &tenants);
             try atLeast(io, &load.rounds, 64);
             try registry.removeTenant(io, "b");
@@ -336,6 +352,7 @@ test "versions 1 to 20 of one tenant from eight tasks while its sessions work" {
         {
             var group: Io.Group = .init;
             defer group.cancel(io);
+            defer load.stop.store(true, .release);
             try load.start(&group, io, 24, &.{"t"});
             for (0..8) |i| try group.concurrent(io, Versions.run, .{ &versions, io, i });
             try atLeast(io, &versions.done, 8);
@@ -423,6 +440,7 @@ test "a shutdown with cursors open" {
         {
             var group: Io.Group = .init;
             defer group.cancel(io);
+            defer load.stop.store(true, .release);
             try load.start(&group, io, 16, &tenants);
             for (0..8) |i| try group.concurrent(io, Holders.run, .{ &holders, io, tenants[i % tenants.len] });
             try atLeast(io, &holders.opened, 8);
