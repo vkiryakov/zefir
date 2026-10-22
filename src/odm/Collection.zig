@@ -48,6 +48,7 @@ const values = @import("query/values.zig");
 const leases = @import("registry/generation.zig");
 const cursors = @import("Cursor.zig");
 const Session = @import("Session.zig");
+const Query = @import("query/Query.zig").Query;
 const Cursor = cursors.Cursor;
 const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
@@ -220,6 +221,12 @@ pub fn Collection(comptime T: type) type {
             const memory = call.begin(c.session, io);
             defer call.end();
             return call.finish(ensureIndexesIn(T, c.session, io, ctx, memory));
+        }
+
+        /// A find to build at run time, with no condition yet; `arena`
+        /// holds its conditions and the documents of its `first`.
+        pub fn query(c: Self, arena: Allocator) Query(T) {
+            return .{ .session = c.session, .arena = arena, .conditions = .init(arena) };
         }
     };
 }

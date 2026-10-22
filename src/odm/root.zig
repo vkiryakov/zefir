@@ -144,6 +144,10 @@ pub const DeleteResult = collection.DeleteResult;
 /// ctx, arena)) |doc|`. It holds a lease of its own, and may outlive its
 /// session; `deinit` it.
 pub const Cursor = @import("Cursor.zig").Cursor;
+/// A find built at run time, `users.query(arena)`: `where` (an AND),
+/// `sort`, `skip`, `limit`, `batchSize`, then `execute`, `executeAs`,
+/// `first` or `count`.
+pub const Query = @import("query/Query.zig").Query;
 
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
@@ -171,4 +175,5 @@ test {
     _ = @import("tests/provision_concurrency_tests.zig");
     _ = @import("tests/collection_tests.zig");
     _ = @import("tests/cursor_tests.zig");
+    _ = @import("tests/query_tests.zig");
 }
