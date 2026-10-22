@@ -170,11 +170,17 @@ pub fn build(b: *std.Build) void {
     const paths = b.addOptions();
     paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
     tests.root_module.addOptions("paths", paths);
-    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+    const run_tests = b.addRunArtifact(tests);
+    // openapi.json is an input of the run: Zig runs the test again when
+    // the file changes, not only when the code does.
+    run_tests.addFileInput(b.path("openapi.json"));
+    b.step("test", "Run the tests").dependOn(&run_tests.step);
 
-    // zig build openapi: the same test, which then writes openapi.json.
+    // zig build openapi: the same test, which then writes openapi.json. It
+    // has side effects, so it runs every time, never from the cache.
     const update = b.addRunArtifact(tests);
     update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
     b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
 }
 ```
