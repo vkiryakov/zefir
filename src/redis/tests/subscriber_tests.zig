@@ -1,8 +1,12 @@
 //! Tests of `redis.Client.subscribe` and `redis.Subscriber` against
 //! `redis.testing.FakeServer` and `FakeServer.Peer` over loopback: the
 //! subscription on a connection of its own, with the handshake of the
-//! pool's, both commands in one write, and its refusals. Every test runs
-//! under a time limit of 5 s.
+//! pool's, both commands in one write, and its refusals; the messages of
+//! `next`, of channels and of patterns, binary and larger than the read
+//! buffer, the PING of a silent connection, and how a subscriber ends: a
+//! server that stops answering or closes, a message too large, a canceled
+//! task. The waits of `next` run on the `Io` of `windows_like_io.zig` too,
+//! which cannot time a read. Every test runs under a time limit of 5 s.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,6 +19,7 @@ const FakeServer = redis.testing.FakeServer;
 const Peer = FakeServer.Peer;
 const time = @import("../engine/time.zig");
 const peers = @import("peers.zig");
+const WindowsLike = @import("windows_like_io.zig").WindowsLike;
 const within5s = @import("time_limit.zig").within5s;
 
 fn within(io: Io, duration: Io.Duration) redis.OperationContext {
@@ -112,12 +117,12 @@ const Subscribing = struct {
 };
 
 /// Accepts the client's first connection on `peer` and shakes hands on it,
-/// while the client connects.
+/// while the client connects on `io`. The peer is on `std.testing.io`.
 fn connectThrough(io: Io, peer: *Peer, client: *Client) !void {
     var connecting = try io.concurrent(Client.connect, .{ client, io, core.Context.root, null });
     defer connecting.cancel(io) catch {};
-    try peer.accept(io);
-    try peers.shakeHands(peer, io, .zero);
+    try peer.accept(testing.io);
+    try peers.shakeHands(peer, testing.io, .zero);
     try connecting.await(io);
 }
 
@@ -215,4 +220,275 @@ fn refusedAtOnce(io: Io) !void {
     try testing.expectError(error.Closed, client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .diagnostics = &d }));
     try testing.expectEqualStrings("the client is closed", d.message());
     try testing.expectEqual(@as(usize, 0), server.received(io));
+}
+
+fn expectMessage(expected: redis.Subscriber.Message, got: ?redis.Subscriber.Message) !void {
+    const message = got orelse return error.TestExpectedMessage;
+    try testing.expectEqualStrings(expected.channel, message.channel);
+    try testing.expectEqualStrings(expected.payload, message.payload);
+    try testing.expectEqualDeep(expected.pattern, message.pattern);
+}
+
+/// `sub.next` from a task of its own.
+fn nextOf(sub: *redis.Subscriber, io: Io) redis.Error!?redis.Subscriber.Message {
+    return sub.next(io);
+}
+
+const Reading = Io.Future(redis.Error!?redis.Subscriber.Message);
+
+/// Cancels a `next` of `nextOf` that the test left, if it did: before the
+/// subscriber closes.
+fn stopReading(reading: *Reading, io: Io) void {
+    if (reading.cancel(io)) |_| {} else |_| {}
+}
+
+test "next gives the messages of channels and of patterns, a payload byte for byte, one larger than the read buffer whole, and skips pushes of other kinds" {
+    try within5s(testing.io, messages, .{testing.io});
+}
+
+fn messages(io: Io) !void {
+    // 1 MiB, against the 16 KiB of the connection's read buffer.
+    const big = try testing.allocator.alloc(u8, 1024 * 1024);
+    defer testing.allocator.free(big);
+    for (big, 0..) |*b, i| b.* = @truncate(i *% 31);
+    const big_message = [_]FakeServer.Reply{ .{ .string = "message" }, .{ .string = "orders" }, .{ .string = big } };
+    const steps = [_]FakeServer.Step{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .expect(.{ "PSUBSCRIBE", "events.*" }, psubscribed),
+        .send(.message("orders", "new")),
+        .send(.{ .push = &.{ .{ .string = "pmessage" }, .{ .string = "events.*" }, .{ .string = "events.new" }, .{ .string = "x" } } }),
+        .send(.{ .push = &.{ .{ .string = "invalidate" }, .{ .array = &.{.{ .string = "k" }} } } }),
+        .send(.message("orders", "a\r\nb\x00c")),
+        .send(.{ .push = &big_message }),
+        .send(.message("orders", "after")),
+    };
+    var server: FakeServer = try .start(testing.allocator, io, &steps);
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .patterns = &.{"events.*"} });
+    defer sub.close(io);
+    try expectMessage(.{ .channel = "orders", .payload = "new" }, try sub.next(io));
+    try expectMessage(.{ .channel = "events.new", .payload = "x", .pattern = "events.*" }, try sub.next(io));
+    try expectMessage(.{ .channel = "orders", .payload = "a\r\nb\x00c" }, try sub.next(io));
+    const whole = (try sub.next(io)) orelse return error.TestExpectedMessage;
+    try testing.expectEqualStrings("orders", whole.channel);
+    try testing.expect(std.mem.eql(u8, big, whole.payload));
+    try expectMessage(.{ .channel = "orders", .payload = "after" }, try sub.next(io));
+    try server.finish(io);
+}
+
+test "a message that comes between the confirmations of SUBSCRIBE and PSUBSCRIBE is the first that next gives" {
+    try within5s(testing.io, between, .{testing.io});
+}
+
+fn between(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .send(.message("orders", "early")),
+        .expect(.{ "PSUBSCRIBE", "events.*" }, psubscribed),
+        .send(.message("orders", "later")),
+    });
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"}, .patterns = &.{"events.*"} });
+    defer sub.close(io);
+    try expectMessage(.{ .channel = "orders", .payload = "early" }, try sub.next(io));
+    try expectMessage(.{ .channel = "orders", .payload = "later" }, try sub.next(io));
+    try server.finish(io);
+}
+
+/// The confirmation of `SUBSCRIBE orders` and the message `payload` of
+/// `orders`, as a server writes them.
+const orders_confirmation = ">3\r\n$9\r\nsubscribe\r\n$6\r\norders\r\n:1\r\n";
+
+fn ordersMessage(comptime payload: []const u8) []const u8 {
+    return std.fmt.comptimePrint(">3\r\n$7\r\nmessage\r\n$6\r\norders\r\n${d}\r\n{s}\r\n", .{ payload.len, payload });
+}
+
+/// A subscriber of `orders` with `idle_ping` on `peer`, which plays the
+/// server: the client's first connection, then the subscriber's. The
+/// client is on `io`, the peer on `std.testing.io`.
+fn subscribeThrough(io: Io, peer: *Peer, client: *Client, idle_ping: Io.Duration) !redis.Subscriber {
+    try connectThrough(io, peer, client);
+    var subscribing: Subscribing = try .start(io, client, .{ .channels = &.{"orders"}, .idle_ping = idle_ping });
+    defer subscribing.abandon(io);
+    try peer.accept(testing.io);
+    try peers.shakeHands(peer, testing.io, .zero);
+    try peers.expectCommand(peer, &.{ "SUBSCRIBE", "orders" });
+    try peer.send(orders_confirmation);
+    return subscribing.await(io);
+}
+
+test "after idle_ping of silence the subscriber sends PING and takes its +PONG, and the messages go on, also where a read cannot be timed" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, pings, .{io});
+}
+
+/// The client on `io`, the peer on `std.testing.io`.
+fn pings(io: Io) !void {
+    var peer: Peer = try .listen(testing.io);
+    defer peer.close(testing.io);
+    var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
+    defer client.deinit();
+    var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
+    defer sub.close(io);
+
+    const start = time.now(io);
+    var reading = try io.concurrent(nextOf, .{ &sub, io });
+    defer stopReading(&reading, io);
+    try peers.expectCommand(&peer, &.{"PING"});
+    try testing.expect(start.durationTo(time.now(io)).toMilliseconds() >= 90);
+    try peer.send("+PONG\r\n" ++ comptime ordersMessage("first"));
+    try expectMessage(.{ .channel = "orders", .payload = "first" }, try reading.await(io));
+
+    // Silence twice more: a PING each time, its +PONG taken, then a message.
+    reading = try io.concurrent(nextOf, .{ &sub, io });
+    try peers.expectCommand(&peer, &.{"PING"});
+    try peer.send("+PONG\r\n");
+    try peers.expectCommand(&peer, &.{"PING"});
+    try peer.send("+PONG\r\n" ++ comptime ordersMessage("second"));
+    try expectMessage(.{ .channel = "orders", .payload = "second" }, try reading.await(io));
+}
+
+test "a server that does not answer PING makes next ConnectionLost within twice idle_ping, then Closed, and the subscriber's connection closes, also where a read cannot be timed" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, deaf, .{io});
+}
+
+fn deaf(io: Io) !void {
+    var peer: Peer = try .listen(testing.io);
+    defer peer.close(testing.io);
+    var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
+    defer client.deinit();
+    var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
+    defer sub.close(io);
+
+    const start = time.now(io);
+    var reading = try io.concurrent(nextOf, .{ &sub, io });
+    defer stopReading(&reading, io);
+    try peers.expectCommand(&peer, &.{"PING"});
+    try testing.expectError(error.ConnectionLost, reading.await(io));
+    const took = start.durationTo(time.now(io)).toMilliseconds();
+    try testing.expect(took >= 190 and took < 1000);
+    try testing.expect(std.mem.endsWith(u8, sub.diagnostics().message(), " sent nothing within idle_ping (100 ms) after the subscriber's PING"));
+    try testing.expectError(error.Closed, sub.next(io));
+    try testing.expectEqualStrings("the subscriber lost its connection to an error before: close it, and subscribe again", sub.diagnostics().message());
+    // The subscriber ended its connection: the peer reads to its end.
+    _ = try peer.readToEnd();
+}
+
+test "a message whose rest comes 50 ms after its first half, within idle_ping, is one message, also where a read cannot be timed" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, halves, .{io});
+}
+
+fn halves(io: Io) !void {
+    var peer: Peer = try .listen(testing.io);
+    defer peer.close(testing.io);
+    var client: Client = try .init(testing.allocator, io, .{ .url = peer.url() });
+    defer client.deinit();
+    var sub = try subscribeThrough(io, &peer, &client, .fromMilliseconds(100));
+    defer sub.close(io);
+
+    var reading = try io.concurrent(nextOf, .{ &sub, io });
+    defer stopReading(&reading, io);
+    const whole = comptime ordersMessage("halves");
+    try peer.send(whole[0 .. whole.len - 5]);
+    try redis.testing.sleepAtLeast(testing.io, .fromMilliseconds(50));
+    try peer.send(whole[whole.len - 5 ..]);
+    try expectMessage(.{ .channel = "orders", .payload = "halves" }, try reading.await(io));
+}
+
+test "a server that closes the connection makes next ConnectionLost, whose text says a server closes a subscriber that falls behind; then Closed, and no SUBSCRIBE goes out again, also where the end of a stream reads as an error" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, closedByServer, .{io});
+}
+
+/// The client on `io`, the server on `std.testing.io`.
+fn closedByServer(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, testing.io, &.{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .send(.message("orders", "last")),
+        .send(.close_connection),
+    });
+    defer server.stop(testing.io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
+    defer sub.close(io);
+    try expectMessage(.{ .channel = "orders", .payload = "last" }, try sub.next(io));
+    try testing.expectError(error.ConnectionLost, sub.next(io));
+    try testing.expect(std.mem.indexOf(u8, sub.diagnostics().message(), "closed the connection, as a server does to a subscriber that falls behind its messages") != null);
+    try testing.expectError(error.Closed, sub.next(io));
+    try testing.expectEqual(@as(usize, 1), server.count(testing.io, "SUBSCRIBE"));
+    try server.finish(testing.io);
+}
+
+test "a message larger than max_reply_bytes is ReplyTooLarge, and a reply that no PING asked for a ProtocolViolation; next is Closed after either" {
+    try within5s(testing.io, broken, .{testing.io});
+}
+
+fn broken(io: Io) !void {
+    const payload = try testing.allocator.alloc(u8, 70 * 1024);
+    defer testing.allocator.free(payload);
+    @memset(payload, 'x');
+    const too_large = [_]FakeServer.Reply{ .{ .string = "message" }, .{ .string = "orders" }, .{ .string = payload } };
+    const steps = [_]FakeServer.Step{
+        .expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"})),
+        .send(.{ .push = &too_large }),
+        .expect(.{ "SUBSCRIBE", "news" }, .subscribed(&.{"news"})),
+        .send(.ok),
+    };
+    var server: FakeServer = try .start(testing.allocator, io, &steps);
+    defer server.stop(io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url(), .max_reply_bytes = 64 * 1024 });
+    defer client.deinit();
+
+    var orders = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
+    defer orders.close(io);
+    try testing.expectError(error.ReplyTooLarge, orders.next(io));
+    try testing.expectEqualStrings("a message is larger than max_reply_bytes (65536) or nests deeper than 64 levels", orders.diagnostics().message());
+    try testing.expectError(error.Closed, orders.next(io));
+
+    var news = try client.subscribe(io, .of(.root), .{ .channels = &.{"news"} });
+    defer news.close(io);
+    try testing.expectError(error.ProtocolViolation, news.next(io));
+    try testing.expectEqualStrings("the server sent a reply that the subscriber did not ask for", news.diagnostics().message());
+    try testing.expectError(error.Closed, news.next(io));
+    try testing.expectEqual(@as(usize, 2), server.count(io, "SUBSCRIBE"));
+    try server.finish(io);
+}
+
+test "a task canceled while next waits is Interrupted and keeps its cancelation, and next is Closed after it, also where a read cannot be timed" {
+    var windows: WindowsLike = undefined;
+    for ([_]Io{ testing.io, windows.io() }) |io| try within5s(testing.io, canceled, .{io});
+}
+
+fn nextCanceled(sub: *redis.Subscriber, io: Io) !void {
+    try testing.expectError(error.Interrupted, sub.next(io));
+    try testing.expectError(error.Canceled, io.checkCancel());
+}
+
+/// The client on `io`, the server on `std.testing.io`.
+fn canceled(io: Io) !void {
+    var server: FakeServer = try .start(testing.allocator, testing.io, &.{.expect(.{ "SUBSCRIBE", "orders" }, .subscribed(&.{"orders"}))});
+    defer server.stop(testing.io);
+    var client: Client = undefined;
+    try connected(io, &client, .{ .url = server.url() });
+    defer client.deinit();
+    var sub = try client.subscribe(io, .of(.root), .{ .channels = &.{"orders"} });
+    defer sub.close(io);
+    var reading = try io.concurrent(nextCanceled, .{ &sub, io });
+    defer reading.cancel(io) catch {};
+    // Long enough for next to wait on the socket.
+    try redis.testing.sleepAtLeast(testing.io, .fromMilliseconds(50));
+    try reading.cancel(io);
+    try testing.expectError(error.Closed, sub.next(io));
+    try server.finish(testing.io);
 }

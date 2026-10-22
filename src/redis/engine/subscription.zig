@@ -26,6 +26,7 @@ const Client = @import("../Client.zig");
 const Message = @import("../Subscriber.zig").Message;
 const Connection = @import("Connection.zig");
 const connect_ = @import("connect.zig");
+const time = @import("time.zig");
 const List = std.DoublyLinkedList;
 
 /// A subscriber, in the heap: the client reaches it here, from another
@@ -47,13 +48,85 @@ pub const State = struct {
     early: std.ArrayList(Parts) = .empty,
     early_bytes: std.ArrayList(u8) = .empty,
     early_given: usize = 0,
+    /// The bytes of the message that `next` gave last, which live until
+    /// the next call.
+    buffer: std.ArrayList(u8) = .empty,
+    /// How many of the subscriber's PINGs have their reply still to come.
+    pongs_due: u32 = 0,
+    /// Set once an error ended the subscriber: `next` is `error.Closed`.
+    failed: bool = false,
 
     /// Closes the connection and frees the state.
     pub fn destroy(state: *State) void {
         if (state.conn) |conn| conn.destroy();
         state.early.deinit(state.gpa);
         state.early_bytes.deinit(state.gpa);
+        state.buffer.deinit(state.gpa);
         state.gpa.destroy(state);
+    }
+
+    /// The next message, for `Subscriber.next`: those that came between
+    /// the confirmations first, then those that come on the connection. A
+    /// frame is read whole, each read waiting `idle_ping` at most; between
+    /// frames, `idle_ping` of silence sends PING, and as long again without
+    /// a frame is `error.ConnectionLost`. A reply is the one of a PING, and
+    /// a push other than a message is skipped.
+    pub fn receive(state: *State, io: Io, d: *Diagnostics) Error!Message {
+        if (state.early_given < state.early.items.len) {
+            const parts = state.early.items[state.early_given];
+            state.early_given += 1;
+            return parts.of(state.early_bytes.items);
+        }
+        if (state.early.items.len > 0) {
+            // The last of them lived until this call.
+            state.early.clearAndFree(state.gpa);
+            state.early_bytes.clearAndFree(state.gpa);
+            state.early_given = 0;
+        }
+        const conn = state.conn.?;
+        const ds = &conn.stream;
+        // A read that waits in a task of its own ends with the call.
+        defer ds.endWait();
+        state.buffer.clearRetainingCapacity();
+        ds.beginGaps(state.idle_ping);
+        var quiet_since = time.now(io);
+        var pinged = false;
+        while (true) {
+            const came = ds.awaitData(.after(quiet_since, state.idle_ping)) catch |err| return lost(conn, err, d);
+            if (!came) {
+                if (pinged) {
+                    return calls.fail(d, .wait, error.ConnectionLost, "the server at {f} sent nothing within idle_ping ({d} ms) after the subscriber's PING", .{ conn.address, state.idle_ping.toMilliseconds() });
+                }
+                ds.writer.writeAll("*1\r\n$4\r\nPING\r\n") catch |err| return lost(conn, err, d);
+                ds.writer.flush() catch |err| return lost(conn, err, d);
+                state.pongs_due += 1;
+                pinged = true;
+                quiet_since = time.now(io);
+                continue;
+            }
+            var reader: resp.Reader = .init(&ds.reader, conn.max_reply_bytes);
+            const frame = readFrame(&reader, &state.buffer, state.gpa, null) catch |err| return lost(conn, err, d);
+            switch (frame) {
+                .message => |parts| return parts.of(state.buffer.items),
+                // Any reply to PING, an error too, says the server is there.
+                .reply, .refused => {
+                    if (state.pongs_due == 0) return calls.fail(d, .receive, error.ProtocolViolation, "the server sent a reply that the subscriber did not ask for", .{});
+                    state.pongs_due -= 1;
+                },
+                .confirmed, .other => {},
+            }
+            state.buffer.clearRetainingCapacity();
+            quiet_since = time.now(io);
+            pinged = false;
+        }
+    }
+
+    /// Ends the subscriber after an error of `next`: its connection is
+    /// shut down, so that the server drops the subscription, and `next` is
+    /// `error.Closed` from now on.
+    pub fn fail(state: *State, io: Io) void {
+        state.failed = true;
+        state.conn.?.cut(io);
     }
 
     /// Waits for the confirmation of `name`, a channel or a pattern as
@@ -211,6 +284,41 @@ fn confirmationFailed(conn: *Connection, err: FrameError, d: ?*Diagnostics) Erro
     }
 }
 
+/// The error of a read or a write of a subscriber's connection, in `next`,
+/// that failed with `err`.
+fn lost(conn: *Connection, err: LostError, d: *Diagnostics) Error {
+    const at = conn.address;
+    switch (err) {
+        error.ProtocolViolation => return calls.fail(d, .receive, error.ProtocolViolation, "a frame from the server at {f} broke RESP3", .{at}),
+        error.ReplyTooLarge => return calls.fail(d, .receive, error.ReplyTooLarge, "a message is larger than max_reply_bytes ({d}) or nests deeper than {d} levels", .{ conn.max_reply_bytes, resp.Reader.max_depth }),
+        error.OutOfMemory => return calls.fail(d, .receive, error.OutOfMemory, "no memory was left for a message", .{}),
+        error.EndOfStream, error.ReadFailed, error.WriteFailed => {},
+    }
+    const phase: Diagnostics.Phase = if (err == error.WriteFailed) .send else .receive;
+    const cause = conn.stream.err orelse error.EndOfStream;
+    switch (cause) {
+        // Windows reads the end of a stream that the server closed as
+        // error.Unexpected.
+        error.EndOfStream, error.ConnectionResetByPeer, error.Unexpected => {
+            d.set(phase, conn.stream.err, "the server at {f} closed the connection, as a server does to a subscriber that falls behind its messages (client-output-buffer-limit pubsub)", .{at});
+            return error.ConnectionLost;
+        },
+        error.Timeout => return switch (phase) {
+            .send => calls.fail(d, phase, error.ConnectionLost, "the PING to {f} did not go out within idle_ping", .{at}),
+            else => calls.fail(d, phase, error.ConnectionLost, "the server at {f} sent no byte within idle_ping in the middle of a frame", .{at}),
+        },
+        error.Canceled => {
+            conn.stream.io.recancel();
+            return calls.fail(d, phase, error.Interrupted, "the task was canceled while the subscriber waited for a message", .{});
+        },
+        error.Stopped => return calls.fail(d, phase, error.ConnectionLost, "the subscriber's connection was cut", .{}),
+        else => {
+            d.set(phase, cause, "the connection to {f} broke: {t}", .{ at, cause });
+            return error.ConnectionLost;
+        },
+    }
+}
+
 /// A channel of SUBSCRIBE or a pattern of PSUBSCRIBE.
 pub const Kind = enum { channel, pattern };
 
@@ -256,6 +364,9 @@ pub const Frame = union(enum) {
 };
 
 pub const FrameError = resp.Reader.Error || Allocator.Error;
+
+/// What fails a read or a write of `next`.
+const LostError = FrameError || Io.Writer.Error;
 
 /// Reads one frame through `r`, the strings of a message or of a
 /// confirmation into `out`, from `gpa`.

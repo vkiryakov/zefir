@@ -19,6 +19,14 @@
 //! not end a read that waits on a socket its own side shut down, but the
 //! cancelation of its task does.
 //!
+//! A subscriber waits long between frames, and its wait must leave the
+//! stream as it was when nothing came: `awaitData` reads what comes until
+//! a deadline, and says when nothing did. On an `Io` that cannot time a
+//! read, that read waits in a task of its own, which a wait that ends
+//! leaves running for the next one: no byte it brings is lost. Inside a
+//! frame, `beginGaps` gives each read and write a time of its own to move
+//! bytes in, instead of one deadline for all.
+//!
 //! It points into itself: `init` it in place, in an object that does not
 //! move.
 
@@ -42,6 +50,15 @@ cut_by: std.atomic.Value(Cut) = .init(.none),
 /// Set once the stream is cut: it ends the wait for an operation in a
 /// task of its own.
 cut_event: Io.Event = .unset,
+/// Each read and write of the exchange in progress may wait this long for
+/// its bytes, from its start; null: the deadline holds for all of them.
+gap: ?Io.Duration = null,
+/// The read that `awaitData` left waiting in a task of its own, on an `Io`
+/// that cannot time a read, and the buffer it reads into.
+waiting: ?Io.Future(Io.Cancelable!Io.Operation.Result) = null,
+waiting_data: [1][]u8 = undefined,
+/// Set when that read ends, and when the stream is cut.
+woken: Io.Event = .unset,
 reader: Io.Reader,
 writer: Io.Writer,
 
@@ -70,7 +87,109 @@ pub fn init(ds: *DeadlineStream, io: Io, stream: net.Stream, read_buffer: []u8, 
 /// Starts an exchange that must end by `deadline`; null for none.
 pub fn begin(ds: *DeadlineStream, deadline: ?core.Deadline) void {
     ds.deadline = deadline;
+    ds.gap = null;
     ds.err = null;
+}
+
+/// Starts an exchange whose reads and writes may each wait `gap` for their
+/// bytes, however long the exchange takes: a subscriber's, whose message
+/// may be large, but whose bytes must keep coming.
+pub fn beginGaps(ds: *DeadlineStream, gap: Io.Duration) void {
+    ds.deadline = null;
+    ds.gap = gap;
+    ds.err = null;
+}
+
+/// For a subscriber, between frames: waits until bytes come, and reads
+/// them into the buffer of the reader, until `until`. True once the reader
+/// holds bytes; false when `until` came first, with nothing read and the
+/// stream as it was, for the next wait. A read that failed is
+/// `error.ReadFailed`, with the cause in `err`, and the end of the stream
+/// `error.EndOfStream`, as for the reader.
+///
+/// On an `Io` that cannot time a read, the read waits in a task of its own:
+/// a wait that ends at `until` leaves it running, and the next wait goes on
+/// with it. A cut ends it, and so does the cancelation of the waiting task;
+/// `endWait` ends it otherwise, when the stream is done with.
+pub fn awaitData(ds: *DeadlineStream, until: core.Deadline) Io.Reader.Error!bool {
+    const io = ds.io;
+    const r = &ds.reader;
+    if (r.bufferedLen() > 0) return true;
+    if (ds.waiting == null) {
+        if (ds.cutError()) |err| return ds.readFailed(err);
+        // Nothing is buffered: the whole buffer takes what comes.
+        r.seek = 0;
+        r.end = 0;
+        ds.waiting_data = .{r.buffer};
+        const operation: Io.Operation = .{ .net_read = .{ .socket_handle = ds.stream.socket.handle, .data = &ds.waiting_data } };
+        while (true) {
+            const result = io.operateTimeout(operation, time.step(io, until).toTimeout()) catch |err| switch (err) {
+                // The read did not start: the stream is as it was.
+                error.Timeout => {
+                    if (time.expired(io, until)) return false;
+                    continue;
+                },
+                error.ConcurrencyUnavailable => break,
+                error.Canceled => return ds.readFailed(error.Canceled),
+            };
+            return ds.received(result);
+        }
+        // A cut from now on wakes the wait below.
+        ds.woken.reset();
+        ds.waiting = io.concurrent(readWaking, .{ ds, operation }) catch |err| return ds.readFailed(err);
+    }
+    while (true) {
+        if (ds.cutError()) |err| {
+            ds.endWait();
+            return ds.readFailed(err);
+        }
+        if (ds.woken.isSet()) break;
+        ds.woken.waitTimeout(io, time.step(io, until).toTimeout()) catch |err| switch (err) {
+            // `until`, a step of a far one, or a spurious wakeup.
+            error.Timeout => if (!ds.woken.isSet() and time.expired(io, until)) return false,
+            error.Canceled => {
+                ds.endWait();
+                return ds.readFailed(error.Canceled);
+            },
+        };
+    }
+    var waiting = ds.waiting.?;
+    ds.waiting = null;
+    const result = waiting.await(io) catch |err| return ds.readFailed(err);
+    return ds.received(result);
+}
+
+/// Ends the read that `awaitData` left waiting in a task of its own, if
+/// any: cancels it and waits for it. What it read is lost, so only a
+/// stream that is done with ends its wait.
+pub fn endWait(ds: *DeadlineStream) void {
+    var waiting = ds.waiting orelse return;
+    ds.waiting = null;
+    if (waiting.cancel(ds.io)) |_| {} else |_| {}
+}
+
+/// The read of `awaitData` in a task of its own: it wakes the wait when it
+/// ends.
+fn readWaking(ds: *DeadlineStream, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    defer ds.woken.set(ds.io);
+    return ds.io.operate(operation);
+}
+
+/// What the read of `awaitData` got into the buffer of the reader.
+fn received(ds: *DeadlineStream, result: Io.Operation.Result) Io.Reader.Error!bool {
+    const read = result.net_read catch |err| return ds.readFailed(ds.failure(err));
+    if (read.data_len == 0) {
+        // The end of a stream that was cut is the cut's.
+        if (ds.cutError()) |err| return ds.readFailed(err);
+        return error.EndOfStream;
+    }
+    ds.reader.end = read.data_len;
+    return true;
+}
+
+fn readFailed(ds: *DeadlineStream, err: Error) error{ReadFailed} {
+    ds.err = err;
+    return error.ReadFailed;
 }
 
 /// Shuts `stream` down both ways, from any task: a read blocked on it
@@ -90,6 +209,7 @@ pub fn cut(ds: *DeadlineStream, io: Io, by: Cut) void {
     _ = ds.cut_by.cmpxchgStrong(.none, by, .acq_rel, .monotonic);
     shutdown(io, ds.stream);
     ds.cut_event.set(io);
+    ds.woken.set(io);
 }
 
 /// The error of a cut stream; null while nobody cut it.
@@ -114,6 +234,7 @@ fn failure(ds: *const DeadlineStream, err: Error) Error {
 fn operate(ds: *DeadlineStream, operation: Io.Operation) Error!Io.Operation.Result {
     const io = ds.io;
     if (ds.cutError()) |err| return err;
+    if (ds.gap) |gap| ds.deadline = .after(time.now(io), gap);
     while (true) {
         return io.operateTimeout(operation, time.step(io, ds.deadline).toTimeout()) catch |err| switch (err) {
             // A step of a far deadline or of none ended, or a timer fired
