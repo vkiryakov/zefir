@@ -492,7 +492,11 @@ fn writeLine(w: *std.Io.Writer, route: Checked, what: What, error_path: bool) st
             if (declaresStatus(t, a.status, error_path)) {
                 if (a.media) |media| try w.print(" as {s}", .{media}) else try w.writeAll(" without a body");
             }
-            try w.writeAll(", which it does not declare in .responses");
+            // An SSE route, the one with events, has no .responses.
+            if (t.events != null) {
+                try w.writeAll(", which it does not declare: an SSE route answers with its stream, 204 and what mapError gives its errors; " ++
+                    "declare it in the .responses of the openapi of the middleware that answers, or keep the handler and the error handler to those");
+            } else try w.writeAll(", which it does not declare in .responses");
         },
     }
 }
@@ -809,6 +813,7 @@ const ItemsV1Controller = struct {
 
     pub fn events(self: *ItemsV1Controller, ctx: *sse.Context) !void {
         if (is(ctx.internal.http, "stop")) return;
+        if (is(ctx.internal.http, "410")) return error.TodoNotFound;
         if (is(ctx.internal.http, "other events")) {
             _ = try self.other.subscribe(ctx, "items");
             return;
@@ -1026,6 +1031,11 @@ test "check: what the error handler's handle changes is compared too" {
 
     try f.expectRefused(.GET, "/api/v1/items/1", "html", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 404 as text/html, which it does not declare in .responses");
     try f.expectRefused(.GET, "/api/v1/items/1", "410", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 410, which it does not declare in .responses");
+    // An SSE route has no .responses: the line says where its answers are
+    // declared.
+    try f.expectRefused(.GET, "/api/v1/items/events", "410", "zefir.http: GET /api/v1/items/events (ItemsV1Controller.events) answered 410, which it does not declare: " ++
+        "an SSE route answers with its stream, 204 and what mapError gives its errors; declare it in the .responses of the openapi of the middleware that answers, " ++
+        "or keep the handler and the error handler to those");
     // What it reads to choose its answer is not the route's input.
     try f.expectPassed(.GET, "/api/v1/items/1", "negotiate", 404);
 }
