@@ -17,7 +17,7 @@ const Session = e2e.Session;
 
 const Order = struct { id: i64, total: f64 };
 
-test "entries of a struct go in with XADD and come back by XRANGE, XREVRANGE and XREAD; XLEN, XDEL, XTRIM; NOMKSTREAM adds nothing to a stream that is not there" {
+test "entries of a struct go in with XADD and come back by XRANGE, XREVRANGE and XREAD; XLEN, XDEL, XTRIM; xaddNoMkstream adds to a stream that is there, and to one that is not nothing: null" {
     try e2e.onZio(entries);
 }
 
@@ -51,8 +51,9 @@ fn entries(io: Io) !void {
     try testing.expectEqualDeep(all[2..], try s.run(cmd.xrange(Order, k, .{})));
     try testing.expectEqual(@as(u64, 0), try s.run(cmd.xtrim(k, .{ .min_id = third_id }, .{})));
 
-    var d: redis.Diagnostics = .{};
-    try testing.expectError(error.UnexpectedReply, s.client.run(io, within(io, .fromSeconds(10)), cmd.xadd(none, Order{ .id = 4, .total = 40 }, .{ .no_mkstream = true }), .{ .diagnostics = &d }));
+    const fourth = (try s.run(cmd.xaddNoMkstream(k, Order{ .id = 4, .total = 40 }, .{}))).?;
+    try testing.expectEqualDeep(@as([]const redis.Entry(Order), &.{ all[2], .{ .id = fourth, .fields = .{ .id = 4, .total = 40 } } }), try s.run(cmd.xrange(Order, k, .{})));
+    try testing.expectEqual(@as(?redis.StreamId, null), try s.run(cmd.xaddNoMkstream(none, Order{ .id = 5, .total = 50 }, .{})));
     try testing.expectEqual(@as(u64, 0), try s.run(cmd.exists(&.{none})));
 }
 

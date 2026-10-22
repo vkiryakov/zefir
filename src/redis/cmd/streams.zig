@@ -3,9 +3,11 @@
 //! their consumers hold pending, XAUTOCLAIM, XDEL and XTRIM.
 //!
 //! The fields of an entry are a struct, as those of a hash (`cmd.hset`),
-//! or a list of `redis.FieldValue`; an entry read back is a
-//! `redis.Entry(T)`, its id and its fields read into `T`. `fields` is null
-//! for an entry deleted while it was pending in a group.
+//! or a list of `redis.FieldValue`: `xadd` adds it, making the stream when
+//! it is not there, and `xaddNoMkstream` only to a stream that is there,
+//! null otherwise. An entry read back is a `redis.Entry(T)`, its id and
+//! its fields read into `T`. `fields` is null for an entry deleted while
+//! it was pending in a group.
 //!
 //! XREAD and XREADGROUP read one stream, and no entry is an empty slice;
 //! several streams at once go through `cmd.raw`. With `.block` they wait
@@ -39,6 +41,7 @@ const Element = resp.Reader.Element;
 const Key = struct { key: []const u8 };
 const Group = struct { key: []const u8, group: []const u8 };
 
+/// The options of `xadd` and `xaddNoMkstream`.
 pub const XaddOptions = struct {
     /// The id of the entry; null: `*`, the next one the server gives.
     id: ?StreamId = null,
@@ -47,26 +50,48 @@ pub const XaddOptions = struct {
     /// `~` of MAXLEN: whole nodes only, which is cheaper; the stream may
     /// keep some more entries.
     approximate: bool = true,
-    /// NOMKSTREAM: no stream is made for the entry.
-    no_mkstream: bool = false,
 };
 
-/// XADD `key` [NOMKSTREAM] [MAXLEN [~] n] `id`|* `field` `value`…: adds an
-/// entry of `fields`, a struct or a list of `redis.FieldValue`, and
-/// returns its id. One field at least. With `.no_mkstream`, a stream that
-/// is not there gets no entry, and the server answers null, which is
-/// UnexpectedReply here; `cmd.raw(?redis.StreamId, .{ "XADD", … })` reads it.
+/// XADD `key` [MAXLEN [~] n] `id`|* `field` `value`…: adds an entry of
+/// `fields`, a struct or a list of `redis.FieldValue`, and returns its id.
+/// One field at least. A stream that is not there is made for it.
 pub fn xadd(key: []const u8, fields: anytype, options: XaddOptions) Xadd(command.FieldsOf(@TypeOf(fields))) {
     return .{ .key = key, .fields = command.fieldsOf(fields), .options = options };
 }
 
 pub fn Xadd(comptime F: type) type {
-    const call = "redis.cmd.xadd";
+    return Add(F, "redis.cmd.xadd", .make);
+}
+
+/// XADD `key` NOMKSTREAM [MAXLEN [~] n] `id`|* `field` `value`…: adds an
+/// entry of `fields` as `xadd` does, but only to a stream that is there:
+/// its id, or null when there is no such stream and nothing was added.
+pub fn xaddNoMkstream(key: []const u8, fields: anytype, options: XaddOptions) XaddNoMkstream(command.FieldsOf(@TypeOf(fields))) {
+    return .{ .key = key, .fields = command.fieldsOf(fields), .options = options };
+}
+
+pub fn XaddNoMkstream(comptime F: type) type {
+    return Add(F, "redis.cmd.xaddNoMkstream", .keep);
+}
+
+/// What XADD does with a stream that is not there.
+const Missing = enum {
+    /// It makes the stream: the reply is the id.
+    make,
+    /// NOMKSTREAM: it adds nothing, and the reply is null.
+    keep,
+};
+
+fn Add(comptime F: type, comptime call: []const u8, comptime missing: Missing) type {
     // An array of fields is the command's own: the hash code reads it
     // through a pointer.
     const own = @typeInfo(F) == .array;
     const List = if (own) *const F else F;
     hash.checkWrite(List, call);
+    const R = switch (missing) {
+        .make => StreamId,
+        .keep => ?StreamId,
+    };
     return struct {
         key: []const u8,
         fields: F,
@@ -74,7 +99,7 @@ pub fn Xadd(comptime F: type) type {
 
         const Self = @This();
 
-        pub const Reply = StreamId;
+        pub const Reply = R;
 
         fn list(c: *const Self) List {
             return if (own) &c.fields else c.fields;
@@ -87,12 +112,12 @@ pub fn Xadd(comptime F: type) type {
 
         pub fn write(c: Self, w: resp.Writer) resp.Writer.Error!void {
             const o = c.options;
-            var n: usize = 3 + 2 * hash.fieldCount(c.list()) + @intFromBool(o.no_mkstream);
+            var n: usize = 3 + 2 * hash.fieldCount(c.list()) + @intFromBool(missing == .keep);
             if (o.max_len != null) n += 2 + @as(usize, @intFromBool(o.approximate));
             try w.arrayHeader(n);
             try w.bulk("XADD");
             try w.bulk(c.key);
-            if (o.no_mkstream) try w.bulk("NOMKSTREAM");
+            if (missing == .keep) try w.bulk("NOMKSTREAM");
             if (o.max_len) |max| {
                 try w.bulk("MAXLEN");
                 if (o.approximate) try w.bulk("~");
@@ -102,8 +127,8 @@ pub fn Xadd(comptime F: type) type {
             try hash.write(w, c.list());
         }
 
-        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!StreamId {
-            return resp.decode(StreamId, r, arena, diagnostics);
+        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!R {
+            return resp.decode(R, r, arena, diagnostics);
         }
 
         pub fn name(_: Self) []const u8 {

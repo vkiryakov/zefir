@@ -30,10 +30,11 @@
 //!   A range read into `redis.Scored(M)` asks for WITHSCORES.
 //! - Scripts: `eval` of a text, and `evalScript` of a `redis.Script`,
 //!   which `run` sends by its SHA1, and by its text after NOSCRIPT.
-//! - Streams: `xadd`, `xlen`, `xrange`, `xrevrange`, `xread`,
-//!   `xreadgroup`, `xack`, `xgroupCreate`, `xpending`, `xpendingRange`,
-//!   `xautoclaim`, `xdel`, `xtrim`. XREAD and XREADGROUP read one stream,
-//!   and with `.block` take their timeout from the deadline of the call.
+//! - Streams: `xadd`, `xaddNoMkstream`, `xlen`, `xrange`, `xrevrange`,
+//!   `xread`, `xreadgroup`, `xack`, `xgroupCreate`, `xpending`,
+//!   `xpendingRange`, `xautoclaim`, `xdel`, `xtrim`. XREAD and XREADGROUP
+//!   read one stream, and with `.block` take their timeout from the
+//!   deadline of the call.
 //! - Pub/sub: `publish`.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
@@ -237,6 +238,8 @@ pub const EvalScript = scripting.EvalScript;
 pub const xadd = streams.xadd;
 pub const Xadd = streams.Xadd;
 pub const XaddOptions = streams.XaddOptions;
+pub const xaddNoMkstream = streams.xaddNoMkstream;
+pub const XaddNoMkstream = streams.XaddNoMkstream;
 pub const xlen = streams.xlen;
 pub const Xlen = streams.Xlen;
 pub const xrange = streams.xrange;

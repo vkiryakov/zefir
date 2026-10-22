@@ -77,9 +77,10 @@ test "every function of redis.cmd has a test of the catalog, and every name of a
         }
         return error.TestUnexpectedResult;
     }
-    // The whole catalog of the design's §4: the 89 functions of its tables
-    // and raw, watch and unwatch.
-    try testing.expectEqual(@as(usize, 92), functions.len);
+    // The whole catalog of the design's §4: the 89 functions of its
+    // tables, xaddNoMkstream, the form of xadd whose reply may be null, and
+    // raw, watch and unwatch.
+    try testing.expectEqual(@as(usize, 93), functions.len);
 }
 
 test "a function taken out of its list fails the check, which names it; so does a name that is no function" {

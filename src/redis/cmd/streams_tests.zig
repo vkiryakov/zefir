@@ -19,7 +19,7 @@ const within5s = @import("../tests/time_limit.zig").within5s;
 
 /// The functions of `redis.cmd` that this file tests, for the check that
 /// every function of the catalog has a test.
-pub const covered = [_][]const u8{ "xadd", "xlen", "xrange", "xrevrange", "xread", "xreadgroup", "xack", "xgroupCreate", "xpending", "xpendingRange", "xautoclaim", "xdel", "xtrim" };
+pub const covered = [_][]const u8{ "xadd", "xaddNoMkstream", "xlen", "xrange", "xrevrange", "xread", "xreadgroup", "xack", "xgroupCreate", "xpending", "xpendingRange", "xautoclaim", "xdel", "xtrim" };
 
 const Order = struct { id: i64, total: f64 };
 const Entry = redis.Entry(Order);
@@ -35,7 +35,7 @@ const order_entry: FakeServer.Reply = .{ .array = &.{
 const deleted_entry: FakeServer.Reply = .{ .array = &.{ .{ .string = "1526919030474-1" }, .nil } };
 const orders_read: FakeServer.Reply = .{ .pairs = &.{.{ .{ .string = "orders" }, .{ .array = &.{order_entry} } }} };
 
-test "xadd writes the fields and its options and reads the id; xlen, xrange, xrevrange, xdel and xtrim send their arguments and read their replies" {
+test "xadd writes the fields and its options and reads the id; xaddNoMkstream sends NOMKSTREAM and reads null for a stream that is not there; xlen, xrange, xrevrange, xdel and xtrim send their arguments and read their replies" {
     try within5s(testing.io, entries, .{testing.io});
 }
 
@@ -44,6 +44,7 @@ fn entries(io: Io) !void {
         .expect(.{ "XADD", "orders", "*", "id", "7", "total", "12.5" }, .{ .string = "1526919030474-0" }),
         .expect(.{ "XADD", "orders", "MAXLEN", "~", "1000", "*", "id", "7", "total", "12.5" }, .{ .string = "1526919030474-1" }),
         .expect(.{ "XADD", "orders", "NOMKSTREAM", "MAXLEN", "1000", "5-1", "note", "x" }, .{ .string = "5-1" }),
+        .expect(.{ "XADD", "gone", "NOMKSTREAM", "MAXLEN", "~", "10", "*", "id", "7", "total", "12.5" }, .nil),
         .expect(.{ "XLEN", "orders" }, .{ .integer = 3 }),
         .expect(.{ "XRANGE", "orders", "-", "+" }, .{ .array = &.{ order_entry, deleted_entry } }),
         .expect(.{ "XRANGE", "orders", "5-1", "+", "COUNT", "10" }, .{ .array = &.{} }),
@@ -62,7 +63,8 @@ fn entries(io: Io) !void {
     try testing.expectEqual(first, try t.run(io, cmd.xadd("orders", Order{ .id = 7, .total = 12.5 }, .{})));
     try testing.expectEqual(second, try t.run(io, cmd.xadd("orders", Order{ .id = 7, .total = 12.5 }, .{ .max_len = 1000 })));
     const id: redis.StreamId = .{ .ms = 5, .seq = 1 };
-    try testing.expectEqual(id, try t.run(io, cmd.xadd("orders", &.{.{ .field = "note", .value = "x" }}, .{ .id = id, .max_len = 1000, .approximate = false, .no_mkstream = true })));
+    try testing.expectEqual(@as(?redis.StreamId, id), try t.run(io, cmd.xaddNoMkstream("orders", &.{.{ .field = "note", .value = "x" }}, .{ .id = id, .max_len = 1000, .approximate = false })));
+    try testing.expectEqual(@as(?redis.StreamId, null), try t.run(io, cmd.xaddNoMkstream("gone", Order{ .id = 7, .total = 12.5 }, .{ .max_len = 10 })));
     try testing.expectEqual(@as(u64, 3), try t.run(io, cmd.xlen("orders")));
     try testing.expectEqualDeep(@as([]const Entry, &.{ order, .{ .id = second, .fields = null } }), try t.run(io, cmd.xrange(Order, "orders", .{})));
     try testing.expectEqualDeep(@as([]const Entry, &.{}), try t.run(io, cmd.xrange(Order, "orders", .{ .start = id, .count = 10 })));
