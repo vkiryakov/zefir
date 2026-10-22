@@ -18,6 +18,7 @@
 //!                     included, against its schema in their documents
 //!                     with ajv; prints `<n> exchanges, <k> invalid` and
 //!                     fails on one
+//!   zig build all     regex, oas and codec, as CI runs them
 //!   zig build check   build the Zig programs without running them; no
 //!                     Docker needed
 
@@ -81,6 +82,11 @@ pub fn build(b: *std.Build) void {
     const exchanges = b.addRunArtifact(codec).addOutputFileArg("codec.json");
     const codec_step = b.step("codec", "Check the bodies of the golden applications of zefir-openapi against their schemas with ajv, in Docker");
     codec_step.dependOn(&dockerCheck(b, "check the bodies against their schemas", node_image, "node", npm_ci ++ " && node codec.mjs \"$0\" /zefir/src/openapi/tests/golden", zefir_root, exchanges).step);
+
+    const all = b.step("all", "Run regex, oas and codec");
+    all.dependOn(regex);
+    all.dependOn(oas);
+    all.dependOn(codec_step);
 }
 
 /// Runs `command` in a container of `image`, in a copy of the directory

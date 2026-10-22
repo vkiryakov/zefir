@@ -236,13 +236,15 @@ jobs:
         if: always()
         run: docker compose --profile mongo down
 
-  # The JSON Schema that the validator writes, in the tools of other
-  # languages, in Docker: the regular expressions of v.schemaOf with ajv in
-  # Node (ECMA-262) and with Go's regexp (RE2), on the vectors of
-  # src/validator/testdata/regex_vectors.zig. Docker runs Linux containers
-  # on the Linux runners only, so this job is ubuntu only. It runs when
-  # openapi is among the modules to test, as it is for every change to the
-  # validator, which openapi imports.
+  # The JSON Schema that the validator and zefir-openapi write, in the
+  # tools of other languages, in Docker (tests/openapi): the regular
+  # expressions of v.schemaOf with ajv in Node (ECMA-262) and with Go's
+  # regexp (RE2), on the vectors of src/validator/testdata/regex_vectors.zig;
+  # the golden documents against the official JSON Schema of OAS 3.1 and
+  # 3.2; and the bodies the golden applications read and write against
+  # their schemas. Docker runs Linux containers on the Linux runners only,
+  # so this job is ubuntu only. It runs when openapi is among the modules to
+  # test, as it is for every change to the validator, which openapi imports.
   openapi-tools:
     name: openapi-tools
     needs: changes
@@ -252,10 +254,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - name: Check the regular expressions in JavaScript and in Go
+      - name: Check the regular expressions, the documents and the bodies in JavaScript and in Go
         working-directory: tests/openapi
         timeout-minutes: 15
-        run: zig build regex --summary all
+        run: zig build all --summary all
 
   # The package of examples/rpc-custom-transport: a transport outside zefir,
   # on the public API of rpc only, built the way an application builds it
