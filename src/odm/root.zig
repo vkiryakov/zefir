@@ -39,7 +39,9 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const driver = @import("driver.zig");
 const schema = @import("model/schema.zig");
+const filter = @import("query/filter.zig");
 const options = @import("query/options.zig");
+const update = @import("query/update.zig");
 
 /// The errors that a driver returns, each in its class of `outcome`.
 pub const DriverError = errors.DriverError;
@@ -86,6 +88,16 @@ pub const Id = schema.Id;
 /// `Direction` known only at run time.
 pub const Direction = options.Direction;
 
+/// Conditions built at run time, such as the optional parts of a search:
+/// `odm.Filter(User).init(arena).where(.{ .age = .{ .gte = min } })`.
+/// Several `where` are an AND, in call order. An operation takes it where
+/// it takes a filter literal, except upsertOne.
+pub const Filter = filter.Filter;
+/// Changes built at run time: `odm.Update(User).init(arena).with(.{ .set =
+/// .{ .name = name } })`. The operators of several `with` merge. An
+/// operation takes it where it takes an update literal, except upsertOne.
+pub const Update = update.Update;
+
 /// Every check of a model at compile time: its schema, the types of its
 /// fields and its `field_rules`. Zig compiles only code that is used, so a
 /// package that declares models has them checked in a test:
@@ -110,5 +122,6 @@ test {
     _ = @import("tests/options_tests.zig");
     _ = @import("tests/update_tests.zig");
     _ = @import("tests/upsert_tests.zig");
+    _ = @import("tests/builders_tests.zig");
     _ = @import("tests/big_model.zig");
 }

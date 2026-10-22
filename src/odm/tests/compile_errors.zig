@@ -874,3 +874,23 @@ test "compile error: a path through a list in the filter of an upsert" {
 test "compile error: or in the filter of an upsert" {
     comptime update.checkUpsert(Account, @TypeOf(.{ .@"or" = .{ .{ .email = "a" }, .{ .email = "b" } } }), @TypeOf(.{ .set = .{ .name = "Ann" } }));
 }
+
+// odm.Filter and odm.Update.
+
+test "compile error: a filter of another model" {
+    const accounts = odm.Filter(Account).init(std.testing.allocator);
+    _ = try filter.encode(User, std.testing.allocator, .{ .@"or" = .{accounts} });
+}
+
+test "compile error: an upsert with an odm.Filter" {
+    comptime update.checkUpsert(Account, odm.Filter(Account), @TypeOf(.{ .set = .{ .name = "Ann" } }));
+}
+
+test "compile error: an upsert with an odm.Update" {
+    comptime update.checkUpsert(Account, @TypeOf(.{ .email = "a@b.c" }), odm.Update(Account));
+}
+
+test "compile error: an update of another model" {
+    const users = odm.Update(User).init(std.testing.allocator);
+    _ = try update.encode(Account, std.testing.allocator, users, .update);
+}

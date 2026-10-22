@@ -38,6 +38,7 @@
 //!
 //! A filter that breaks a rule stops the build with a message that starts
 //! with "odm: " and names the model and the path (design §5.8).
+//! `odm.Filter(T)` builds a filter at run time from such literals.
 
 const std = @import("std");
 const bson = @import("mongo-bson");
@@ -54,13 +55,16 @@ const Fields = values.Fields;
 const ItemOf = values.ItemOf;
 
 /// The BSON of `filter`, a filter of the model `T`, in `arena`: a literal
-/// of the model's fields, or `.{}` for every document, which needs no
-/// memory. `error.EncodeFailed`: a string is not UTF-8, or a regular
-/// expression holds a NUL byte.
+/// of the model's fields, `.{}` for every document, which needs no memory,
+/// or an `odm.Filter(T)`. `error.EncodeFailed`: a string is not UTF-8, or a
+/// regular expression holds a NUL byte. `error.InvalidArgument`: an empty
+/// slice of `odm.Filter(T)` in `and`, `or` or `nor`. An `odm.Filter(T)`
+/// gives the first error of its `where` calls.
 pub fn encode(comptime T: type, arena: Allocator, filter: anytype) EncodeError!bson.RawDocument {
     comptime schema.check(T);
     const L = @TypeOf(filter);
     comptime requireFilter(T, L);
+    if (comptime isBuilt(L)) return encodeBuilt(arena, filter);
     if (comptime @typeInfo(L).@"struct".field_names.len == 0) return bson.literal(.{});
     var b: Builder = .init(arena);
     defer b.deinit();
@@ -69,9 +73,10 @@ pub fn encode(comptime T: type, arena: Allocator, filter: anytype) EncodeError!b
     return doc.raw();
 }
 
-/// What writing a filter fails with: the builder's errors and a pattern
-/// with a NUL byte.
-pub const WriteError = Builder.Error || error{EncodeFailed};
+/// What writing a filter fails with: the builder's errors, a pattern with
+/// a NUL byte, an empty slice of filters, and the error that an
+/// `odm.Filter(T)` holds.
+pub const WriteError = Builder.Error || error{ EncodeFailed, InvalidArgument };
 
 /// What encoding a filter or an update fails with, all of it before
 /// anything is sent: a value that BSON cannot hold, a request that breaks a
@@ -82,6 +87,7 @@ pub const EncodeError = error{ EncodeFailed, InvalidArgument, OutOfMemory };
 pub fn encodeError(err: WriteError) EncodeError {
     return switch (err) {
         error.InvalidBson, error.EncodeFailed => error.EncodeFailed,
+        error.InvalidArgument => error.InvalidArgument,
         error.OutOfMemory => error.OutOfMemory,
     };
 }
@@ -95,9 +101,12 @@ fn isFilter(comptime T: type, comptime L: type) bool {
     };
 }
 
-/// Stops the build unless `L` is the type of a filter literal of `T`.
+/// Stops the build unless `L` is the type of a filter of `T`: a literal,
+/// or an `odm.Filter(T)`.
 pub fn requireFilter(comptime T: type, comptime L: type) void {
-    if (!isFilter(T, L)) @compileError("odm: a filter of " ++ @typeName(T) ++ " is a literal of its fields, or .{} for every document; got " ++ @typeName(L));
+    if (isBuilt(L)) {
+        if (L.odm_filter_model != T) @compileError("odm: this filter is an odm.Filter(" ++ @typeName(L.odm_filter_model) ++ "), not of " ++ @typeName(T));
+    } else if (!isFilter(T, L)) @compileError("odm: a filter of " ++ @typeName(T) ++ " is a literal of its fields, or .{} for every document; got " ++ @typeName(L));
 }
 
 /// Writes the fields of the filter literal `filter` of `T` into the
@@ -119,16 +128,27 @@ pub fn isLogical(comptime name: []const u8) bool {
 }
 
 /// Writes `$and`, `$or` or `$nor`: the array of the filters in the tuple
-/// `@field(parent, op)`.
+/// or the list of `odm.Filter(T)` `@field(parent, op)`.
 fn writeLogical(comptime T: type, b: *Builder, comptime op: []const u8, comptime L: type, parent: L) WriteError!void {
     const V = @FieldType(L, op);
     comptime requireFilters(T, op, V);
     const filters = @field(parent, op);
     try b.beginArray("$" ++ op);
-    inline for (@typeInfo(V).@"struct".field_names) |i| {
-        try b.beginDocument("");
-        try writeFilter(T, b, @field(filters, i));
-        try b.end();
+    if (comptime BuiltItem(V) == null) {
+        inline for (@typeInfo(V).@"struct".field_names) |i| {
+            const item = @field(filters, i);
+            if (comptime isBuilt(@TypeOf(item))) {
+                try writeBuilt(b, item);
+            } else {
+                try b.beginDocument("");
+                try writeFilter(T, b, item);
+                try b.end();
+            }
+        }
+    } else {
+        // Known at run time: MongoDB takes no empty and, or, nor.
+        if (filters.len == 0) return error.InvalidArgument;
+        for (filters) |item| try writeBuilt(b, item);
     }
     try b.end();
 }
@@ -136,14 +156,33 @@ fn writeLogical(comptime T: type, b: *Builder, comptime op: []const u8, comptime
 fn requireFilters(comptime T: type, comptime op: []const u8, comptime V: type) void {
     const M = @typeName(T);
     const takes = "odm: " ++ op ++ " takes a tuple of filters of " ++ M ++ ", such as .{ .{ .a = 1 }, .{ .b = 2 } }, or a []const odm.Filter(" ++ M ++ "); got " ++ @typeName(V);
+    if (BuiltItem(V)) |Item| return requireFilter(T, Item);
     const info = switch (@typeInfo(V)) {
         .@"struct" => |info| if (info.is_tuple) info else @compileError(takes),
         else => @compileError(takes),
     };
     if (info.field_names.len == 0) @compileError("odm: " ++ op ++ " needs at least one filter");
     for (info.field_types) |Item| {
-        if (!isFilter(T, Item)) @compileError(takes);
+        if (isBuilt(Item)) requireFilter(T, Item) else if (!isFilter(T, Item)) @compileError(takes);
     }
+}
+
+/// The type of the items of `V` when it is a slice, an array or a pointer
+/// to an array of `odm.Filter`; null for any other type.
+fn BuiltItem(comptime V: type) ?type {
+    const Item = switch (@typeInfo(V)) {
+        .array => |array| array.child,
+        .pointer => |info| switch (info.size) {
+            .slice => info.child,
+            .one => switch (@typeInfo(info.child)) {
+                .array => |array| array.child,
+                else => return null,
+            },
+            else => return null,
+        },
+        else => return null,
+    };
+    return if (isBuilt(Item)) Item else null;
 }
 
 /// Writes the condition `@field(parent, name)` on the field at `at`: an
@@ -482,4 +521,111 @@ pub fn writeItemConditions(b: *Builder, comptime at: At, comptime O: type, condi
         .paths => try writePaths(b, item, O, conditions),
         .operators => try writeOperators(b, item, O, conditions),
     }
+}
+
+/// Conditions of the model `T` built at run time (design §4.9): an
+/// immutable list of the literals of `where`, each checked by the compiler
+/// and encoded into the arena at once, so that the list holds no pointer to
+/// the caller's values. Several `where` are an AND, in the order of the
+/// calls, and the branches of one `Filter` do not see each other:
+/// `f.where(x)` and `f.where(y)`. The first error of a `where` stays in the
+/// value, later ones change nothing, and the operation that takes the
+/// value returns it. An operation takes a `Filter(T)` where it takes a
+/// filter literal, and so do `and`, `or` and `nor`, also as a
+/// `[]const odm.Filter(T)`; upsertOne takes literals only.
+///
+/// ```zig
+/// var f = odm.Filter(User).init(arena);
+/// if (min_age) |age| f = f.where(.{ .age = .{ .gte = age } });
+/// if (active_only) f = f.where(.{ .status = .active });
+/// ```
+pub fn Filter(comptime T: type) type {
+    return struct {
+        /// Where the conditions live: an arena, or any allocator that is
+        /// freed whole.
+        arena: Allocator,
+        /// The condition of the last `where`, which leads to those before.
+        last: ?*const Node = null,
+        /// The first error of a `where`.
+        failure: ?EncodeError = null,
+
+        const Self = @This();
+
+        /// The model of the filter, for the checks of odm.
+        pub const odm_filter_model = T;
+
+        /// No condition: every document.
+        pub fn init(arena: Allocator) Self {
+            return .{ .arena = arena };
+        }
+
+        /// These conditions and `condition`: a filter literal of `T`, or
+        /// another `Filter(T)`. `.{}` and an empty `Filter` add nothing.
+        pub fn where(f: Self, condition: anytype) Self {
+            const C = @TypeOf(condition);
+            if (f.failure != null) return f;
+            if (comptime isBuilt(C)) {
+                if (condition.isEmpty()) return f;
+            } else if (comptime @typeInfo(C) == .@"struct" and @typeInfo(C).@"struct".field_names.len == 0) return f;
+            const doc = encode(T, f.arena, condition) catch |err| return .{ .arena = f.arena, .last = f.last, .failure = err };
+            const node = f.arena.create(Node) catch return .{ .arena = f.arena, .last = f.last, .failure = error.OutOfMemory };
+            node.* = .{ .doc = doc, .prev = f.last };
+            return .{ .arena = f.arena, .last = node };
+        }
+
+        /// Whether no `where` added a condition, and none failed.
+        pub fn isEmpty(f: Self) bool {
+            return f.last == null and f.failure == null;
+        }
+    };
+}
+
+/// One condition of a `Filter`, and the one before it.
+const Node = struct { doc: bson.RawDocument, prev: ?*const Node };
+
+/// Whether `V` is the type of an `odm.Filter` of some model.
+pub fn isBuilt(comptime V: type) bool {
+    return switch (@typeInfo(V)) {
+        .@"struct" => @hasDecl(V, "odm_filter_model"),
+        else => false,
+    };
+}
+
+/// The BSON of the `Filter` `f`: `{}` without a condition, the condition
+/// for one, `{$and: [...]}` of them in call order for several.
+fn encodeBuilt(arena: Allocator, f: anytype) EncodeError!bson.RawDocument {
+    if (f.failure) |err| return err;
+    const last = f.last orelse return bson.literal(.{});
+    if (last.prev == null) return last.doc;
+    var b: Builder = .init(arena);
+    defer b.deinit();
+    writeAnd(&b, last) catch |err| return encodeError(err);
+    const doc = b.finish() catch |err| return encodeError(err);
+    return doc.raw();
+}
+
+/// Writes the `Filter` `f` as a document of the array open in `b`, as
+/// `encodeBuilt` makes it.
+fn writeBuilt(b: *Builder, f: anytype) WriteError!void {
+    if (f.failure) |err| return err;
+    const last = f.last orelse {
+        try b.beginDocument("");
+        return b.end();
+    };
+    if (last.prev == null) return b.putDocument("", last.doc);
+    try b.beginDocument("");
+    try writeAnd(b, last);
+    try b.end();
+}
+
+/// Writes `$and` of the conditions that end with `last`, in call order.
+fn writeAnd(b: *Builder, last: *const Node) WriteError!void {
+    try b.beginArray("$and");
+    try writeNodes(b, last);
+    try b.end();
+}
+
+fn writeNodes(b: *Builder, node: *const Node) WriteError!void {
+    if (node.prev) |prev| try writeNodes(b, prev);
+    try b.putDocument("", node.doc);
 }

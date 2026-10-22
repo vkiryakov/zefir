@@ -101,6 +101,17 @@ test "the operators of numbers take an integer of the field's BSON integer, nega
     });
 }
 
+test "a literal known at run time keeps the values known at compile time in it" {
+    var step: i64 = -3;
+    _ = &step;
+    try expectUpdate(Account, .{ .inc = .{ .visits = step, .age = 1 } }, .update, .{ .@"$inc" = .{ .visits = @as(i64, -3), .age = @as(i64, 1) } });
+    var name: []const u8 = "ann";
+    _ = &name;
+    try expectUpdate(Account, .{ .set = .{ .nickname = name, .address = .{ .city = "Lyon" }, .status = .blocked } }, .update, .{
+        .@"$set" = .{ .nickname = "ann", .@"address.city" = "Lyon", .status = "blocked" },
+    });
+}
+
 test "set_on_insert works in an upsert, and gives the id there" {
     try expectUpdate(Account, .{ .set_on_insert = .{ .status = .active } }, .upsert, .{ .@"$setOnInsert" = .{ .status = "active" } });
     try expectUpdate(Slug, .{ .set_on_insert = .{ .id = "ann" } }, .upsert, .{ .@"$setOnInsert" = .{ ._id = "ann" } });

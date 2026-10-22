@@ -9,6 +9,7 @@ const bson = @import("mongo-bson");
 const odm = @import("../root.zig");
 const filter = @import("../query/filter.zig");
 const options = @import("../query/options.zig");
+const update = @import("../query/update.zig");
 
 pub const Kind = enum { one, two, three };
 
@@ -170,4 +171,41 @@ test "big model: a find over twelve paths" {
     };
     const one: i32 = 1;
     try expectDoc(arena.allocator(), .{ .f6 = one, .@"a.deep.d6" = one, .@"b.b9" = one, .@"c.c1" = one, ._id = @as(i32, 0) }, try options.projection(Big, View, arena.allocator()));
+}
+
+test "big model: an update of twenty changes" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var step: i32 = 2;
+    _ = &step;
+    // Twenty changes in eight operators: top-level fields of each kind,
+    // paths into structs two levels deep, an optional, the lists.
+    const changes = .{
+        .set = .{ .f0 = true, .f6 = "x", .f7 = .two, .f10 = "y", .f16 = 200, .a = .{ .a1 = 1, .deep = .{ .d6 = "z", .d7 = .three } } },
+        .unset = .{ .f11, .f15 },
+        .inc = .{ .f1 = step, .f2 = -1, .a = .{ .a4 = 3 } },
+        .mul = .{ .f5 = 1.5, .f18 = 2 },
+        .min = .{ .f8 = since },
+        .max = .{ .f3 = 7, .a = .{ .deep = .{ .d1 = 9 } } },
+        .push = .{ .f12 = .{ .each = &.{ "p", "q" } } },
+        .pull = .{ .c = .{ .c1 = .{ .lt = 0 } } },
+    };
+    try expectDoc(a, .{
+        .@"$set" = .{ .fZero = true, .f6 = "x", .f7 = "two", .f10 = "y", .f16 = @as(i32, 200), .@"a.a1" = @as(i32, 1), .@"a.deep.d6" = "z", .@"a.deep.d7" = "three" },
+        .@"$unset" = .{ .f11 = "", .f15 = "" },
+        .@"$inc" = .{ .fOne = @as(i32, 2), .f2 = @as(i64, -1), .@"a.a4" = @as(i64, 3) },
+        .@"$mul" = .{ .f5 = 1.5, .f18 = 2.0 },
+        .@"$min" = .{ .f8 = since },
+        .@"$max" = .{ .f3 = @as(i32, 7), .@"a.deep.d1" = @as(i32, 9) },
+        .@"$push" = .{ .f12 = .{ .@"$each" = .{ "p", "q" } } },
+        .@"$pull" = .{ .c = .{ .c1 = .{ .@"$lt" = @as(i32, 0) } } },
+    }, try update.encode(Big, a, changes, .update));
+
+    // The same changes built at run time, and a filter beside them.
+    const built = odm.Update(Big).init(a).with(changes).with(.{ .set = .{ .f9 = id } });
+    const doc = try update.encode(Big, a, built, .update);
+    try testing.expectEqual(id, (try doc.getPath("$set.f9")).?.object_id);
+    const where = odm.Filter(Big).init(a).where(.{ .f7 = .one }).where(.{ .a = .{ .deep = .{ .d3 = .{ .gt = 1 } } } });
+    try expectDoc(a, .{ .@"$and" = .{ .{ .f7 = "one" }, .{ .@"a.deep.d3" = .{ .@"$gt" = @as(i32, 1) } } } }, try filter.encode(Big, a, where));
 }

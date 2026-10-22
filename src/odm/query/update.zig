@@ -38,6 +38,7 @@
 //!
 //! An update that breaks a rule stops the build with a message that starts
 //! with "odm: " and names the model and the path (design §5.8).
+//! `odm.Update(T)` builds an update at run time from such literals.
 
 const std = @import("std");
 const bson = @import("mongo-bson");
@@ -53,12 +54,19 @@ const subject = values.subject;
 /// What an update is for: `set_on_insert` works only in an upsert.
 pub const Use = enum { update, upsert };
 
-/// The BSON of `update`, an update literal of the model `T`, in `arena`.
-/// `error.EncodeFailed`: a string is not UTF-8, or a regular expression of
-/// `pull` holds a NUL byte.
+/// The BSON of `update`, an update literal of the model `T` or an
+/// `odm.Update(T)`, in `arena`. `error.EncodeFailed`: a string is not
+/// UTF-8, or a regular expression of `pull` holds a NUL byte. An
+/// `odm.Update(T)` gives the first error of its `with` calls, and
+/// `error.InvalidArgument` when it has none, or when two of them change one
+/// path or two paths of which one holds the other.
 pub fn encode(comptime T: type, arena: Allocator, update: anytype, comptime use: Use) filter.EncodeError!bson.RawDocument {
     comptime schema.check(T);
     const U = @TypeOf(update);
+    if (comptime isBuilt(U)) {
+        if (comptime U.odm_update_model != T) @compileError("odm: this update is an odm.Update(" ++ @typeName(U.odm_update_model) ++ "), not of " ++ @typeName(T));
+        return encodeBuilt(arena, update);
+    }
     const changes = comptime analyze(T, U, use);
     var b: Builder = .init(arena);
     defer b.deinit();
@@ -116,7 +124,7 @@ const Write = union(enum) {
     each: type,
     /// An item of this type that `pull` takes out. A document goes under
     /// `$eq`, so that the items equal to it go, and not the items that only
-    /// hold its fields.
+    /// hold its fields; so do the values that a filter writes under `$eq`.
     pull_item: type,
     /// The conditions on the items that `pull` takes out.
     pull_conditions,
@@ -131,7 +139,7 @@ fn analyze(comptime T: type, comptime U: type, comptime use: Use) []const Change
     comptime {
         @setEvalBranchQuota(schema.eval_quota);
         const M = @typeName(T);
-        if (!isLiteral(U) or U == T) @compileError("odm: an update of " ++ M ++ " is a literal of operators, such as .{ .set = .{ .name = value } }; got " ++ @typeName(U));
+        if (!isStructLiteral(U) or U == T or isBuilt(U)) @compileError("odm: an update of " ++ M ++ " is a literal of operators, such as .{ .set = .{ .name = value } }; got " ++ @typeName(U));
         const ops = @typeInfo(U).@"struct".field_names;
         if (ops.len == 0) @compileError("odm: the update of " ++ M ++ " changes nothing");
         var out: []const Change = &.{};
@@ -147,7 +155,7 @@ fn analyze(comptime T: type, comptime U: type, comptime use: Use) []const Change
 }
 
 /// Whether `V` is a struct literal: one with named fields, or `.{}`.
-fn isLiteral(comptime V: type) bool {
+fn isStructLiteral(comptime V: type) bool {
     return switch (@typeInfo(V)) {
         .@"struct" => |info| (!info.is_tuple or info.field_names.len == 0) and !bson.codec.check.isSpecial(V),
         else => false,
@@ -157,7 +165,7 @@ fn isLiteral(comptime V: type) bool {
 /// The changes of `op`, whose literal of the fields of `T` is `L`.
 fn fields(comptime T: type, comptime op: Op, comptime L: type) []const Change {
     const M = @typeName(T);
-    if (!isLiteral(L)) @compileError("odm: " ++ @tagName(op) ++ " takes a literal of the fields of " ++ M ++ "; got " ++ @typeName(L));
+    if (!isStructLiteral(L)) @compileError("odm: " ++ @tagName(op) ++ " takes a literal of the fields of " ++ M ++ "; got " ++ @typeName(L));
     const names = @typeInfo(L).@"struct".field_names;
     if (names.len == 0) @compileError("odm: " ++ @tagName(op) ++ " in the update of " ++ M ++ " is empty");
     var out: []const Change = &.{};
@@ -216,7 +224,7 @@ fn throughList(comptime op: []const u8, comptime at: At, comptime key: []const u
 /// The field at the dotted `path` with `value`, as a literal writes it:
 /// `.city = value` for "city", `.profile = .{ .city = value }` for
 /// "profile.city".
-pub fn fieldLiteral(comptime path: []const u8, comptime value: []const u8) []const u8 {
+fn fieldLiteral(comptime path: []const u8, comptime value: []const u8) []const u8 {
     const dot = std.mem.findScalar(u8, path, '.') orelse return "." ++ path ++ " = " ++ value;
     return "." ++ path[0..dot] ++ " = .{ " ++ fieldLiteral(path[dot + 1 ..], value) ++ " }";
 }
@@ -426,21 +434,21 @@ fn writeChange(b: *Builder, comptime c: Change, literal: anytype) filter.WriteEr
     switch (c.write) {
         .unset => try b.putString(key, ""),
         .pop => |n| try b.putInt32(key, n),
-        .value, .item => |X| try values.writeValue(b, key, X, get(literal, c.names)),
+        .value, .item => |X| try values.writeValue(b, key, X, @field(parentOf(literal, c.names), fieldName(c.names))),
         .each => |E| {
             try b.beginDocument(key);
-            try values.writeValue(b, "$each", []const E, get(literal, c.names).each);
+            try values.writeValue(b, "$each", []const E, @field(parentOf(literal, c.names), fieldName(c.names)).each);
             try b.end();
         },
         .pull_item => |E| if (comptime filter.needsEq(E) or schema.isDocument(Unwrap(E))) {
             try b.beginDocument(key);
-            try values.writeValue(b, "$eq", E, get(literal, c.names));
+            try values.writeValue(b, "$eq", E, @field(parentOf(literal, c.names), fieldName(c.names)));
             try b.end();
         } else {
-            try values.writeValue(b, key, E, get(literal, c.names));
+            try values.writeValue(b, key, E, @field(parentOf(literal, c.names), fieldName(c.names)));
         },
         .pull_conditions => {
-            const conditions = get(literal, c.names);
+            const conditions = @field(parentOf(literal, c.names), fieldName(c.names));
             try b.beginDocument(key);
             try filter.writeItemConditions(b, c.at, @TypeOf(conditions), conditions);
             try b.end();
@@ -448,15 +456,21 @@ fn writeChange(b: *Builder, comptime c: Change, literal: anytype) filter.WriteEr
     }
 }
 
-/// The value of the literal `value` at the fields `names`, one inside the
-/// other.
-fn get(value: anytype, comptime names: []const []const u8) Get(@TypeOf(value), names) {
-    if (names.len == 0) return value;
-    return get(@field(value, names[0]), names[1..]);
+/// The struct of the literal `value` that holds the last of the fields
+/// `names`, one inside the other. The value itself is read with `@field`
+/// where it is written: a field known at compile time keeps its value then,
+/// even in a literal known only at run time.
+fn parentOf(value: anytype, comptime names: []const []const u8) Parent(@TypeOf(value), names) {
+    if (names.len == 1) return value;
+    return parentOf(@field(value, names[0]), names[1..]);
 }
 
-fn Get(comptime V: type, comptime names: []const []const u8) type {
-    return if (names.len == 0) V else Get(@FieldType(V, names[0]), names[1..]);
+fn Parent(comptime V: type, comptime names: []const []const u8) type {
+    return if (names.len == 1) V else Parent(@FieldType(V, names[0]), names[1..]);
+}
+
+fn fieldName(comptime names: []const []const u8) []const u8 {
+    return names[names.len - 1];
 }
 
 /// Stops the build unless an upsertOne of `T` with a filter of type `F` and
@@ -472,7 +486,8 @@ fn Get(comptime V: type, comptime names: []const []const u8) type {
 ///   each struct that the insert builds from paths gets its required
 ///   fields so too;
 /// - an id that the application gives comes from an equality of the filter
-///   or `set_on_insert`; the server makes an ObjectId;
+///   or `set_on_insert`, while an ObjectId the server makes when they give
+///   none;
 /// - the equalities of the filter are values that odm would write: not
 ///   null, not an optional, not an item where a list goes; and no path of
 ///   the filter goes through a list, and no logical operator is in it.
@@ -482,6 +497,10 @@ pub fn checkUpsert(comptime T: type, comptime F: type, comptime U: type) void {
     comptime {
         @setEvalBranchQuota(schema.eval_quota);
         schema.check(T);
+        const M = @typeName(T);
+        const why = ": it checks at compile time that the document it may insert gets every required field";
+        if (filter.isBuilt(F)) @compileError("odm: upsertOne of " ++ M ++ " takes a filter literal, not an odm.Filter(" ++ M ++ ")" ++ why);
+        if (isBuilt(U)) @compileError("odm: upsertOne of " ++ M ++ " takes an update literal, not an odm.Update(" ++ M ++ ")" ++ why);
         filter.requireFilter(T, F);
         const given = filterGives(T, F) ++ updateGives(analyze(T, U, .upsert));
         requireId(T, given);
@@ -634,4 +653,149 @@ fn below(comptime paths: []const []const u8, comptime path: []const u8) bool {
         if (within(path, p)) return true;
     }
     return false;
+}
+
+/// Changes of the model `T` built at run time (design §4.9): an immutable
+/// list of the literals of `with`, each checked by the compiler and encoded
+/// into the arena at once. The operators of several `with` merge: two
+/// `with` of `set` make one `$set`, with the fields in the order of the
+/// calls. The compiler sees one literal at a time, so what spans several
+/// `with` is `error.InvalidArgument` from the operation: an `Update`
+/// without a `with`, a path that two of them change, two paths of theirs
+/// of which one holds the other. The first error of a `with` stays in the
+/// value, later ones change nothing, and the operation returns it. An
+/// operation takes an `Update(T)` where it takes an update literal;
+/// upsertOne takes literals only.
+///
+/// ```zig
+/// var u = odm.Update(User).init(arena);
+/// if (new_name) |name| u = u.with(.{ .set = .{ .name = name } });
+/// if (birthday) u = u.with(.{ .inc = .{ .age = 1 } });
+/// ```
+pub fn Update(comptime T: type) type {
+    return struct {
+        /// Where the changes live: an arena, or any allocator that is freed
+        /// whole.
+        arena: Allocator,
+        /// The changes of the last `with`, which lead to those before.
+        last: ?*const Node = null,
+        /// The first error of a `with`.
+        failure: ?filter.EncodeError = null,
+
+        const Self = @This();
+
+        /// The model of the update, for the checks of odm.
+        pub const odm_update_model = T;
+
+        /// No change yet: an operation refuses it.
+        pub fn init(arena: Allocator) Self {
+            return .{ .arena = arena };
+        }
+
+        /// These changes and those of `change`, an update literal of `T`.
+        pub fn with(u: Self, change: anytype) Self {
+            const paths = comptime pathsOf(analyze(T, @TypeOf(change), .update));
+            if (u.failure != null) return u;
+            const doc = encode(T, u.arena, change, .update) catch |err| return .{ .arena = u.arena, .last = u.last, .failure = err };
+            const node = u.arena.create(Node) catch return .{ .arena = u.arena, .last = u.last, .failure = error.OutOfMemory };
+            node.* = .{ .doc = doc, .paths = paths, .prev = u.last };
+            return .{ .arena = u.arena, .last = node };
+        }
+
+        /// Whether no `with` added a change, and none failed.
+        pub fn isEmpty(u: Self) bool {
+            return u.last == null and u.failure == null;
+        }
+    };
+}
+
+/// One `with` of an `Update`: its literal, the paths that it changes, and
+/// the `with` before it.
+const Node = struct { doc: bson.RawDocument, paths: []const []const u8, prev: ?*const Node };
+
+/// Whether `V` is the type of an `odm.Update` of some model.
+fn isBuilt(comptime V: type) bool {
+    return switch (@typeInfo(V)) {
+        .@"struct" => @hasDecl(V, "odm_update_model"),
+        else => false,
+    };
+}
+
+/// The paths of `changes`, for the checks across the `with` of an `Update`.
+fn pathsOf(comptime changes: []const Change) []const []const u8 {
+    comptime {
+        var out: [changes.len][]const u8 = undefined;
+        for (changes, &out) |c, *path| path.* = c.at.path;
+        const final = out;
+        return &final;
+    }
+}
+
+/// The BSON of the `Update` `u`: its one literal, or the operators of all
+/// of them merged.
+fn encodeBuilt(arena: Allocator, u: anytype) filter.EncodeError!bson.RawDocument {
+    if (u.failure) |err| return err;
+    const last = u.last orelse return error.InvalidArgument;
+    var count: usize = 0;
+    var node: ?*const Node = last;
+    while (node) |later| : (node = later.prev) {
+        count += 1;
+        var other = later.prev;
+        while (other) |earlier| : (other = earlier.prev) {
+            if (conflict(later.paths, earlier.paths)) return error.InvalidArgument;
+        }
+    }
+    if (count == 1) return last.doc;
+    const nodes = try arena.alloc(*const Node, count);
+    node = last;
+    for (0..count) |i| {
+        nodes[count - 1 - i] = node.?;
+        node = node.?.prev;
+    }
+    var b: Builder = .init(arena);
+    defer b.deinit();
+    merge(&b, nodes) catch |err| return filter.encodeError(err);
+    const doc = b.finish() catch |err| return filter.encodeError(err);
+    return doc.raw();
+}
+
+/// Whether a path of `a` is one of `b`, or holds one, or is inside one.
+fn conflict(a: []const []const u8, b: []const []const u8) bool {
+    for (a) |p| {
+        for (b) |q| {
+            if (std.mem.eql(u8, p, q) or overlap(p, q)) return true;
+        }
+    }
+    return false;
+}
+
+/// Writes the operators of the `with` of an `Update`, `nodes` in call
+/// order: each once, in the order of its first `with`, with the fields of
+/// every `with` that has it.
+fn merge(b: *Builder, nodes: []const *const Node) filter.WriteError!void {
+    var done: std.EnumSet(Op) = .empty;
+    for (nodes) |node| {
+        var ops = node.doc.iterator();
+        while (try ops.next()) |op| {
+            const which = opOfKey(op.key) orelse return error.InvalidBson;
+            if (done.contains(which)) continue;
+            done.insert(which);
+            try b.beginDocument(op.key);
+            for (nodes) |other| {
+                const changes = (try other.doc.get(op.key)) orelse continue;
+                if (changes != .document) return error.InvalidBson;
+                var elements = changes.document.iterator();
+                while (try elements.next()) |element| try b.putValue(element.key, element.value);
+            }
+            try b.end();
+        }
+    }
+}
+
+/// The operator whose key in BSON is `key`.
+fn opOfKey(key: []const u8) ?Op {
+    inline for (@typeInfo(Op).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, key, comptime keyOfOp(@field(Op, name)))) return @field(Op, name);
+    }
+    return null;
 }

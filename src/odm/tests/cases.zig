@@ -137,4 +137,9 @@ pub const compile_errors = [_]Case{
     .{ .name = "compile error: an item of a list in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's tests.compile_errors.Account.tags = item would put the item where the list goes in the document it may insert; match the whole list with .eq, or the item with .elem_match" },
     .{ .name = "compile error: a path through a list in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: the filter's path items.sku goes through the list tests.compile_errors.Account.items, and the document it may insert would get a document there, not a list; use .elem_match" },
     .{ .name = "compile error: or in the filter of an upsert", .expect = "odm: upsertOne of tests.compile_errors.Account: or in the filter: the server takes equalities from it into the document it may insert, and odm checks only the fields of the filter itself; put the conditions in the fields of the filter" },
+    // odm.Filter and odm.Update.
+    .{ .name = "compile error: a filter of another model", .expect = "odm: this filter is an odm.Filter(tests.compile_errors.Account), not of tests.compile_errors.User" },
+    .{ .name = "compile error: an upsert with an odm.Filter", .expect = "odm: upsertOne of tests.compile_errors.Account takes a filter literal, not an odm.Filter(tests.compile_errors.Account): it checks at compile time that the document it may insert gets every required field" },
+    .{ .name = "compile error: an upsert with an odm.Update", .expect = "odm: upsertOne of tests.compile_errors.Account takes an update literal, not an odm.Update(tests.compile_errors.Account): it checks at compile time that the document it may insert gets every required field" },
+    .{ .name = "compile error: an update of another model", .expect = "odm: this update is an odm.Update(tests.compile_errors.User), not of tests.compile_errors.Account" },
 };
