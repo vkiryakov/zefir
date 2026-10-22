@@ -36,7 +36,19 @@
 //!    deadline, then `deinit(io)` frees it.
 
 const std = @import("std");
+const errors = @import("errors.zig");
+
+/// The errors that a driver returns, each in its class of `outcome`.
+pub const DriverError = errors.DriverError;
+/// The errors of odm's calls: `DriverError` and odm's own.
+pub const Error = errors.Error;
+/// What `Registry.shutdown` returns when the deadline comes first.
+pub const ShutdownError = errors.ShutdownError;
+pub const Outcome = errors.Outcome;
+pub const outcome = errors.outcome;
+pub const Diagnostics = errors.Diagnostics;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("tests/errors_tests.zig");
 }
