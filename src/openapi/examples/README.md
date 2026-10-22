@@ -889,6 +889,12 @@ pub const openapi: zefir.openapi.ControllerDoc(@This()) = .{
   here `TodosV1.create`. Generators of clients name their methods by it, so
   it changes only with the name of the controller or of the method, or with
   `.operation_id`; two routes of one operationId stop the build.
+- **A generic controller** is named as the schemas of generics are: the
+  tag of `CrudController(Item)` is `Crud_Item`, and the operationId of its
+  `list` is `Crud_Item.list`. A controller of an anonymous type, such as
+  `CrudController(struct { id: u64 })`, has no name that stays the same as
+  the program changes, so the build stops until its `ControllerDoc` gives
+  it a `.tag`, and each of its routes an `.operation_id`.
 
 **A middleware: `zefir.openapi.MiddlewareDoc`.** How a client says who it
 is, what a route behind it requires, and what it reads and answers itself:
@@ -1004,7 +1010,11 @@ what `ctx.json` reads, and what a response writes.
   `<name>-Output`; else one.
 - **Names.** A schema is named by the type: `TodoResponse`, and
   `Page_TodoResponse` for `Page(TodoResponse)`. Two types of one name stop
-  the build, with a hint to `.name`.
+  the build, with a hint to `.name`. An anonymous type, such as
+  `struct { id: u64 }` written in place, and a generic of one,
+  `Page(struct { id: u64 })`, have no name that stays the same as the
+  program changes: their schema is written where they are used, never as
+  a component, unless a `Doc` gives it a `.name`.
 - **A type that writes itself**, with its own `jsonStringify`, says what it
   looks like, or the build stops:
 
