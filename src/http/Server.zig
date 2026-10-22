@@ -256,7 +256,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     inline for (@typeInfo(Settings).@"struct".field_names) |name| {
         // The list of trusted proxies is copied below.
         if (comptime std.mem.eql(u8, name, "trusted_proxies")) continue;
-        if (@hasField(O, name)) @field(settings, name) = optionValue(@FieldType(Settings, name), @field(options, name));
+        if (@hasField(O, name)) @field(settings, name) = plan.optionValue(@FieldType(Settings, name), @field(options, name));
     }
     if (!validSettings(settings)) return error.InvalidConfiguration;
 
@@ -371,28 +371,6 @@ fn needsOf(comptime O: type, comptime p: plan.Plan) Needs {
         if (info == .@"struct") needs.static_mounts = info.@"struct".field_names.len;
     }
     return needs;
-}
-
-/// An option as the type of its field. In the options of an `anytype`, a
-/// nested literal such as `.{ .body = .ignore }` has a struct type of its
-/// own, which does not coerce to `UnknownFieldsOptions`: its fields are
-/// taken one by one.
-pub fn optionValue(comptime T: type, value: anytype) T {
-    const V = @TypeOf(value);
-    if (V == T) return value;
-    switch (@typeInfo(T)) {
-        .@"struct" => if (@typeInfo(V) == .@"struct") {
-            var out: T = .{};
-            inline for (@typeInfo(V).@"struct".field_names) |name| {
-                if (!@hasField(T, name)) @compileError("zefir.http: Server.init: " ++ plan.shortName(@typeName(T)) ++ " has no option ." ++ name);
-                @field(out, name) = optionValue(@FieldType(T, name), @field(value, name));
-            }
-            return out;
-        },
-        .optional => |o| if (V != @TypeOf(null)) return optionValue(o.child, value),
-        else => {},
-    }
-    return value;
 }
 
 fn validSettings(s: Settings) bool {
@@ -1064,4 +1042,14 @@ test "shutdown and deinit of a server that never started" {
     try server.shutdown(io);
     try testing.expectEqual(State.stopped, server.state());
     try testing.expectError(error.InvalidState, server.start(io));
+}
+
+test "http.Server names only its lifecycle, its options and their errors in public" {
+    const names = [_][]const u8{
+        "Internal",             "State",       "InitError", "StartError", "WaitError", "ShutdownError", "TrustedProxies",
+        "UnknownFieldsOptions", "JsonOptions", "Settings",  "init",       "start",     "wait",          "run",
+        "requestStop",          "shutdown",    "isReady",   "state",      "deinit",
+    };
+    inline for (names) |name| try testing.expect(@hasDecl(Server, name));
+    try testing.expectEqual(names.len, comptime std.meta.declarations(Server).len);
 }

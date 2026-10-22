@@ -180,7 +180,7 @@ fn unknownFieldsOf(comptime O: type) ?Server.UnknownFieldsOptions {
     for (info.field_names, info.field_types, info.field_attrs) |name, T, attrs| {
         if (!std.mem.eql(u8, name, "unknown_fields")) continue;
         if (!attrs.@"comptime") return null;
-        return Server.optionValue(Server.UnknownFieldsOptions, attrs.defaultValue(T).?);
+        return plan.optionValue(Server.UnknownFieldsOptions, attrs.defaultValue(T).?);
     }
     return .{};
 }

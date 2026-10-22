@@ -435,6 +435,28 @@ pub fn shortName(comptime full: []const u8) []const u8 {
     return full[start..];
 }
 
+/// An option of `Server.init` as the type of its field, for `Server.init`
+/// and `describe`. In the options of an `anytype`, a nested literal such
+/// as `.{ .body = .ignore }` has a struct type of its own, which does not
+/// coerce to `UnknownFieldsOptions`: its fields are taken one by one.
+pub fn optionValue(comptime T: type, value: anytype) T {
+    const V = @TypeOf(value);
+    if (V == T) return value;
+    switch (@typeInfo(T)) {
+        .@"struct" => if (@typeInfo(V) == .@"struct") {
+            var out: T = .{};
+            inline for (@typeInfo(V).@"struct".field_names) |name| {
+                if (!@hasField(T, name)) @compileError("zefir.http: Server.init: " ++ shortName(@typeName(T)) ++ " has no option ." ++ name);
+                @field(out, name) = optionValue(@FieldType(T, name), @field(value, name));
+            }
+            return out;
+        },
+        .optional => |o| if (V != @TypeOf(null)) return optionValue(o.child, value),
+        else => {},
+    }
+    return value;
+}
+
 const testing = std.testing;
 const Backend = @import("Backend.zig");
 const Json = @import("dto.zig").Json;
