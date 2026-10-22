@@ -24,7 +24,9 @@
 //!   gives the page, `/docs/` with its '/' too. The browser
 //!   loads Scalar from jsDelivr, a release pinned here and checked by its
 //!   hash (Subresource Integrity), so a `Content-Security-Policy` of the
-//!   application must allow scripts of https://cdn.jsdelivr.net.
+//!   application must allow scripts of https://cdn.jsdelivr.net, the
+//!   `<style>` elements Scalar adds (`style-src 'unsafe-inline'`) and its
+//!   fonts (`font-src https://fonts.scalar.com`).
 //!   `.page = null` leaves the page out.
 //!
 //! The paths are those of the routes within the server's prefix. When the

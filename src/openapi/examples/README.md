@@ -1401,8 +1401,10 @@ Content-Length: 54633
   of the API in the browser, in which each route can be tried out. The
   browser loads Scalar from jsDelivr, a release that zefir pins, checked by
   its hash (Subresource Integrity), so no JavaScript of it is in zefir. A
-  `Content-Security-Policy` of the application must allow the scripts of
-  `https://cdn.jsdelivr.net` on that page.
+  `Content-Security-Policy` of the application must allow on that page the
+  scripts of `https://cdn.jsdelivr.net`, the `<style>` elements that
+  Scalar adds to the page, `style-src 'unsafe-inline'`, and the fonts it
+  loads, `font-src https://fonts.scalar.com`.
 - **The paths are options**: `zefir.openapi.Docs(.{ .json = "/openapi.json",
   .page = "/docs" })` by default; `.page = null` leaves the page out.
 - **A prefix that comes from the settings**, at run time, is not in the
