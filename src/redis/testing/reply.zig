@@ -94,7 +94,8 @@ pub const Reply = union(enum) {
 };
 
 pub const Delayed = struct {
-    /// How long the server waits, on the awake clock.
+    /// How long the server waits, on the awake clock. `Io.Duration.max`
+    /// waits until the server stops: the reply never comes.
     after: Io.Duration,
     /// What it does then: any reply, an action included.
     reply: *const Reply,

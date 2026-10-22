@@ -391,6 +391,28 @@ fn delayed(io: Io, url: []const u8) !void {
     try testing.expect(took.nanoseconds >= 100 * std.time.ns_per_ms);
 }
 
+test "a reply delayed by Io.Duration.max never comes, and stop ends the wait" {
+    const io = testing.io;
+    const never: Reply = .{ .string = "never" };
+    var server: FakeServer = try .start(testing.allocator, io, &.{
+        .expect(.{ "GET", "k" }, .{ .delayed = .{ .after = .max, .reply = &never } }),
+    });
+    defer server.stop(io);
+    try within5s(io, neverAnswered, .{ io, &server });
+}
+
+fn neverAnswered(io: Io, server: *FakeServer) !void {
+    var c: Client = undefined;
+    try c.open(io, server.url());
+    defer c.close();
+    try c.send(&.{ "GET", "k" });
+    // The command is in the journal once the server holds its reply.
+    while (server.received(io) == 0) try io.sleep(.fromMilliseconds(1), .awake);
+    try io.sleep(.fromMilliseconds(20), .awake);
+    server.stop(io);
+    try c.expectClosed();
+}
+
 test "close_connection reads the command, puts it in the journal and closes the connection" {
     const io = testing.io;
     const closed: Reply = .close_connection;
