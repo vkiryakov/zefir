@@ -2574,10 +2574,13 @@ the client and `shutdown` after them.
 
 The client logs to `std.log.scoped(.redis)`, as warnings, what an operator
 needs to know: the clears of the pool, and why; the servers that refuse a
-connection, with their address; and a `start` that failed. At debug, it
-logs what it skips: a push between replies, an error of CLIENT SETINFO, an
-idle connection that failed its PING. It never logs arguments, values,
-passwords or the texts of replies. To send
+connection, with their address and the error they gave; and a `start` that
+failed, with the text of its `Diagnostics`. At debug, it logs what it
+skips: a push between replies, an error of CLIENT SETINFO, an idle
+connection that failed its PING. It never logs arguments, values,
+passwords or the values of replies: the only texts of a server in its
+records are the errors of a refused handshake, as below, which a failed
+`start` shows too. To send
 the records to zefir-log, the root file of the program names the bridge:
 
 ```zig
