@@ -67,6 +67,80 @@ pub fn Command(comptime call: []const u8, comptime word: []const u8, comptime R:
     };
 }
 
+/// What HSCAN, SSCAN and ZSCAN take besides the key: where the page
+/// starts, and which items it returns.
+pub const CursorOptions = struct {
+    /// The cursor of the page: 0 for the first, then the cursor that the
+    /// page before returned, until it returns 0.
+    cursor: u64 = 0,
+    /// MATCH: only the items whose field or member matches this pattern,
+    /// such as "a*".
+    match: ?[]const u8 = null,
+    /// COUNT: about how many items the server looks at for the page, 10
+    /// by default; a hint, not a limit.
+    count: ?u32 = null,
+};
+
+/// The type of a page of `word`, SCAN or a scan of the items of one key
+/// (`keyed`): `word [key] cursor [MATCH p] [COUNT n] [TYPE t]`, the TYPE
+/// for `Options` that has a field `type`, and its items read into `Item`.
+pub fn Cursor(comptime call: []const u8, comptime word: []const u8, comptime Item: type, comptime Options: type, comptime keyed: bool) type {
+    const Page = types.ScanPage(Item);
+    comptime resp.checkReply(Page, call);
+    const typed = @hasField(Options, "type");
+    return struct {
+        key: if (keyed) []const u8 else void,
+        options: Options,
+
+        const Self = @This();
+
+        pub const Reply = Page;
+
+        /// A TYPE that names no type of a key, `.none` or `.other`, is
+        /// InvalidArgument.
+        pub fn check(c: Self, diagnostics: ?*Diagnostics) error{InvalidArgument}!void {
+            if (typed) if (c.options.type) |of| switch (of) {
+                .none, .other => return invalid(diagnostics, call ++ ": .type = .{t} names no type of a key: give string, list, set, zset, hash or stream", .{of}),
+                else => {},
+            };
+        }
+
+        pub fn write(c: Self, w: resp.Writer) resp.Writer.Error!void {
+            const o = c.options;
+            var n: usize = 2 + @as(usize, @intFromBool(keyed));
+            if (o.match != null) n += 2;
+            if (o.count != null) n += 2;
+            if (typed) {
+                if (o.type != null) n += 2;
+            }
+            try w.arrayHeader(n);
+            try w.bulk(word);
+            if (keyed) try w.bulk(c.key);
+            try args.write(w, o.cursor);
+            if (o.match) |pattern| {
+                try w.bulk("MATCH");
+                try w.bulk(pattern);
+            }
+            if (o.count) |count| {
+                try w.bulk("COUNT");
+                try args.write(w, count);
+            }
+            if (typed) if (o.type) |of| {
+                try w.bulk("TYPE");
+                try w.bulk(@tagName(of));
+            };
+        }
+
+        pub fn read(_: Self, r: *resp.Reader, arena: ?std.mem.Allocator, diagnostics: ?*Diagnostics) resp.DecodeError!Page {
+            return resp.decode(Page, r, arena, diagnostics);
+        }
+
+        pub fn name(_: Self) []const u8 {
+            return word;
+        }
+    };
+}
+
 /// How a field of the arguments goes out, by its type.
 const Kind = enum { string, list, pairs, values, duration, end, value };
 

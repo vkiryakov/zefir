@@ -14,6 +14,8 @@
 //! - Strings and counters: `get`, `set`, `setNx`, `setXx`, `getdel`,
 //!   `getex`, `mget`, `mset`, `incr`, `decr`, `incrby`, `decrby`,
 //!   `incrbyfloat`.
+//! - Keys: `del`, `unlink`, `exists`, `expire`, `persist`, `ttl`,
+//!   `keyType`, `rename`, `scan` (one page), `ping`.
 //! - `raw(T, args)` — a command that the catalog lacks: `args` is a tuple
 //!   of strings, numbers, bools and enums, the name of the command first,
 //!   or a slice of strings, and the reply reads into `T` by the rules of
@@ -25,6 +27,8 @@
 //! The type of each command is named after its function, capitalized:
 //! `cmd.Get(T)`, `cmd.Set(V)`, `cmd.Incr`, so that an array of commands
 //! of one type can go in a pipeline. What a type is made of is internal.
+//! `cmd.Ttl` and `cmd.KeyType` are the types of the commands `ttl` and
+//! `keyType`; what they return is `redis.Ttl` and `redis.KeyType`.
 //!
 //! ```zig
 //! try client.run(io, op, redis.cmd.set("session:42", token, .{ .ttl = .fromSeconds(3600) }), .{});
@@ -35,6 +39,7 @@ const std = @import("std");
 const raw_command = @import("cmd/raw.zig");
 const transactions = @import("cmd/transactions.zig");
 const strings = @import("cmd/strings.zig");
+const keys = @import("cmd/keys.zig");
 
 pub const get = strings.get;
 pub const Get = strings.Get;
@@ -65,6 +70,28 @@ pub const decrby = strings.decrby;
 pub const Decrby = strings.Decrby;
 pub const incrbyfloat = strings.incrbyfloat;
 pub const Incrbyfloat = strings.Incrbyfloat;
+
+pub const del = keys.del;
+pub const Del = keys.Del;
+pub const unlink = keys.unlink;
+pub const Unlink = keys.Unlink;
+pub const exists = keys.exists;
+pub const Exists = keys.Exists;
+pub const expire = keys.expire;
+pub const Expire = keys.Expire;
+pub const persist = keys.persist;
+pub const Persist = keys.Persist;
+pub const ttl = keys.ttl;
+pub const Ttl = keys.Ttl;
+pub const keyType = keys.keyType;
+pub const KeyType = keys.KeyType;
+pub const rename = keys.rename;
+pub const Rename = keys.Rename;
+pub const scan = keys.scan;
+pub const Scan = keys.Scan;
+pub const ScanOptions = keys.ScanOptions;
+pub const ping = keys.ping;
+pub const Ping = keys.Ping;
 
 pub const raw = raw_command.raw;
 pub const Raw = raw_command.Raw;
