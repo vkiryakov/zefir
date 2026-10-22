@@ -765,7 +765,7 @@ lead to your line, the call of `document` in `Service.zig`:
 ```text
 $ zig build test
 error: zefir.http: TodosController.get: {todo_id} in "/v1/todos/{todo_id}" has no field in .path = TodoIdPath
-src/Service.zig:28:60: note: called at comptime here
+src/Service.zig:27:60: note: called at comptime here
 ```
 
 A declaration without its type, `pub const openapi = .{ … }`:
