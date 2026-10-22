@@ -1308,7 +1308,10 @@ pub const LiveEvent = union(enum) {
 
 In OpenAPI 3.1 a stream is a string of `text/event-stream`, so the
 document names each event and the schema of its data in the description,
-and has those schemas in `components`, for the generators of clients:
+and has those schemas in `components`, for the generators of clients. A
+204 without content follows, in every stream: a handler that returns
+without `subscribe` answers 204, which tells an `EventSource` to stop
+reconnecting:
 
 ```json
 "200": {
@@ -1320,6 +1323,9 @@ and has those schemas in `components`, for the generators of clients:
       }
     }
   }
+},
+"204": {
+  "description": "No Content"
 },
 ```
 
