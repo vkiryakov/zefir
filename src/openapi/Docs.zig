@@ -26,7 +26,9 @@
 //!   hash (Subresource Integrity), so a `Content-Security-Policy` of the
 //!   application must allow scripts of https://cdn.jsdelivr.net, the
 //!   `<style>` elements Scalar adds (`style-src 'unsafe-inline'`) and its
-//!   fonts (`font-src https://fonts.scalar.com`).
+//!   fonts (`font-src https://fonts.scalar.com`). The requests of "Try it"
+//!   go from the browser straight to the API, never through a proxy, so
+//!   the `connect-src` of a strict policy must allow the API's origin.
 //!   `.page = null` leaves the page out.
 //!
 //! The paths are those of the routes within the server's prefix. When the
@@ -54,6 +56,12 @@ const scalar = struct {
     const version = "1.75.1";
     const url = "https://cdn.jsdelivr.net/npm/@scalar/api-reference@" ++ version ++ "/dist/browser/standalone.js";
     const integrity = "sha384-G+2Q2i9l3PPfmYkk0b4BAIUrs7xb/DNaTL1wCYYab4c9dIKlCyiqzC0Qx3eq9Wf6";
+    /// The configuration of the reference, as JSON, which it reads from the
+    /// attribute `data-configuration`: an empty `proxyUrl` sends each
+    /// request of "Try it" from the browser straight to the API. Without
+    /// it, a default of Scalar's decides whether a request to an absolute
+    /// URL goes through its proxy, https://proxy.scalar.com.
+    const configuration = "{\"proxyUrl\":\"\"}";
 };
 
 /// The controller of documentation for the paths of `opts`.
@@ -265,8 +273,8 @@ fn pageOf(gpa: std.mem.Allocator, title: []const u8) error{OutOfMemory}!Page {
         \\    <title>{f}</title>
         \\  </head>
         \\  <body>
-        \\    <script id="api-reference" data-url="
-    , .{Html{ .text = title }});
+        \\    <script id="api-reference" data-configuration="{f}" data-url="
+    , .{ Html{ .text = title }, Html{ .text = scalar.configuration } });
     defer gpa.free(head);
     const tail = std.fmt.comptimePrint(
         \\"></script>

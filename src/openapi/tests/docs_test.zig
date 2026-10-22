@@ -1,9 +1,9 @@
 //! zefir.openapi.Docs on the backend of zefir-http in memory: the document
 //! at its route with its ETag and `Cache-Control: no-cache`, 304 for a
 //! client that has it, HEAD, the page of Scalar with its pinned version and
-//! hash, which finds the document at each path the router gives the page,
-//! no page, a prefix that comes at run time, and two documents on two
-//! paths. A document never holds the routes of `Docs`.
+//! hash and no proxy, which finds the document at each path the router
+//! gives the page, no page, a prefix that comes at run time, and two
+//! documents on two paths. A document never holds the routes of `Docs`.
 const std = @import("std");
 const http = @import("http");
 const openapi = @import("../openapi.zig");
@@ -174,7 +174,7 @@ test "HEAD of the document: the head of GET, without the body" {
     try testing.expectEqualStrings(&etagOf(bytes), res.header("etag").?);
 }
 
-test "GET of the page: Scalar of the pinned version, checked by its hash, and the path of the document" {
+test "GET of the page: Scalar of the pinned version, checked by its hash, without a proxy, and the path of the document" {
     var f: Fixture = .{ .backend = undefined };
     try f.start();
     defer f.stop();
@@ -192,7 +192,7 @@ test "GET of the page: Scalar of the pinned version, checked by its hash, and th
         \\    <title>Todos &amp; lists &lt;API&gt;</title>
         \\  </head>
         \\  <body>
-        \\    <script id="api-reference" data-url="/api/openapi.json"></script>
+        \\    <script id="api-reference" data-configuration="{&quot;proxyUrl&quot;:&quot;&quot;}" data-url="/api/openapi.json"></script>
         \\    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.1/dist/browser/standalone.js" integrity="sha384-G+2Q2i9l3PPfmYkk0b4BAIUrs7xb/DNaTL1wCYYab4c9dIKlCyiqzC0Qx3eq9Wf6" crossorigin="anonymous"></script>
         \\  </body>
         \\</html>

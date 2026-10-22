@@ -1443,7 +1443,10 @@ Content-Length: 54633
   `Content-Security-Policy` of the application must allow on that page the
   scripts of `https://cdn.jsdelivr.net`, the `<style>` elements that
   Scalar adds to the page, `style-src 'unsafe-inline'`, and the fonts it
-  loads, `font-src https://fonts.scalar.com`.
+  loads, `font-src https://fonts.scalar.com`. A route tried out there,
+  with "Try it", is a request from the browser straight to the API, never
+  through a proxy, so the `connect-src` of a strict policy must allow the
+  origin of the API.
 - **The paths are options**: `zefir.openapi.Docs(.{ .json = "/openapi.json",
   .page = "/docs" })` by default; `.page = null` leaves the page out.
 - **A prefix that comes from the settings**, at run time, is not in the
