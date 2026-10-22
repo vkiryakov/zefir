@@ -208,6 +208,8 @@ test {
     _ = @import("conformance.zig");
     _ = @import("tenants.zig");
     _ = @import("rotation.zig");
+    _ = @import("documents.zig");
+    _ = @import("lifecycle.zig");
 }
 
 test "an Admin of mongo-auth makes a user that writes to its database, and drops both" {
