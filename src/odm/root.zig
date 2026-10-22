@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const errors = @import("errors.zig");
+const driver = @import("driver.zig");
 
 /// The errors that a driver returns, each in its class of `outcome`.
 pub const DriverError = errors.DriverError;
@@ -48,7 +49,20 @@ pub const Outcome = errors.Outcome;
 pub const outcome = errors.outcome;
 pub const Diagnostics = errors.Diagnostics;
 
+/// The settings of one connection: a server and a login.
+pub const ConnectionConfig = driver.ConnectionConfig;
+/// The operations of a client beyond those every driver has.
+pub const Capabilities = driver.Capabilities;
+/// A driver: opens clients by their settings.
+pub const Driver = driver.Driver;
+/// A client of a driver: one server and login, with its pool.
+pub const Client = driver.Client;
+/// The documents of a find or an aggregate, from a driver.
+pub const RawCursor = driver.RawCursor;
+
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("signature.zig");
     _ = @import("tests/errors_tests.zig");
+    _ = @import("tests/driver_tests.zig");
 }

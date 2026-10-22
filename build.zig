@@ -7,6 +7,7 @@ const http_guide = @import("src/http/examples/cases.zig");
 const jwt_cases = @import("src/jwt/tests/cases.zig");
 const jwt_guide = @import("src/jwt/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
+const odm_cases = @import("src/odm/tests/cases.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -817,6 +818,11 @@ pub fn build(b: *std.Build) void {
         compile.expect_errors = .{ .contains = case[1] };
         test_mongo_bson.dependOn(&compile.step);
     }
+    addOdmCompileChecks(b, test_odm, &.{
+        .{ .name = "mongo-bson", .module = mongo_bson },
+        .{ .name = "core", .module = core },
+        .{ .name = "validator", .module = validator },
+    }, target, optimize);
 
     // mongo compile errors of the collection API: documents of types that
     // its operations cannot take. Each message names the operation, the
@@ -1481,6 +1487,36 @@ fn addHttpGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// odm compile errors: each case of src/odm/tests/cases.zig compiles the
+/// test of src/odm/tests/compile_errors.zig of its name, in a module of
+/// its own rooted at src/odm/compile_checks.zig, so that a case may call
+/// the internal functions of odm too. It passes only when the build fails
+/// with the error of the case: `error: ` in front makes it the whole
+/// message, as in addHttpCompileChecks. `imports` are those of odm.
+fn addOdmCompileChecks(
+    b: *std.Build,
+    test_odm: *std.Build.Step,
+    imports: []const std.Build.Module.Import,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const checks = b.createModule(.{
+        .root_source_file = b.path("src/odm/compile_checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    for (odm_cases.compile_errors, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("odm-compile-error-{d}", .{i}),
+            .root_module = checks,
+            .filters = &.{case.name},
+        });
+        compile.expect_errors = .{ .contains = b.fmt("error: {s}", .{case.expect}) };
+        test_odm.dependOn(&compile.step);
+    }
 }
 
 /// The compile checks of zefir-http, from the lists in
