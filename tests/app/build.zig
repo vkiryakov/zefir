@@ -7,6 +7,10 @@
 //!                        memory transport, beans of one App, on zio with
 //!                        one executor and with four; then the programs of
 //!                        programs/, stopped by SIGTERM (Linux and macOS)
+//!   zig build shop       start the NATS and mongod servers in Docker, then
+//!                        run the shop of the design of App, shop/,
+//!                        against them: an order over HTTP, read back over
+//!                        rpc through NATS, then SIGTERM (Linux and macOS)
 //!   zig build up         start the NATS server `plain` and the mongod
 //!                        server `mongo-plain` of the repository's
 //!                        docker-compose.yml and wait until they are healthy
@@ -80,7 +84,44 @@ pub fn build(b: *std.Build) void {
     run_e2e.has_side_effects = true;
     b.step("e2e", "Run the end-to-end tests of zefir.App on zio, then its programs stopped by SIGTERM").dependOn(&run_e2e.step);
 
+    // The shop of the design of App, shop/: its program, and the test that
+    // starts it against the servers of `up`, whose path it gets.
+    const shop = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("shop/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zefir", .module = zefir.module("zefir") },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    const shop_options = b.addOptions();
+    shop_options.addOptionPath("shop", shop.getEmittedBin());
+    const shop_test = b.addTest(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("shop_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zefir", .module = zefir.module("zefir") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "shop_options", .module = shop_options.createModule() },
+            },
+        }),
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+    });
+    const run_shop = b.addRunArtifact(shop_test);
+    run_shop.stdio = .inherit;
+    run_shop.has_side_effects = true;
+    run_shop.step.dependOn(&up.step);
+    b.step("shop", "Start NATS and mongod in Docker, then run the shop of the App design against them").dependOn(&run_shop.step);
+
     // Everything above built and nothing run.
-    const check_step = b.step("check", "Build the end-to-end tests and the programs without running them");
+    const check_step = b.step("check", "Build the end-to-end tests, the programs and the shop without running them");
     check_step.dependOn(&e2e.step);
+    check_step.dependOn(&shop_test.step);
 }
