@@ -956,7 +956,7 @@ fn isAnonymous(comptime T: type) bool {
 
 /// Whether `name` holds the number of an anonymous type anywhere:
 /// `__struct_`, `__union_`, `__enum_` or `__opaque_`, then a digit.
-fn hasCompilerNumber(comptime name: []const u8) bool {
+pub fn hasCompilerNumber(comptime name: []const u8) bool {
     var rest = name;
     while (std.mem.find(u8, rest, "__")) |at| {
         rest = rest[at + 2 ..];
@@ -995,7 +995,7 @@ fn isSchemaName(comptime name: []const u8) bool {
 /// "dto.TodoResponse" is "TodoResponse", "dto.Page(dto.TodoResponse)" is
 /// "Page_TodoResponse", "dto.Pair(dto.Todo,u8)" is "Pair_Todo_u8", and an
 /// argument "[]const dto.Todo" or "?dto.Todo" is "Todo".
-fn schemaName(comptime full: []const u8) []const u8 {
+pub fn schemaName(comptime full: []const u8) []const u8 {
     const name = bare(lastWord(full));
     const open = std.mem.findScalar(u8, name, '(') orelse return name;
     if (name[name.len - 1] != ')') return name;

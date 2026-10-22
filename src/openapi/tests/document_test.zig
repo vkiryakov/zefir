@@ -685,6 +685,33 @@ test "tags in the order they first come, shared and by default; operationIds; th
     try expectJson("\"TodosV2.list\"", comptime at(paths, &.{ "/v2/todos", "get", "operationId" }));
 }
 
+/// A controller that a generic makes, for one type of items.
+fn CrudController(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        pub const http_routes = http.routes(.{ .prefix = "/items", .methods = .{ .list = http.get("", .{}) } });
+        pub const openapi: ControllerDoc(Self) = .{ .routes = .{ .list = .{ .summary = "List the items" } } };
+
+        pub fn list(_: *Self, _: *http.Context) error{}!http.Json([]const T) {
+            return .{ .value = &.{} };
+        }
+    };
+}
+
+const generic = struct {
+    const Item = struct { id: u64 };
+
+    var items: CrudController(Item) = .{};
+    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&items} });
+};
+
+test "a generic controller: its default tag and operationIds by its name without Controller and its arguments, as schemas are named" {
+    const doc = comptime document(generic.Options, .{ .info = info });
+    try expectJson("[{\"name\":\"Crud_Item\"}]", comptime at(doc.root, &.{"tags"}));
+    try expectJson("\"Crud_Item.list\"", comptime at(doc.root, &.{ "paths", "/items", "get", "operationId" }));
+}
+
 /// Parameters of each place, of the template, and of a middleware.
 const params = struct {
     const Sort = enum { asc, desc };

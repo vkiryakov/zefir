@@ -8,7 +8,8 @@
 //!
 //! Each route of the controllers of the document is an operation:
 //! - its `operationId` (`TodosV1.create`) and its tag, from the name of its
-//!   controller and its `ControllerDoc`, with the texts there;
+//!   controller (`Crud_Todo` for a generic, `CrudController(dto.Todo)`) and
+//!   its `ControllerDoc`, with the texts there;
 //! - its `security`, from the `MiddlewareDoc` of the middleware of its
 //!   chain;
 //! - its parameters: the fields of its `.path`, `.query`, `.headers` and
@@ -281,9 +282,30 @@ fn tagsNode(comptime routes: []const http.RouteDescription) Node {
 }
 
 /// The tag of the operations of the controller of `r`: its `.tag`, else
-/// its name without `Controller`.
+/// its name in the document.
 fn tagOf(comptime r: http.RouteDescription) []const u8 {
-    return r.Controller.openapi.tag orelse bareName(r.controller_name);
+    if (r.Controller.openapi.tag) |tag| return tag;
+    return documentName(r) orelse
+        fail(messageName(r) ++ " is a controller of an anonymous type, whose name changes as the program does; give it a tag: .tag = \"...\" in its ControllerDoc");
+}
+
+/// The name of the controller of `r` in its default tag and operationIds:
+/// without `Controller` at its end, and a generic's arguments after it as
+/// the names of schemas have them: `TodosV1Controller` is `TodosV1`,
+/// `CrudController(dto.Todo)` is `Crud_Todo`. Null for a controller of an
+/// anonymous type, whose name holds the number the compiler gives it.
+fn documentName(comptime r: http.RouteDescription) ?[]const u8 {
+    const name = r.controller_name;
+    const flat = if (std.mem.findScalar(u8, name, '(')) |open| schema.schemaName(bareName(name[0..open]) ++ name[open..]) else bareName(name);
+    return if (schema.hasCompilerNumber(flat)) null else flat;
+}
+
+/// How messages name the controller of `r`: a generic without its
+/// arguments, `Crud(...)`.
+fn messageName(comptime r: http.RouteDescription) []const u8 {
+    const name = r.controller_name;
+    const open = std.mem.findScalar(u8, name, '(') orelse return name;
+    return name[0..open] ++ "(...)";
 }
 
 /// The name of a controller without `Controller` at its end:
@@ -356,10 +378,13 @@ fn methodKey(comptime method: std.http.Method) []const u8 {
 }
 
 /// The `operationId` of `r`: its `.operation_id`, else the name of its
-/// controller without `Controller` and its method, `TodosV1.create`.
+/// controller in the document and its method, `TodosV1.create`.
 fn operationId(comptime r: http.RouteDescription) []const u8 {
     const doc = @field(r.Controller.openapi.routes, r.handler);
-    return doc.operation_id orelse bareName(r.controller_name) ++ "." ++ r.handler;
+    if (doc.operation_id) |id| return id;
+    const name = documentName(r) orelse fail(messageName(r) ++ "." ++ r.handler ++ ": its controller is of an anonymous type, whose name changes as the program does; " ++
+        "give the route an operationId: .operation_id = \"...\" in the routes of its ControllerDoc");
+    return name ++ "." ++ r.handler;
 }
 
 /// The operation of the route `r`.
