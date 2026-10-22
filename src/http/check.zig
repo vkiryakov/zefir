@@ -24,8 +24,9 @@
 //! - each response of the route, from the handler, from a middleware that
 //!   answers `.handled`, from the error handler: its status and the media
 //!   type of its body must be among the responses of the route and of its
-//!   middleware, or among the answers `mapError` gives its errors, in the
-//!   error handler's media type;
+//!   middleware; an answer of the error handler may also be one that
+//!   `mapError` gives an error of the route, in the error handler's media
+//!   type;
 //! - `subscribe` of an `http.sse.Manager(Events)`: `Events` must be the
 //!   route's `.events`.
 //!
@@ -289,6 +290,9 @@ pub const State = if (enabled) struct {
     /// The response that goes out is one the server writes itself: it goes
     /// as it is.
     untouched: bool = false,
+    /// The error handler answers the request: its answer may also be one
+    /// that `mapError` gives an error of the route.
+    error_path: bool = false,
 } else struct {};
 
 /// A route the check compares: its table, and its names for the line.
@@ -328,18 +332,20 @@ pub fn subscribe(ctx: *Context, comptime Events: type) void {
     record(ctx, route, .{ .events = comptime plan.typeName(Events) });
 }
 
-/// The error handler answers `err`. An error that is not one of the
-/// route's comes from the server, such as the 504 of a deadline: its
-/// answer goes as it is.
+/// The error handler answers `err`: from here on the request is on the
+/// error path. An error that is not one of the route's comes from the
+/// server, such as the 504 of a deadline: its answer goes as it is.
 pub fn answering(ctx: *Context, err: anyerror) void {
     if (!enabled) return;
-    const route = ctx.internal.check.route orelse return;
+    const state = &ctx.internal.check;
+    const route = state.route orelse return;
+    state.error_path = true;
     // A place of the route returns anyerror: every error may be its.
     const list = route.table.errors orelse return;
     for (list) |e| {
         if (e == err) return;
     }
-    ctx.internal.check.untouched = true;
+    state.untouched = true;
 }
 
 /// The response that goes out is one the server writes itself: the 408 or
@@ -368,7 +374,7 @@ pub fn head(ctx: *Context) bool {
         const res = &ctx.response.internal;
         const status = res.statusCode();
         const media: ?[]const u8 = if (res.body == .none) null else if (res.content_type) |text| mediaType(text) else null;
-        if (allowsAnswer(route.table, status, media)) return true;
+        if (allowsAnswer(route.table, status, media, state.error_path)) return true;
         report(ctx, route, .{ .answer = .{ .status = status, .media = media } });
     }
     flow.replaceWithInternal(&ctx.response.internal);
@@ -392,12 +398,15 @@ fn allowsInput(t: *const Table, source: Source, id: *const anyopaque) bool {
 }
 
 /// Whether the route declares a response of `status` with a body of
-/// `media`, or without one for null.
-fn allowsAnswer(t: *const Table, status: u16, media: ?[]const u8) bool {
+/// `media`, or without one for null: among the responses of the route and
+/// of its middleware, or, for an answer of the error handler, among those
+/// that `mapError` gives the route's errors, in the error handler's media
+/// type.
+fn allowsAnswer(t: *const Table, status: u16, media: ?[]const u8, error_path: bool) bool {
     for (t.responses) |a| {
         if (a.status == status and sameMedia(status, a.media, media)) return true;
     }
-    if (!sameMedia(status, t.error_media, media)) return false;
+    if (!error_path or !sameMedia(status, t.error_media, media)) return false;
     const list = t.errors orelse return true;
     for (list) |err| {
         if (t.statusOf(err) == status) return true;
@@ -405,11 +414,13 @@ fn allowsAnswer(t: *const Table, status: u16, media: ?[]const u8) bool {
     return false;
 }
 
-/// Whether the route declares a response of `status`, whatever its body.
-fn declaresStatus(t: *const Table, status: u16) bool {
+/// Whether the route declares a response of `status`, whatever its body,
+/// as `allowsAnswer` reads the declarations.
+fn declaresStatus(t: *const Table, status: u16, error_path: bool) bool {
     for (t.responses) |a| {
         if (a.status == status) return true;
     }
+    if (!error_path) return false;
     const list = t.errors orelse return false;
     for (list) |err| {
         if (t.statusOf(err) == status) return true;
@@ -434,14 +445,15 @@ fn report(ctx: *Context, route: Checked, what: What) void {
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     // A line too long for the buffer is cut.
-    writeLine(&w, route, what) catch {};
+    writeLine(&w, route, what, ctx.internal.check.error_path) catch {};
     const line = w.buffered();
     log.warn("{s}", .{line});
     if (builtin.is_test) seen.add(ctx.io(), line);
 }
 
-/// `zefir.http: <METHOD> <pattern> (<Controller>.<method>) <what>`.
-fn writeLine(w: *std.Io.Writer, route: Checked, what: What) std.Io.Writer.Error!void {
+/// `zefir.http: <METHOD> <pattern> (<Controller>.<method>) <what>`; an
+/// answer on the error path is read as `allowsAnswer` reads it there.
+fn writeLine(w: *std.Io.Writer, route: Checked, what: What, error_path: bool) std.Io.Writer.Error!void {
     const info = route.info;
     const t = route.table;
     try w.print("zefir.http: {t} {s} ({s}.{s}) ", .{ info.method, info.pattern, info.controller, info.handler });
@@ -469,7 +481,7 @@ fn writeLine(w: *std.Io.Writer, route: Checked, what: What) std.Io.Writer.Error!
         .answer => |a| {
             try w.print("answered {d}", .{a.status});
             // Its status is declared, with another body.
-            if (declaresStatus(t, a.status)) {
+            if (declaresStatus(t, a.status, error_path)) {
                 if (a.media) |media| try w.print(" as {s}", .{media}) else try w.writeAll(" without a body");
             }
             try w.writeAll(", which it does not declare in .responses");
@@ -670,7 +682,8 @@ fn ResponsesOf(comptime Response: type) type {
 }
 
 /// A middleware type, whose `openapi` is a literal: it reads a query of its
-/// own, and answers 304 itself when asked, or a 418 nobody declares.
+/// own, and answers 304 itself when asked, or a 418 nobody declares, or a
+/// 422 in the error handler's form, which only mapError gives.
 const Paging = struct {
     pub const openapi = .{ .query = PageQuery, .responses = .{ .not_modified = .{} } };
 
@@ -682,6 +695,10 @@ const Paging = struct {
         }
         if (is(ctx, "teapot")) {
             _ = ctx.response.status(418);
+            return .handled;
+        }
+        if (is(ctx, "422")) {
+            try ctx.response.status(422).json(ApiError{ .code = "items.bad_page" });
             return .handled;
         }
         return .next;
@@ -725,7 +742,7 @@ const ItemsV1Controller = struct {
         .prefix = "/v1/items",
         .methods = .{
             .list = routes.get("", .{ .query = ListQuery }),
-            .get = routes.get("/{id}", .{ .path = TodoPath }),
+            .get = routes.get("/{id}", .{ .path = TodoPath, .responses = .{ .ok = .{}, .conflict = .{ .json = Item } } }),
             .create = Create,
             .remove = routes.delete("/{id}", .{ .path = TodoPath }),
             .exportCsv = routes.get("/export.csv", .{ .responses = .{ .ok = .{ .content_type = "text/csv" } } }),
@@ -747,7 +764,10 @@ const ItemsV1Controller = struct {
     pub fn get(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
         const path = try ctx.path(TodoPath);
         if (is(ctx, "missing") or is(ctx, "html") or is(ctx, "410")) return error.TodoNotFound;
-        return .{ .value = .{ .id = path.id, .title = "Buy milk" }, .status = if (is(ctx, "201")) 201 else 200 };
+        // Its value under 409, which it declares, or under 404, the status
+        // mapError gives its error, which it does not.
+        const status: u16 = if (is(ctx, "201")) 201 else if (is(ctx, "own 409")) 409 else if (is(ctx, "own 404")) 404 else 200;
+        return .{ .value = .{ .id = path.id, .title = "Buy milk" }, .status = status };
     }
 
     pub fn create(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
@@ -920,6 +940,8 @@ test "check: the calls and the answers a route declares pass" {
     try f.expectPassed(.POST, "/api/v1/items", "", 201);
     try f.expectPassed(.DELETE, "/api/v1/items/1", "", 204);
     try f.expectPassed(.GET, "/api/v1/items/export.csv", "", 200);
+    // The handler's value under a status its .responses declares.
+    try f.expectPassed(.GET, "/api/v1/items/1", "own 409", 409);
     // An error of the route, answered by mapError.
     try f.expectPassed(.GET, "/api/v1/items/1", "missing", 404);
     try f.expectPassed(.GET, "/api/v1/items/0x", "", 422);
@@ -960,6 +982,12 @@ test "check: a status or a body the route does not declare is a 500 with its lin
     try f.expectRefused(.POST, "/api/v1/items", "202", "zefir.http: POST /api/v1/items (ItemsV1Controller.create) answered 202, which it does not declare in .responses");
     try f.expectRefused(.DELETE, "/api/v1/items/1", "text", "zefir.http: DELETE /api/v1/items/{id} (ItemsV1Controller.remove) answered 200, which it does not declare in .responses");
     try f.expectRefused(.DELETE, "/api/v1/items/1", "redirect", "zefir.http: DELETE /api/v1/items/{id} (ItemsV1Controller.remove) answered 303, which it does not declare in .responses");
+    // The status mapError gives an error of the route, in the error
+    // handler's media type, answered by the handler with its own value, or
+    // by a middleware itself: the answers of mapError are those of the
+    // error handler alone.
+    try f.expectRefused(.GET, "/api/v1/items/1", "own 404", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 404, which it does not declare in .responses");
+    try f.expectRefused(.GET, "/api/v1/items/page", "422", "zefir.http: GET /api/v1/items/page (ItemsV1Controller.page) answered 422, which it does not declare in .responses");
     // A stream whose head did not go out: the 500 in its place, whole.
     try f.expectRefused(.GET, "/api/v1/items/export.csv", "html", "zefir.http: GET /api/v1/items/export.csv (ItemsV1Controller.exportCsv) answered 200 as text/html, which it does not declare in .responses");
 }
