@@ -66,6 +66,7 @@ std.log.info("{s}: {s}", .{ msg.subject, msg.payload });
 - [Memory and limits](#memory-and-limits)
 - [Reconnect and the fate of data](#reconnect-and-the-fate-of-data)
 - [Drain](#drain)
+- [Under zefir.App](#under-zefirapp)
 - [Events](#events)
 - [Statistics](#statistics)
 - [Errors](#errors)
@@ -1424,6 +1425,49 @@ second `sub.drain()` while one runs, or one during the client's
 `drain()`, adds nothing: it waits until that drain ends the subscription,
 so nothing on its way is lost.
 
+## Under zefir.App
+
+A service whose servers use NATS, such as an rpc server on
+[rpc-nats](../../rpc-nats/examples/README.md), hands its client to
+`zefir.App` of zefir-core with the rest of its beans: App connects the
+client before the servers that take it, watches it while they run, and
+drains it after they have stopped. The client is a bean as it is, made by
+a factory such as
+`pub fn natsClient(gpa: std.mem.Allocator, io: std.Io, config: *const Config) !nats.Client`,
+which returns `.init(gpa, io, .{ .servers = &.{config.nats.url}, .name = "users" })`.
+App calls three of its methods:
+
+| Method | What it does |
+| --- | --- |
+| `start(io)` | `connect()`, before every bean that takes the client: after a failed connect App starts nothing more and stops what it started |
+| `wait(io)` | waits until the client closes, then says why: `{}` after `close`, `drain` or `shutdown`; `error.ConnectionLost`, `error.AuthenticationFailed` or `error.ReconnectFailed` when it closed by itself, which stops the whole App |
+| `shutdown(io, deadline)` | `drain()` by the deadline, then closed, after the servers that use the client have stopped |
+
+- **A reconnect is no failure.** While the client reconnects, `wait`
+  waits on, and an rpc server on it is not ready meanwhile. With the
+  default `reconnect` the client never gives up; with
+  `reconnect.max_attempts` it gives up after that many failed attempts in
+  a row, and `wait` returns `error.ReconnectFailed`: App stops the
+  service, and `app.failure()` names the client, or the rpc server whose
+  subscriptions ended with it, whichever told App first.
+- **The drain keeps to the deadline.** `shutdown` ends the drain 250 ms
+  before App's deadline at the latest, so that App has time for the rest;
+  a drain that does not finish by then returns `error.Timeout`, and the
+  client closes anyway, with no task left. A client without a connection
+  at that moment, as while it reconnects, has nothing to drain: it closes
+  at once and returns `{}`, and so does one whose connection is lost
+  during the drain.
+- **No `requestStop`.** The servers need NATS until their own drain ends:
+  their failures and last responses go out through it. App stops the
+  beans in the reverse order of their creation, and the client comes
+  before the servers that take it, so it is drained after them.
+- `connect`, `drain` and `close` stay as they are, for a client that a
+  program drives itself, as the examples of this guide do.
+
+The [guide of rpc-nats](../../rpc-nats/examples/README.md#under-zefirapp)
+runs a whole service under App against a NATS server: the client, the
+transport of rpc on it, and an rpc server.
+
 ## Events
 
 The connection lives a life of its own between your calls: it drops, comes
@@ -1540,6 +1584,8 @@ errors of `std.Io` that pass through unchanged, the network errors such as
 | `ConnectionClosed`                               | the client is closed                                            |
 | `ConnectionDraining`                             | the client drains and takes no new work                         |
 | `AuthenticationFailed`                           | the server refused the user or the password                     |
+| `ConnectionLost`                                 | `wait`: the connection was lost and the client closed           |
+| `ReconnectFailed`                                | `wait`: `reconnect.max_attempts` attempts in a row failed       |
 | `UnsupportedSecurityFeature`                     | the server wants TLS                                            |
 | `UnsupportedFeature`                             | the server cannot do what was asked, such as headers            |
 | `ProtocolError`                                  | the server broke the protocol, or says the client did           |
