@@ -10,6 +10,11 @@
 //!                        curl commands, and check that the guide shows
 //!                        each with its response, and the service's log
 //!                        (Linux and macOS)
+//!   zig build schemathesis
+//!                        run the service of the guide, and Schemathesis in
+//!                        Docker against its OpenAPI document: every
+//!                        response must be one the document allows (Linux
+//!                        and macOS)
 //!   zig build probes     run the probes, on zio with one executor and with
 //!                        four: read and write timeouts, the socket watcher
 //!                        of a request, and the cost of the tasks of a
@@ -144,6 +149,26 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run_guide.step);
     }
 
+    // Schemathesis in Docker against the service of the guide and its
+    // OpenAPI document (Linux and macOS; CI's http-schemathesis, on Linux).
+    const schemathesis = b.addTest(.{
+        .name = "schemathesis",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("schemathesis_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "guide_options", .module = guide_options.createModule() },
+            },
+        }),
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+    });
+    const run_schemathesis = b.addRunArtifact(schemathesis);
+    run_schemathesis.stdio = .inherit;
+    run_schemathesis.has_side_effects = true;
+    b.step("schemathesis", "Run Schemathesis in Docker against the service of the guide and its OpenAPI document").dependOn(&run_schemathesis.step);
+
     // The small application of the guide of zefir-openapi,
     // src/openapi/examples/main.zig, which imports zio: built, not run.
     // `zig build test-openapi` checks its document against its file.
@@ -215,6 +240,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&e2e.step);
     check_step.dependOn(&guide.step);
     check_step.dependOn(&service.step);
+    check_step.dependOn(&schemathesis.step);
     check_step.dependOn(&openapi_app.step);
     const checked_bench = addBench(b, target, optimize);
     // Code generation too, not only analysis: the binaries are asked for.

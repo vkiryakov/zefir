@@ -324,6 +324,27 @@ jobs:
         timeout-minutes: 10
         run: zig build e2e --summary all
 
+  # Schemathesis against the service of the http guide on the network, in
+  # Docker (tests/http): it sends every operation of the service's OpenAPI
+  # document but its stream of events requests that the document allows,
+  # and checks each response against the document. Docker runs Linux
+  # containers on the Linux runners only, so this job is ubuntu only. It is
+  # not a required check. It runs when http is among the modules to test,
+  # as it is for every change to openapi, whose document the guide serves.
+  http-schemathesis:
+    name: http-schemathesis
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' http ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Run Schemathesis against the service of the guide
+        working-directory: tests/http
+        timeout-minutes: 15
+        run: zig build schemathesis --summary all
+
   # The probes of tests/http: how zio behaves on each system for zefir-http,
   # that is read and write timeouts, the socket watcher of a request and
   # the cost of the tasks of a request, on one executor and on four. They
