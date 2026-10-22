@@ -1,13 +1,21 @@
 //! `odm.Registry`: the connections of a service and their tenants. A
 //! connection is a server and a login, one client of the driver with its
 //! pool; it lives in generations, and a replacement opens a new one while
-//! the old one drains.
+//! the old one drains. A tenant is a connection and a database.
 //!
 //! ```zig
 //! var registry = odm.Registry.init(gpa, io, driver.driver(), .{});
 //! defer registry.deinit(io);
 //! try registry.registerConnection(io, "shared-1", .{ .uri = uri, .password = password });
 //! try registry.connect(io, ctx, "shared-1");
+//! try registry.provisionTenant(io, ctx, .{
+//!     .tenant = "acme",
+//!     .connection = .{ .existing = "shared-1" },
+//!     .database = "acme",
+//!     .version = 1,
+//! });
+//! var acme = try registry.tenant(io, "acme");
+//! defer acme.deinit(io);
 //! ```
 //!
 //! `registerConnection` opens a client without the network; `connect`
@@ -25,6 +33,14 @@
 //! most, and closes it. The same settings again do nothing. Leases left
 //! after the drain get `Closed`, and their memory stays until they are
 //! given back. `removeConnection` drains and closes the same way.
+//!
+//! `provisionTenant` binds a tenant, on an event of the application: to a
+//! connection registered already (`.existing`), or to one of its own
+//! (`.new`), which it registers and connects. The binding is published at
+//! once, whole, once its connection works. `tenant(io, id)` gives a
+//! `Session` on the tenant's database, with a lease of the current
+//! generation of its connection; `removeTenant` unbinds it. A connection
+//! that tenants are bound to cannot be removed.
 //!
 //! `shutdown(io, deadline)` stops the registry: new calls get
 //! `ShuttingDown`, every generation drains until the deadline and closes,
@@ -48,6 +64,8 @@ const fingerprint = @import("fingerprint.zig");
 const names = @import("registry/names.zig");
 const connection = @import("registry/connection.zig");
 const generation = @import("registry/generation.zig");
+const Binding = @import("registry/binding.zig").Binding;
+const Session = @import("Session.zig");
 const Connection = connection.Connection;
 const ConnectionState = connection.ConnectionState;
 const Failure = connection.Failure;
@@ -83,6 +101,11 @@ connections: List = .{},
 removing: usize = 0,
 /// Every generation until it is freed.
 generations: List = .{},
+/// The tenants by id; each key is the id inside its binding.
+bindings: Bindings = .empty,
+/// The slots of `bindings` promised to provisionings in progress, so that
+/// none runs out of memory at its publication.
+reserved: u32 = 0,
 /// The generations closed by force since `init`.
 forced: usize = 0,
 state: State = .running,
@@ -99,6 +122,8 @@ operation_errors: std.atomic.Value(u64) = .init(0),
 home: if (std.debug.runtime_safety) std.atomic.Value(usize) else void = if (std.debug.runtime_safety) .init(0) else {},
 
 const State = enum { running, stopping, stopped };
+
+const Bindings = std.StringHashMapUnmanaged(*Binding);
 
 pub const Options = struct {
     /// How long `replaceConnection` and `removeConnection` wait for the
@@ -148,6 +173,43 @@ pub const ConnectionStats = struct {
     last_failure: ?Failure,
 };
 
+/// A provisioning of a tenant: an event of the application, such as "a
+/// new tenant" or "the tenant moved", with its version. It is borrowed
+/// for the call only: the registry copies the tenant id and the database
+/// name, and keeps no password. zefir-log writes it as "[REDACTED]".
+pub const Provision = struct {
+    /// 1 to 128 bytes of visible ASCII, 0x21 to 0x7E.
+    tenant: []const u8,
+    connection: union(enum) {
+        /// A connection registered already, which the tenant shares with
+        /// others: one login on one server for all of them.
+        existing: []const u8,
+        /// A connection of the tenant's own: a server of its own, or a
+        /// login of its own on a shared server.
+        new: NewConnection,
+    },
+    /// The tenant's database: 1 to 63 bytes of UTF-8 without / \ . " $, a
+    /// space or NUL, and never admin, local or config.
+    database: []const u8,
+    /// Grows with each event of the tenant.
+    version: u64,
+    /// Why the provisioning failed: a text of odm or of the driver.
+    diagnostics: ?*Diagnostics = null,
+
+    pub const zefir_sensitive = true;
+};
+
+/// A connection that a provisioning registers and connects for its
+/// tenant.
+pub const NewConnection = struct {
+    /// 1 to 64 bytes of A–Z a–z 0–9 _ - . :
+    id: []const u8,
+    /// The connection string of the driver, as in `ConnectionConfig`.
+    uri: []const u8,
+    /// The password of the user of `uri`, when the string holds none.
+    password: ?[]const u8 = null,
+};
+
 /// A registry without connections, and without the network or tasks: from
 /// `io` it takes random bytes for the ObjectIds and for the key of the
 /// fingerprints. `gpa` must be thread-safe: the calls of every task take
@@ -180,14 +242,18 @@ pub fn deinit(r: *Registry, io: Io) void {
     // Every generation is closed. One still in the list holds leases, a
     // mistake of the program: its memory stays, a leak rather than a use
     // after free.
+    var tenants = r.bindings.valueIterator();
+    while (tenants.next()) |b| r.gpa.destroy(b.*);
+    r.bindings.deinit(r.gpa);
     while (r.connections.popFirst()) |node| Connection.of(node).destroy(r.gpa);
     r.* = undefined;
 }
 
 /// Stops the registry by `deadline`, the bean contract of `zefir.App`. From
 /// now on `registerConnection`, `connect`, `replaceConnection`,
-/// `removeConnection`, `ping`, `connectionStats` and the calls waiting for
-/// their turn get `ShuttingDown`. Generations that never connected close
+/// `removeConnection`, `ping`, `connectionStats`, `provisionTenant`,
+/// `removeTenant`, `tenant` and the calls waiting for their turn get
+/// `ShuttingDown`. Generations that never connected close
 /// at once, and a connect in one of them gets `ShuttingDown`; the others
 /// drain one after the other, all until the deadline, and close. When
 /// leases are left at the deadline, their generations are closed by
@@ -287,13 +353,31 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
     const d = config.diagnostics;
     if (d) |x| x.* = .{};
     if (names.connectionId(id)) |problem| return fail(d, error.InvalidArgument, "odm: {s}", .{problem});
+    _ = try r.register(io, id, config, null, .free);
+}
+
+/// Whether a connection that `register` puts in the list comes held by
+/// its caller.
+const Hold = enum {
+    /// Any call may take its turn at once.
+    free,
+    /// Its caller holds its turn (`busy`) and ends it: a provisioning
+    /// connects the connection it made before anyone else does.
+    held,
+};
+
+/// The body of `registerConnection`, `id` checked: the fingerprint of
+/// `config`, unless the caller gives it, and a client of the driver; the
+/// record goes in the list when `id` is still free then.
+fn register(r: *Registry, io: Io, id: []const u8, config: ConnectionConfig, given: ?*const fingerprint.Fingerprint, hold: Hold) Error!*Connection {
+    const d = config.diagnostics;
     // A known id needs no client.
     r.mutex.lockUncancelable(io);
     const vacant = r.mayRegister(id);
     r.mutex.unlock(io);
     vacant catch |err| return refuse(d, err, id);
 
-    const print = fingerprint.of(&r.key, config.uri, config.password);
+    const print = if (given) |p| p.* else fingerprint.of(&r.key, config.uri, config.password);
     const c = try Connection.create(r.gpa, id, print);
     errdefer c.destroy(r.gpa);
     const g = try r.gpa.create(Generation);
@@ -301,6 +385,7 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
     const client = try r.driver.open(io, &config);
     g.* = .{ .client = client, .number = 1, .connection = c };
     c.current = g;
+    c.busy = hold == .held;
 
     r.mutex.lockUncancelable(io);
     const still = r.mayRegister(id);
@@ -316,6 +401,7 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
         client.deinit();
         return refuse(d, err, id);
     };
+    return c;
 }
 
 /// Connects the connection `id`: the network and the login, under the
@@ -324,8 +410,15 @@ pub fn registerConnection(r: *Registry, io: Io, id: []const u8, config: Connecti
 /// in `connectionStats(io, id).last_failure` and in the log.
 pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void {
     r.checkUse(io);
+    return r.ready(io, ctx, id, null);
+}
+
+/// The connection `id` connected, for `connect` and a provisioning: once
+/// it is its turn, nothing to do for an active one, else a connect under
+/// `ctx`. `d` gets the text of a failure.
+fn ready(r: *Registry, io: Io, ctx: core.Context, id: []const u8, d: ?*Diagnostics) Error!void {
     r.mutex.lockUncancelable(io);
-    const c = switch (r.awaitTurn(io, ctx, id, .active, null) catch |err| {
+    const c = switch (r.awaitTurn(io, ctx, id, .active, d) catch |err| {
         r.mutex.unlock(io);
         return err;
     }) {
@@ -335,17 +428,41 @@ pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!vo
         },
         .mine => |c| c,
     };
-    const before = c.state;
     c.busy = true;
+    return r.connectHeld(io, ctx, c, d, .keep);
+}
+
+/// What a failed connect does to its connection.
+const OnFailure = enum {
+    /// It stays, failed, for a connect to come again.
+    keep,
+    /// It goes: the provisioning that made it for this call rolls it back.
+    remove,
+};
+
+/// The connect of `c`, called under the lock, which it lets go, with the
+/// turn of `c` held (`busy`), which it ends. The current generation holds
+/// a lease for the call of the driver, made out of the lock. The driver's
+/// text of a failure goes to `last_failure`, the log and `d`.
+fn connectHeld(r: *Registry, io: Io, ctx: core.Context, c: *Connection, d: ?*Diagnostics, on_failure: OnFailure) Error!void {
+    if (r.state != .running) {
+        // The shutdown may have closed its generation already.
+        c.busy = false;
+        r.cond.broadcast(io);
+        r.mutex.unlock(io);
+        return fail(d, error.ShuttingDown, "odm: the registry is shutting down", .{});
+    }
+    const before = c.state;
     c.state = .connecting;
     const g = c.current.?;
     generation.retain(g);
     r.mutex.unlock(io);
 
-    var d: Diagnostics = .{};
-    const connected = g.client.connect(io, ctx, &d);
+    var failure: Diagnostics = .{};
+    const connected = g.client.connect(io, ctx, &failure);
 
     var failed: ?errors.DriverError = null;
+    var removed = false;
     r.mutex.lockUncancelable(io);
     const result: Error!void = result: {
         if (r.state != .running) {
@@ -354,8 +471,13 @@ pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!vo
         }
         connected catch |err| {
             c.state = .failed;
-            c.last_failure = .init(err, d.message());
+            c.last_failure = .init(err, failure.message());
             failed = err;
+            if (on_failure == .remove) {
+                // No tenant can be bound to it: it never was active.
+                _ = r.takeOut(io, c, .pending);
+                removed = true;
+            }
             break :result err;
         };
         c.state = .active;
@@ -366,7 +488,15 @@ pub fn connect(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!vo
     const free = generation.drop(r, io, g);
     r.mutex.unlock(io);
     if (free) generation.destroy(r, g);
-    if (failed) |err| Warning.log(.{ .connect_failed = .{ .id = id, .err = err, .message = d.message() } });
+    if (failed) |err| {
+        if (d) |x| x.* = failure;
+        Warning.log(.{ .connect_failed = .{ .id = c.id, .err = err, .message = failure.message() } });
+    } else if (result) |_| {} else |_| {
+        // The shutdown came while it connected.
+        if (d) |x| x.set(null, null, "odm: the registry is shutting down", .{});
+    }
+    // A generation that never connected closes at once, never by force.
+    if (removed) _ = r.retire(io, c, g, Io.Clock.awake.now(io), .pending);
     return result;
 }
 
@@ -483,6 +613,21 @@ pub fn removeConnection(r: *Registry, io: Io, id: []const u8) Error!void {
         r.mutex.unlock(io);
         return error.ConnectionInUse;
     }
+    const current = r.takeOut(io, c, .live);
+    const number = current.number;
+    r.mutex.unlock(io);
+
+    const until = Io.Clock.awake.now(io).addDuration(r.options.drain_timeout);
+    const retired = r.retire(io, c, current, until, .live);
+    if (retired.closer) if (retired.forced) |left| {
+        Warning.log(.{ .forced = .{ .id = id, .generation = number, .leases = left, .after = r.options.drain_timeout } });
+    };
+}
+
+/// Under the lock: takes `c`, which no tenant is bound to, out of the
+/// list, so that its id finds nothing at once, and begins to take its
+/// current generation out of service; `retire` does the rest.
+fn takeOut(r: *Registry, io: Io, c: *Connection, kind: generation.Kind) *Generation {
     r.connections.remove(&c.node);
     r.removing += 1;
     c.state = .removing;
@@ -493,21 +638,21 @@ pub fn removeConnection(r: *Registry, io: Io, id: []const u8) Error!void {
     }
     const current = c.current.?;
     c.current = null;
-    const number = current.number;
-    generation.beginRetire(io, current, .live);
+    generation.beginRetire(io, current, kind);
     // The calls that wait for this id look again, and find it gone.
     r.cond.broadcast(io);
-    r.mutex.unlock(io);
+    return current;
+}
 
-    const until = Io.Clock.awake.now(io).addDuration(r.options.drain_timeout);
-    const retired = generation.finishRetire(r, io, current, until, .live);
+/// The rest of a removal after `takeOut`, out of the lock: `g`, the
+/// generation it gave, leaves service by `until`, then the record goes.
+fn retire(r: *Registry, io: Io, c: *Connection, g: *Generation, until: Io.Timestamp, kind: generation.Kind) generation.Retired {
+    const retired = generation.finishRetire(r, io, g, until, kind);
     r.mutex.lockUncancelable(io);
     r.removing -= 1;
     r.mutex.unlock(io);
-    if (retired.closer) if (retired.forced) |left| {
-        Warning.log(.{ .forced = .{ .id = id, .generation = number, .leases = left, .after = r.options.drain_timeout } });
-    };
     c.destroy(r.gpa);
+    return retired;
 }
 
 /// One round trip to the server of the connection `id`, through its current
@@ -517,6 +662,182 @@ pub fn ping(r: *Registry, io: Io, ctx: core.Context, id: []const u8) Error!void 
     const g = try r.lease(io, id);
     defer generation.release(r, io, g);
     return g.client.ping(io, ctx, null);
+}
+
+/// Binds a tenant to a connection and a database, as `request` says: its
+/// names are checked first, then its connection is made ready — a known
+/// one connected when it is not yet, a new one registered and connected —
+/// and the binding is published at once, whole: `tenant()` finds the old
+/// one or the new one, never a half. On a failure the old binding stays,
+/// and a new connection that this call made goes again; the driver's
+/// text or odm's is in `request.diagnostics`.
+pub fn provisionTenant(r: *Registry, io: Io, ctx: core.Context, request: Provision) Error!void {
+    r.checkUse(io);
+    const d = request.diagnostics;
+    if (d) |x| x.* = .{};
+    // The names, before any I/O.
+    if (names.tenantId(request.tenant)) |problem| return fail(d, error.InvalidArgument, "odm: {s}", .{problem});
+    if (names.database(request.database)) |problem| return fail(d, error.InvalidArgument, "odm: {s}", .{problem});
+    var print: ?fingerprint.Fingerprint = null;
+    const id = switch (request.connection) {
+        .existing => |id| id,
+        .new => |new| new: {
+            if (names.connectionId(new.id)) |problem| return fail(d, error.InvalidArgument, "odm: {s}", .{problem});
+            print = fingerprint.of(&r.key, new.uri, new.password);
+            break :new new.id;
+        },
+    };
+    // The memory of the publication, before any I/O: a provisioning never
+    // runs out of it once its connection is ready.
+    const fresh = try Binding.create(r.gpa, request.tenant, request.database, request.version, print);
+    errdefer r.gpa.destroy(fresh);
+
+    // A slot of the table for the publication.
+    r.mutex.lockUncancelable(io);
+    if (r.state != .running) {
+        r.mutex.unlock(io);
+        return fail(d, error.ShuttingDown, "odm: the registry is shutting down", .{});
+    }
+    r.reserveTenant(io) catch |err| {
+        r.mutex.unlock(io);
+        return err;
+    };
+    r.mutex.unlock(io);
+    var reserved = true;
+    defer if (reserved) r.unreserve(io);
+
+    // The connection, ready.
+    switch (request.connection) {
+        .existing => try r.ready(io, ctx, id, d),
+        .new => |new| try r.readyNew(io, ctx, new, &print.?, d),
+    }
+
+    // The publication, under one lock.
+    r.mutex.lockUncancelable(io);
+    const published = r.publish(fresh, id);
+    r.reserved -= 1;
+    reserved = false;
+    r.mutex.unlock(io);
+    const old = published catch |err| return switch (err) {
+        error.ConnectionNotFound => fail(d, err, "odm: the connection was removed while the tenant was provisioned", .{}),
+        error.ShuttingDown => fail(d, err, "odm: the registry is shutting down", .{}),
+    };
+    if (old) |b| r.gpa.destroy(b);
+}
+
+/// A connection of a provisioning's own: registered by this call and
+/// connected in its turn, which no other call takes before; a failed
+/// connect takes it out again.
+fn readyNew(r: *Registry, io: Io, ctx: core.Context, new: NewConnection, print: *const fingerprint.Fingerprint, d: ?*Diagnostics) Error!void {
+    const config: ConnectionConfig = .{ .uri = new.uri, .password = new.password, .diagnostics = d };
+    const c = try r.register(io, new.id, config, print, .held);
+    r.mutex.lockUncancelable(io);
+    return r.connectHeld(io, ctx, c, d, .remove);
+}
+
+/// The publication of a provisioning, under the lock: `fresh` takes the
+/// place of the tenant's binding if the connection `id` is still there
+/// and active, else `ConnectionNotFound`, and nothing changes. The old
+/// binding, if any, is the caller's to free out of the lock.
+fn publish(r: *Registry, fresh: *Binding, id: []const u8) error{ ShuttingDown, ConnectionNotFound }!?*Binding {
+    if (r.state != .running) return error.ShuttingDown;
+    // A removal may have come since the connection was ready: the binding
+    // never points to a connection that is gone.
+    const c = r.find(id) orelse return error.ConnectionNotFound;
+    if (c.state != .active) return error.ConnectionNotFound;
+    fresh.connection = c;
+    c.tenants += 1;
+    // The slot reserved before.
+    const entry = r.bindings.getOrPutAssumeCapacity(fresh.tenant());
+    const old: ?*Binding = if (entry.found_existing) entry.value_ptr.* else null;
+    if (old) |b| b.connection.tenants -= 1;
+    // The key is the id inside the binding, which lives as long as it.
+    entry.key_ptr.* = fresh.tenant();
+    entry.value_ptr.* = fresh;
+    return old;
+}
+
+/// Under the lock, which it may let go and take again: one slot of the
+/// table of tenants for a provisioning, until its publication or its
+/// failure, so that a publication never runs out of memory once its
+/// connection is ready. A full table grows out of the lock: an allocator
+/// may take a lock of its own, and the registry's lock is a leaf.
+fn reserveTenant(r: *Registry, io: Io) Allocator.Error!void {
+    while (r.bindings.available <= r.reserved) {
+        const want = (r.bindings.count() + r.reserved) * 2 + 8;
+        r.mutex.unlock(io);
+        var bigger: Bindings = .empty;
+        const grown = bigger.ensureTotalCapacity(r.gpa, want);
+        r.mutex.lockUncancelable(io);
+        try grown;
+        if (r.bindings.available <= r.reserved and bigger.available > r.bindings.count() + r.reserved) {
+            var it = r.bindings.iterator();
+            while (it.next()) |entry| bigger.putAssumeCapacityNoClobber(entry.key_ptr.*, entry.value_ptr.*);
+            std.mem.swap(Bindings, &r.bindings, &bigger);
+        }
+        // The old table, or a new one that another call made needless,
+        // goes out of the lock.
+        r.mutex.unlock(io);
+        bigger.deinit(r.gpa);
+        r.mutex.lockUncancelable(io);
+    }
+    r.reserved += 1;
+}
+
+/// Gives back the slot of a provisioning that failed before its
+/// publication.
+fn unreserve(r: *Registry, io: Io) void {
+    r.mutex.lockUncancelable(io);
+    defer r.mutex.unlock(io);
+    r.reserved -= 1;
+}
+
+/// Removes the tenant `tenant_id`: `tenant()` finds it no more, at once.
+/// The sessions taken before work on until their `deinit`, and its
+/// connection stays: `removeConnection` removes that one once no tenant
+/// is bound to it. There is no version: the registry keeps no memory of
+/// removed tenants, so a provisioning that comes later binds the tenant
+/// again, whatever its version.
+pub fn removeTenant(r: *Registry, io: Io, tenant_id: []const u8) Error!void {
+    r.checkUse(io);
+    r.mutex.lockUncancelable(io);
+    const b: *Binding = b: {
+        defer r.mutex.unlock(io);
+        if (r.state != .running) return error.ShuttingDown;
+        const entry = r.bindings.fetchRemove(tenant_id) orelse return error.TenantNotFound;
+        entry.value.connection.tenants -= 1;
+        break :b entry.value;
+    };
+    r.gpa.destroy(b);
+}
+
+/// A session on the database of the tenant `tenant_id`, with a lease of
+/// the current generation of its connection: give it back with
+/// `session.deinit(io)`. `TenantNotFound` when no tenant has the id, also
+/// for an id that no tenant can have. The parameter is not called
+/// `tenant`: it would shadow this method.
+pub fn tenant(r: *Registry, io: Io, tenant_id: []const u8) Error!Session {
+    r.checkUse(io);
+    // No tenant has a longer id: it is not even looked up.
+    if (tenant_id.len > 128) return error.TenantNotFound;
+    var s: Session = .{ .registry = r, .generation = undefined, .name_buf = undefined, .name_len = 0 };
+    {
+        r.mutex.lockUncancelable(io);
+        defer r.mutex.unlock(io);
+        if (r.state != .running) return error.ShuttingDown;
+        const b = r.bindings.get(tenant_id) orelse return error.TenantNotFound;
+        // A connection with a tenant is active, and stays so while the
+        // registry runs: it cannot go, and a replacement publishes an
+        // active generation.
+        const g = b.connection.current.?;
+        std.debug.assert(g.state == .active);
+        generation.retain(g);
+        s.generation = g;
+        const name = b.database();
+        @memcpy(s.name_buf[0..name.len], name);
+        s.name_len = @intCast(name.len);
+    }
+    return s;
 }
 
 /// A snapshot of the registry.

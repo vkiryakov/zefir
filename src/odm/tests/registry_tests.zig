@@ -10,45 +10,9 @@ const odm = @import("../root.zig");
 const FakeDriver = odm.testing.FakeDriver;
 const Registry = odm.Registry;
 const Warning = @import("../registry/connection.zig").Warning;
-
-/// The errors of the calls of the registry, `shutdown` with them.
-const CallError = odm.Error || odm.ShutdownError;
-
-/// The result of one call of the registry in a task of its own.
-const Outcome = struct {
-    result: CallError!void = {},
-    done: std.atomic.Value(bool) = .init(false),
-
-    fn set(o: *Outcome, result: CallError!void) void {
-        o.result = result;
-        o.done.store(true, .release);
-    }
-
-    fn isDone(o: *Outcome, io: Io) bool {
-        _ = io;
-        return o.done.load(.acquire);
-    }
-
-    /// The result, once the call returned; error.Timeout after 5 s.
-    fn wait(o: *Outcome, io: Io) !CallError!void {
-        try eventually(io, o, isDone);
-        return o.result;
-    }
-};
-
-/// Until `holds(arg, io)`, looking every millisecond; error.Timeout after
-/// 5 s on the .awake clock, so that a call that never returns fails the
-/// test.
-fn eventually(io: Io, arg: anytype, comptime holds: fn (@TypeOf(arg), Io) bool) !void {
-    const give_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
-    while (!holds(arg, io)) {
-        if (Io.Clock.awake.now(io).nanoseconds >= give_up.nanoseconds) {
-            std.debug.print("the registry did not get there in 5 s\n", .{});
-            return error.Timeout;
-        }
-        try io.sleep(.fromMilliseconds(1), .awake);
-    }
-}
+const support = @import("support.zig");
+const Outcome = support.Outcome;
+const eventually = support.eventually;
 
 fn registerTask(o: *Outcome, r: *Registry, io: Io, id: []const u8, uri: []const u8) void {
     o.set(r.registerConnection(io, id, .{ .uri = uri }));

@@ -121,6 +121,16 @@ pub const ConnectionStats = Registry.ConnectionStats;
 /// The error of the latest failed connect or replacement of a connection,
 /// with the driver's text.
 pub const Failure = connection.Failure;
+/// What `registry.provisionTenant` takes: a tenant, its connection, its
+/// database and the version of the event.
+pub const Provision = Registry.Provision;
+/// A connection of a tenant's own, made by its provisioning: a server of
+/// its own, or a login of its own on a shared server.
+pub const NewConnection = Registry.NewConnection;
+/// A tenant's database for one task at a time: `registry.tenant(io, id)`
+/// gives it with a lease of the generation of its connection, and
+/// `session.deinit(io)` gives the lease back.
+pub const Session = @import("Session.zig");
 
 /// What tests of odm and of the code over it need: `testing.FakeDriver`.
 pub const testing = @import("testing.zig");
@@ -144,4 +154,5 @@ test {
     _ = @import("tests/registry_tests.zig");
     _ = @import("tests/registry_concurrency_tests.zig");
     _ = @import("tests/names_tests.zig");
+    _ = @import("tests/tenant_tests.zig");
 }
