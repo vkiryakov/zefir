@@ -65,7 +65,7 @@ pub fn value(comptime T: type, comptime x: T, comptime way: Way, comptime where:
                     if (F == void or (way == .input and attrs.@"comptime")) continue;
                     const field = @field(x, name);
                     if (way == .problem and @typeInfo(F) == .optional and field == null) continue;
-                    const key = v.nameOf(T, @field(std.meta.FieldEnum(T), name));
+                    const key = outsideName(T, name);
                     members = members ++ [_]json.Member{.{ .key = key, .value = value(F, field, way, where ++ "." ++ key) }};
                 }
                 return .{ .object = members };
@@ -81,6 +81,25 @@ pub fn value(comptime T: type, comptime x: T, comptime way: Way, comptime where:
         }
         @compileError("zefir.openapi: " ++ where ++ ": a value of " ++ @typeName(T) ++ " has no JSON");
     }
+}
+
+/// The outside name of the field `field` of the struct `T`, as `v.nameOf`
+/// gives it. `v.nameOf` checks every name of `T` at each call: in one
+/// evaluation, as that of a document, a call for each field would cost the
+/// cube of their number. So each name is the declaration of a type of its
+/// own, which the compiler evaluates once, on a count of its own.
+pub fn outsideName(comptime T: type, comptime field: []const u8) []const u8 {
+    return OutsideName(T, field).name;
+}
+
+fn OutsideName(comptime T: type, comptime field: []const u8) type {
+    return struct {
+        const name = blk: {
+            // std.meta.FieldEnum makes an enum of the fields of T.
+            @setEvalBranchQuota(10_000 + 100 * @typeInfo(T).@"struct".field_names.len);
+            break :blk v.nameOf(T, @field(std.meta.FieldEnum(T), field));
+        };
+    };
 }
 
 fn items(comptime Item: type, comptime list: []const Item, comptime way: Way, comptime where: []const u8) json.Node {

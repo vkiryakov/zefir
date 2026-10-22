@@ -236,7 +236,10 @@ pub fn writesItself(comptime T: type) bool {
     };
 }
 
+/// The `FieldDoc` of each field. Its own quota: the compiler evaluates the
+/// declaration of `Fields` with the default one, whoever names `Doc(T)`.
 fn fieldDocTypes(comptime types: []const type) [types.len]type {
+    @setEvalBranchQuota(1_000 + 100 * types.len);
     var out: [types.len]type = undefined;
     for (types, &out) |F, *Doc_| Doc_.* = FieldDoc(F);
     return out;
@@ -245,6 +248,7 @@ fn fieldDocTypes(comptime types: []const type) [types.len]type {
 /// The attributes of the fields of `Fields`: the default of each is its
 /// `FieldDoc` with nothing in it, `.{}`.
 fn noDocs(comptime types: []const type) [types.len]std.lang.Type.Struct.FieldAttributes {
+    @setEvalBranchQuota(1_000 + 100 * types.len);
     var out: [types.len]std.lang.Type.Struct.FieldAttributes = undefined;
     for (types, &out) |F, *attrs| {
         const empty: FieldDoc(F) = .{};
@@ -265,8 +269,11 @@ fn methodNames(comptime C: type) []const [:0]const u8 {
     return @typeInfo(@TypeOf(C.http_routes.methods)).@"struct".field_names;
 }
 
+/// The `RouteDoc` of each method, with a quota of their number, as
+/// `fieldDocTypes` has.
 fn routeDocTypes(comptime C: type) [methodNames(C).len]type {
     const names = methodNames(C);
+    @setEvalBranchQuota(1_000 + 100 * names.len);
     var out: [names.len]type = undefined;
     for (names, &out) |name, *R| R.* = RouteDoc(C, name);
     return out;
@@ -326,6 +333,25 @@ test "Doc: a struct's texts, examples and a field doc for each field" {
     try testing.expectEqual(null, doc.fields.id.description);
     try testing.expectEqualStrings("What to do.", doc.fields.title.description.?);
     try testing.expect(!doc.deprecated and doc.name == null);
+}
+
+/// A struct of `n` fields of u8, `f0` and on: a type of many fields of an
+/// application.
+fn Wide(comptime n: usize) type {
+    @setEvalBranchQuota(10_000 + 1_000 * n);
+    var names: [n][:0]const u8 = undefined;
+    for (&names, 0..) |*name, i| name.* = std.fmt.comptimePrint("f{d}", .{i});
+    const types: [n]type = @splat(u8);
+    const attrs: [n]std.lang.Type.Struct.FieldAttributes = @splat(.{});
+    return @Struct(.auto, null, &names, &types, &attrs);
+}
+
+test "Doc: a type of many fields has a field doc for each, without a quota of the application's own" {
+    const D = Doc(Wide(200));
+    try testing.expectEqual(200, @typeInfo(D.Fields).@"struct".field_names.len);
+    const doc: D = .{ .fields = .{ .f199 = .{ .description = "The last." } } };
+    try testing.expectEqualStrings("The last.", doc.fields.f199.description.?);
+    try testing.expectEqual(null, doc.fields.f0.description);
 }
 
 test "Doc: a union's fields are its variants; an enum has none; a type that writes itself has .as" {

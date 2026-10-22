@@ -868,6 +868,41 @@ test "request bodies: JSON and a form; the named examples of a body's type, on r
     try expectJson("{\"short\":{\"value\":{\"kind\":\"note\",\"text\":\"Call back\"}}}", comptime at(note, &.{ "responses", "200", "content", "application/json", "examples" }));
 }
 
+/// A struct of `n` fields of u8, `f0` and on, without an openapi: a type of
+/// many fields of an application.
+fn Wide(comptime n: usize) type {
+    @setEvalBranchQuota(10_000 + 1_000 * n);
+    var names: [n][:0]const u8 = undefined;
+    for (&names, 0..) |*name, i| name.* = std.fmt.comptimePrint("f{d}", .{i});
+    const types: [n]type = @splat(u8);
+    const attrs: [n]std.lang.Type.Struct.FieldAttributes = @splat(.{});
+    return @Struct(.auto, null, &names, &types, &attrs);
+}
+
+/// A route that reads and writes a type of many fields.
+const wide = struct {
+    const Row = Wide(200);
+
+    const RowsController = struct {
+        pub const http_routes = http.routes(.{ .prefix = "/rows", .methods = .{ .put = http.put("", .{ .body = Row }) } });
+        pub const openapi: ControllerDoc(@This()) = .{ .routes = .{ .put = .{ .summary = "Put a row" } } };
+
+        pub fn put(_: *RowsController, _: *http.Context) error{}!http.Json(Row) {
+            return .{ .value = std.mem.zeroes(Row) };
+        }
+    };
+
+    var controller: RowsController = .{};
+    const Options = @TypeOf(.{ .backend = @as(http.Backend, undefined), .controllers = .{&controller} });
+};
+
+test "a type of many fields, read and written, needs no quota of the application's own" {
+    const doc = comptime document(wide.Options, .{ .info = info });
+    const schemas = comptime at(doc.root, &.{ "components", "schemas" });
+    try testing.expectEqualStrings("Problem Violation Wide_200-Input Wide_200-Output", comptime keysOf(schemas));
+    try testing.expectEqual(200, comptime at(schemas, &.{ "Wide_200-Output", "properties" }).object.len);
+}
+
 test "Document.write: the bytes of the file, laid out, a newline at the end" {
     const doc = comptime document(parts.Options, .{ .info = info, .exclude = &.{parts.HealthController} });
     var out: std.Io.Writer.Allocating = .init(testing.allocator);

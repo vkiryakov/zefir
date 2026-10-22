@@ -31,7 +31,6 @@
 //! name.
 const std = @import("std");
 const http = @import("http");
-const v = @import("validator");
 const json = @import("json.zig");
 const schema = @import("schema.zig");
 const example = @import("example.zig");
@@ -462,7 +461,7 @@ fn dtoParams(comptime Dto: type, comptime source: schema.Source, comptime from: 
     const info = @typeInfo(Dto).@"struct";
     for (info.field_names, info.field_types, info.field_attrs) |field, F, attrs| {
         if (attrs.@"comptime") continue;
-        const name = if (source == .headers) http.Description.headerName(field) else v.nameOf(Dto, @field(std.meta.FieldEnum(Dto), field));
+        const name = if (source == .headers) http.Description.headerName(field) else example.outsideName(Dto, field);
         const required = @typeInfo(F) != .optional and attrs.default_value_ptr == null;
         const Value = if (@typeInfo(F) == .optional) @typeInfo(F).optional.child else F;
         const style: ?[]const u8 = if (schema.listItem(Value) == null) null else switch (source) {
@@ -480,7 +479,7 @@ fn pathField(comptime P: type, comptime param: []const u8) []const u8 {
     const info = @typeInfo(P).@"struct";
     for (info.field_names, info.field_attrs) |field, attrs| {
         if (attrs.@"comptime") continue;
-        if (std.mem.eql(u8, v.nameOf(P, @field(std.meta.FieldEnum(P), field)), param)) return field;
+        if (std.mem.eql(u8, example.outsideName(P, field), param)) return field;
     }
     unreachable; // zefir-http checks the path DTO against the template
 }
@@ -530,8 +529,8 @@ fn namedExamples(comptime T: type, comptime way: example.Way) []const Member {
         .@"enum" => true,
         else => false,
     };
-    if (!container) return &.{};
-    const doc = schema.docOf(T) orelse return &.{};
+    if (!container or !schema.hasDoc(T)) return &.{};
+    const doc = schema.docOf(T);
     if (!@hasField(@TypeOf(doc), "examples")) return &.{};
     var out: [doc.examples.len]Member = undefined;
     for (doc.examples, &out, 0..) |e, *m, i| {

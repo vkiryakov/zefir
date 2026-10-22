@@ -375,7 +375,7 @@ pub const Registry = struct {
         var required: []const []const u8 = &.{};
         for (s.field_names, s.field_types, s.field_attrs) |name, F, attrs| {
             if (F == void or (mode == .input and attrs.@"comptime")) continue;
-            const key = v.nameOf(T, @field(std.meta.FieldEnum(T), name));
+            const key = example.outsideName(T, name);
             properties = properties ++ [_]json.Member{.{ .key = key, .value = node(fieldParts(r, T, name, F, attrs, mode, inner)) }};
             const needed = switch (mode) {
                 .input => @typeInfo(F) != .optional and attrs.default_value_ptr == null,
@@ -684,7 +684,8 @@ fn contains(comptime list: []const []const u8, comptime key: []const u8) bool {
 /// `way`. Every example of a struct, those of `.examples` too, passes the
 /// rules of the struct, or the build stops.
 fn typeExamples(comptime T: type, comptime way: example.Way) []const json.Node {
-    const doc = docOf(T) orelse return &.{};
+    if (!hasDoc(T)) return &.{};
+    const doc = docOf(T);
     if (!@hasField(@TypeOf(doc), "example")) return &.{};
     if (@typeInfo(T) == .@"struct") {
         if (doc.example) |x| {
@@ -742,7 +743,7 @@ pub fn fieldExampleProblem(comptime T: type, comptime name: []const u8, comptime
     const violation = v.check(&box, &buf) orelse return null;
     // The box's field stands for the field: its outside name.
     const path = violation.field orelse "";
-    const outside = if (@typeInfo(T) == .@"struct") v.nameOf(T, @field(std.meta.FieldEnum(T), name)) else name;
+    const outside = if (@typeInfo(T) == .@"struct") example.outsideName(T, name) else name;
     const at = outside ++ path[std.mem.findAny(u8, path, ".[") orelse path.len ..];
     return "zefir.openapi: " ++ where ++ ": " ++ at ++ " " ++ violation.message ++ " (" ++ violation.code ++ "); give an example that passes the rules of " ++ typeName(T) ++ "." ++ name;
 }
@@ -879,38 +880,43 @@ fn policyOf(comptime T: type, comptime r: ?*const Registry) http.UnknownFields {
     return if (r) |registry| registry.body_policy else .reject;
 }
 
-/// The `openapi` of `T`, null without one; one of another type stops the
-/// build.
-pub fn docOf(comptime T: type) ?declarations.Doc(T) {
-    if (!@hasDecl(T, "openapi")) return null;
+/// The `openapi` of `T`, which declares one: `hasDoc(T)`. Only then is
+/// `Doc(T)` named, a type of a field for each field of `T`. One of another
+/// type stops the build.
+pub fn docOf(comptime T: type) declarations.Doc(T) {
     if (@TypeOf(T.openapi) != declarations.Doc(T))
         @compileError("zefir.openapi: " ++ typeName(T) ++ ".openapi must be of type zefir.openapi.Doc(" ++ typeName(T) ++ ")");
     return T.openapi;
 }
 
+/// Whether `T`, a struct, an enum or a union, declares its `openapi`.
+pub fn hasDoc(comptime T: type) bool {
+    return @hasDecl(T, "openapi");
+}
+
 /// The texts of the field `name` of `T`, `.{}` when it has none.
 fn fieldDocOf(comptime T: type, comptime name: []const u8) declarations.FieldDoc(@FieldType(T, name)) {
-    const doc = docOf(T) orelse return .{};
+    if (!hasDoc(T)) return .{};
+    const doc = docOf(T);
     if (!@hasField(@TypeOf(doc), "fields")) return .{};
     return @field(doc.fields, name);
 }
 
 /// The sentences of the description of `T` itself.
 fn typeTexts(comptime T: type) []const []const u8 {
-    const doc = docOf(T) orelse return &.{};
-    return if (doc.description) |text| &.{text} else &.{};
+    if (!hasDoc(T)) return &.{};
+    return if (docOf(T).description) |text| &.{text} else &.{};
 }
 
 fn typeDeprecated(comptime T: type) bool {
-    const doc = docOf(T) orelse return false;
-    return doc.deprecated;
+    return hasDoc(T) and docOf(T).deprecated;
 }
 
 /// The type whose JSON a type that writes itself writes: its `Doc(T).as`.
 fn asOf(comptime T: type) type {
-    const doc = docOf(T) orelse @compileError("zefir.openapi: " ++ typeName(T) ++ " writes itself with jsonStringify, so the document does not know its JSON; " ++
+    if (!hasDoc(T)) @compileError("zefir.openapi: " ++ typeName(T) ++ " writes itself with jsonStringify, so the document does not know its JSON; " ++
         "say what it looks like: pub const openapi: zefir.openapi.Doc(" ++ typeName(T) ++ ") = .{ .as = []const u8 }");
-    return doc.as;
+    return docOf(T).as;
 }
 
 /// A type with a schema of its own in `components`: a struct, an enum or a
@@ -918,7 +924,7 @@ fn asOf(comptime T: type) type {
 /// named by the compiler with a number that changes as the program does,
 /// stands inline, and so does a generic of one.
 fn isNamed(comptime T: type) bool {
-    if (docOf(T)) |doc| if (doc.name != null) return true;
+    if (hasDoc(T) and docOf(T).name != null) return true;
     return !isAnonymous(T);
 }
 
@@ -947,7 +953,7 @@ fn hasCompilerNumber(comptime name: []const u8) bool {
 /// `schemaName`; a name that is not one stops the build.
 fn checkedName(comptime T: type) []const u8 {
     const rule = "1 or more of A-Z, a-z, 0-9, '.', '-' and '_'";
-    if (docOf(T)) |doc| if (doc.name) |name| {
+    if (hasDoc(T)) if (docOf(T).name) |name| {
         if (!isSchemaName(name)) @compileError("zefir.openapi: " ++ typeName(T) ++ ".openapi.name \"" ++ name ++ "\" is not a schema name: " ++ rule);
         return name;
     };
