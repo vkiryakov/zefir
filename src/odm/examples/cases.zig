@@ -16,11 +16,11 @@ pub const server_programs = [_][]const u8{ "quick_start", "tenants", "rotation",
 
 /// The tests of the guide, on `odm.testing.FakeDriver`: `zig build
 /// test-odm` runs them.
-pub const tests = [_][]const u8{};
+pub const tests = [_][]const u8{ "users_test", "conformance_test" };
 
 /// The other files that README.md shows as they are: the code of the
 /// application that the tests of the guide test.
-pub const files = [_][]const u8{};
+pub const files = [_][]const u8{"Users"};
 
 /// The command README.md shows for a run of a program without a server.
 pub const command = "$ zig build run";

@@ -1,5 +1,15 @@
 # odm
 
+> [!WARNING]
+> **No TLS yet: use it only in a network you trust.** odm reaches
+> MongoDB through zefir-mongo, which speaks plain TCP. SCRAM, the way it
+> logs in, never sends a password, but the commands and the documents of
+> every tenant travel unencrypted. Keep mongod and the service in a closed
+> network, the servers of tenants with servers of their own too, and give
+> each connection a user of its own with a long random password; across a
+> network you do not trust, use a tunnel: WireGuard, SSH or a service
+> mesh.
+
 **A typed ODM for MongoDB, for Zig services with many tenants.** MongoDB
 keeps *documents*, records like JSON objects, in *collections*. An ODM, an
 object-document mapper, maps them to the types of a program. With
@@ -13,6 +23,105 @@ its own, tenants come and go while the service runs, and a connection
 changes its credentials without a failed request. It is written against
 `std.Io` only, runs on [zio](https://github.com/lalinsky/zio) in
 production, and reaches MongoDB through zefir-mongo.
+
+> [!IMPORTANT]
+> **Not in v1 (TODO):**
+>
+> - **Replica sets and sharded clusters**, with their discovery of servers
+>   and failover: zefir-mongo connects to one standalone mongod.
+> - **TLS and `mongodb+srv://`** in zefir-mongo, see above.
+> - **Transactions and change streams.**
+> - **A registry shared by the instances of a service, or kept on
+>   disk**: each process builds its own from the events it hears.
+> - **Tenants in one shared collection**, told apart by a field such as
+>   `tenant_id`: a tenant is a database.
+> - **A typed language of aggregations**: `aggregateRaw` takes BSON as it
+>   is.
+> - **A typed `$match` in `aggregateRaw`.**
+> - **Closing idle connections and tenants**: a connection stays until
+>   `removeConnection`.
+> - **Migrations** of documents and indexes, beyond `ensureIndexes`.
+> - **Subscriptions to the events of tenants**, over NATS or anything
+>   else: the service hears them and calls `provisionTenant`.
+> - **The App container of zefir-core**: `main` builds the registry and
+>   shuts it down; wrappers for App are planned.
+> - **Active Record**: a model is data, and a collection does the work.
+> - **Timestamps that odm keeps**, such as `created_at` and `updated_at`.
+> - **BSON names inside nested structs**: there a key is the Zig name of
+>   its field.
+> - **`findOneAndUpdate`, `findOneAndReplace`, `findOneAndDelete`,
+>   `distinct`, `estimatedDocumentCount`, `bulkWrite`, `listIndexes` and
+>   `dropIndex`**: `runCommand` sends them.
+> - **The modifiers of `$push`**, `$slice`, `$sort` and `$position`, and
+>   **`$currentDate`**.
+> - **The options `hint`, `collation`, `comment`, `allow_disk_use` and
+>   `let`**, an unordered `insertMany`, and the partial result of a write
+>   that failed.
+> - **The rules of `field_rules` on updates**: they check whole documents.
+> - **Versions of `removeTenant`**, and a memory of the tenants removed.
+> - **A tenant taken from the context of a request**: the handler names
+>   it.
+> - **Histograms of durations, an exporter of metrics, a span per
+>   operation**: `stats()` takes snapshots.
+> - **A driver of another author as a package of its own, built by CI**:
+>   `FakeDriver` is the second implementation of the contract.
+> - **`upsertOne` with conditions built at run time**, an `odm.Filter` or
+>   an `odm.Update`, or with `in`, `nin` or `all` in its filter: use
+>   `updateOne`, then `insertOne`.
+> - **Partial indexes** (`partialFilterExpression`): a unique optional in
+>   a compound index with a required key cannot be declared.
+
+From [the quick start](#quick-start): a session of the tenant acme, a
+customer in, three more, and the adults out, the oldest first.
+
+```zig
+// A session on the tenant's database, for this task, and the
+// collection of User in it.
+var acme = try registry.tenant(io, "acme");
+defer acme.deinit(io);
+const users = acme.collection(User);
+
+// Start afresh, and make the e-mail of a customer unique.
+_ = try users.deleteMany(io, ctx, .{});
+try users.ensureIndexes(io, ctx);
+
+// A customer; odm makes the id, and says which.
+const ann = try users.insertOne(io, ctx, .{ .email = "ann@example.com", .name = "Ann", .age = 30 });
+app.info("Signed up", .{ .name = "Ann", .id = ann.id });
+// Three more, in one request.
+const more = [_]User{
+    .{ .email = "bob@example.com", .name = "Bob", .age = 17 },
+    .{ .email = "cleo@example.com", .name = "Cleo", .age = 41 },
+    .{ .email = "dan@example.com", .name = "Dan", .age = 25 },
+};
+const signed = try users.insertMany(io, ctx, &more, arena);
+app.info("Signed up", .{ .count = signed.ids.len });
+
+// The adults, the oldest first. The cursor brings them batch by batch,
+// each one decoded into a User in the arena.
+var adults = try users.find(io, ctx, .{ .age = .{ .gte = 18 } }, .{ .sort = .{ .age = .desc } });
+defer adults.deinit(io);
+while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user.name, .age = user.age });
+```
+
+- **Models are plain structs.** No base type and no generated code: the
+  schema and the rules are declarations in the struct.
+- **Queries that the compiler checks.** A field that is not there, an
+  operator that does not fit its type, a value of the wrong type, a
+  change that would leave a document the model cannot read: each stops
+  the build, with a message that says what to write instead.
+- **Tenants, shared and on servers of their own, at once.** One registry
+  binds each tenant to a connection and a database; tenants come and go
+  by events with versions, while the service runs.
+- **Credentials that change on the fly.** A connection moves to a new
+  login, and its old generation drains: no request fails.
+- **Errors that say whether to retry.** Each says whether the server may
+  have run the call; the details are in the diagnostics of the session.
+- **Tests without MongoDB.** `odm.testing.FakeDriver` answers what a test
+  tells it to, and keeps a journal of what odm sent.
+- **Any driver.** odm reaches a database through its driver contract
+  only; zefir-mongo's `mongo.OdmDriver` is the reference, and a driver
+  that passes `odm.testing.conformance` works with the same code.
 
 ## Contents
 
@@ -37,7 +146,9 @@ mongod, checking what they print against this guide:
 [quick start](quick_start.zig) · [tenants](tenants.zig) ·
 [rotation](rotation.zig) · [errors](errors.zig).
 Programs that `zig build test-odm` runs without a server:
-[models](models.zig) · [queries](queries.zig).
+[models](models.zig) · [queries](queries.zig). Tests that it runs:
+[the tests of an application](users_test.zig) ·
+[the conformance suite](conformance_test.zig).
 
 ## What an ODM is
 
@@ -2262,3 +2373,513 @@ The records then have the scopes `odm` and `mongo`, as in the runs of
 `rotation.zig` and `errors.zig`. Without the bridge they go where std.log
 writes by default, to stderr.
 
+
+## Security
+
+### Tenants apart
+
+- **A session is one connection and one database.** A collection is the
+  collection of its model in that database, and has no parameter that
+  names another; a session cannot change its database.
+- **No default and no fallback.** An unknown tenant is `TenantNotFound`.
+  There is no "current tenant" of a task, a thread or the process: each
+  request names its tenant.
+- **The id of a tenant is trusted input.** The registry gives a session of
+  any tenant it knows; the application checks that the caller may use
+  it, see [Who may use a tenant](#who-may-use-a-tenant).
+- **Mode A keeps tenants apart by the binding only:** the login of a
+  shared connection reaches the databases of all its tenants. A login of
+  the tenant's own, a `.new` connection to the same server with a user
+  whose rights end at the tenant's database, adds the server's own check.
+  Give one to tenants that do not trust each other.
+- **The typed API cannot reach another database; the raw paths can.**
+  `aggregateRaw` with `$out` or `$merge`, and `runCommand`, reach what the
+  login of the connection may reach. Build them from constants of your
+  code, never from the input of a request.
+- **The databases `admin`, `local` and `config`**, in any case, are never
+  bound to a tenant.
+
+### Secrets
+
+- **The registry keeps no password.** `ConnectionConfig` and `Provision`
+  are borrowed for the call: the settings go to the driver at once, which
+  keeps the one copy in its client and wipes it in `deinit`. The registry
+  tells settings apart by an HMAC-SHA256 of them, with a key of 32 random
+  bytes of its own.
+- **Both are marked `zefir_sensitive`**, so zefir-log writes them as
+  `[REDACTED]`. `{any}` of `std.fmt` prints their fields all the same: do
+  not format them, and take a password from `confy.Secret.expose()` in
+  the call itself, as the programs of this guide do.
+- **No text of odm holds a connection string or a password**, and by its
+  contract no text of a driver holds the password. The logs of odm never
+  hold a tenant id, a database name, a document or a filter.
+
+### Names
+
+Every name is checked before any I/O, and a bad one is `InvalidArgument`:
+
+| Name | What it may be |
+|---|---|
+| a database | 1 to 63 bytes of UTF-8, without `/ \ . " $`, a space or NUL; never `admin`, `local` or `config` |
+| a tenant id | 1 to 128 bytes of visible ASCII, 0x21 to 0x7E |
+| a connection id | 1 to 64 bytes of `A–Z a–z 0–9 _ - . :` |
+| a collection | 1 to 191 bytes of UTF-8, without `$` or NUL, not `system.…`; checked when the program compiles |
+
+### The network
+
+There is no TLS: a network you trust only, for the shared server and the
+servers of tenants alike, see the warning at the top. Logins go by SCRAM,
+which never sends the password, and a mechanism that the driver does not
+know is `Unsupported`.
+
+## Tests without MongoDB
+
+`odm.testing.FakeDriver` is a driver without a network, for the tests of
+an application: the registry, the sessions and the collections are the
+real ones, and only the driver under them is not.
+
+- **`plan(uri, plan)`** says how the clients of a connection string open
+  and connect: the error of `open`, the results of the connects in order
+  (null is a success; the last one repeats), a delay of `connect`, and a
+  `Gate`, which holds the calls until the test opens it.
+- **`reply(uri, reply)`** queues the answer of the next operation of those
+  clients: the documents of a find or an aggregate, the counts of a
+  write, a count, the reply of a command, or a failure with its error,
+  code, index and text. Without one, a find gives no documents, a write
+  zeros, a count 0, and a command `{ok: 1.0}`.
+- **`journal(io)`** holds every call that went out, in order, with copies
+  of its BSON, for the test to check what odm sent.
+- **`counts(io)`** counts the clients that opened, connected, closed and
+  were freed, and the cursors open.
+
+It keeps the rules of the contract as a driver must: with less than 1 ms
+to the deadline a call is `DeadlineExceeded`, with a canceled token
+`Cancelled`, before a `connect` succeeded `Unavailable`, after `close`
+`Closed`.
+
+The users of the shop, as an application keeps them, on the `User` of
+[models.zig](#models):
+
+```zig
+//! The users of a shop, as the application keeps them: a sign-up, which a
+//! second one with the same e-mail cannot take, a look-up by e-mail, and a
+//! new name. It sees an `odm.Collection(User)` only, so the same code runs
+//! against mongod and, in users_test.zig, against
+//! `odm.testing.FakeDriver`.
+
+const std = @import("std");
+const core = @import("core");
+const odm = @import("odm");
+const bson = @import("mongo-bson");
+const User = @import("models.zig").User;
+const Users = @This();
+
+collection: odm.Collection(User),
+
+/// What a sign-up form brings.
+pub const SignUp = struct {
+    email: []const u8,
+    name: []const u8,
+    address: User.Address,
+};
+
+pub const SignUpError = odm.Error || error{EmailTaken};
+
+/// The users of the tenant of `session`.
+pub fn init(session: *odm.Session) Users {
+    return .{ .collection = session.collection(User) };
+}
+
+/// Makes the indexes of the users, so that a second sign-up with an
+/// e-mail fails: as the service starts, and for each new tenant.
+pub fn setUp(users: Users, io: std.Io, ctx: core.Context) odm.Error!void {
+    try users.collection.ensureIndexes(io, ctx);
+}
+
+/// Signs a user up, and returns the id that odm made for it. An e-mail
+/// that another user has is `error.EmailTaken`.
+pub fn signUp(users: Users, io: std.Io, ctx: core.Context, form: SignUp, now: bson.DateTime) SignUpError!bson.ObjectId {
+    const inserted = users.collection.insertOne(io, ctx, .{
+        .email = form.email,
+        .name = form.name,
+        .address = form.address,
+        .created_at = now,
+    }) catch |err| switch (err) {
+        // The unique index of the e-mail refused it: of the indexes of
+        // User, only that one can, as a sign-up has no nickname.
+        error.DuplicateKey => return error.EmailTaken,
+        else => return err,
+    };
+    return inserted.id;
+}
+
+/// The user with `email`, or null; its strings live in `arena`.
+pub fn byEmail(users: Users, io: std.Io, ctx: core.Context, arena: std.mem.Allocator, email: []const u8) odm.Error!?User {
+    return users.collection.findOne(io, ctx, .{ .email = email }, .{}, arena);
+}
+
+/// Gives the user `id` a new name; false when there is no such user.
+pub fn rename(users: Users, io: std.Io, ctx: core.Context, id: bson.ObjectId, name: []const u8) odm.Error!bool {
+    const result = try users.collection.updateOne(io, ctx, .{ .id = id }, .{ .set = .{ .name = name } });
+    return result.matched == 1;
+}
+```
+
+And their tests:
+
+```zig
+//! Tests of the users of the shop without MongoDB. Each runs `Users` on a
+//! registry whose driver is `odm.testing.FakeDriver`: it runs no query,
+//! answers an operation with the reply that the test queued, and keeps a
+//! journal of what odm sent it, for the test to check.
+
+const std = @import("std");
+const odm = @import("odm");
+const bson = @import("mongo-bson");
+const models = @import("models.zig");
+const Users = @import("Users.zig");
+const testing = std.testing;
+const FakeDriver = odm.testing.FakeDriver;
+
+const now: bson.DateTime = .{ .milliseconds = 1_760_000_000_000 };
+const ann: Users.SignUp = .{ .email = "ann@example.com", .name = "Ann", .address = .{ .city = "Lisbon", .country = "PT" } };
+
+test "the models of the shop are well formed" {
+    // Zig checks only the code that is used: this checks every model, used
+    // or not, as a build of the service would.
+    comptime {
+        odm.assertModel(models.User);
+        odm.assertModel(models.Visit);
+        odm.assertModel(models.Product);
+    }
+}
+
+/// A registry on the fake, with the tenant acme on the database "acme", as
+/// the service sets it up. `init` it in place, and give its sessions back
+/// before its `deinit`.
+const Shop = struct {
+    fake: FakeDriver,
+    registry: odm.Registry,
+
+    fn init(shop: *Shop, io: std.Io) !void {
+        shop.fake = .init(testing.allocator);
+        errdefer shop.fake.deinit();
+        shop.registry = .init(testing.allocator, io, shop.fake.driver(), .{});
+        errdefer shop.registry.deinit(io);
+        try shop.registry.registerConnection(io, "main", .{ .uri = "fake://shop" });
+        try shop.registry.provisionTenant(io, .root, .{ .tenant = "acme", .connection = .{ .existing = "main" }, .database = "acme", .version = 1 });
+    }
+
+    fn deinit(shop: *Shop, io: std.Io) void {
+        shop.registry.deinit(io);
+        shop.fake.deinit();
+    }
+
+    /// The latest call that odm sent the driver.
+    fn last(shop: *Shop, io: std.Io) FakeDriver.Call {
+        const journal = shop.fake.journal(io);
+        return journal[journal.len - 1].call;
+    }
+};
+
+test "a sign-up is one insert of one document, with the id that odm made" {
+    const io = testing.io;
+    var shop: Shop = undefined;
+    try shop.init(io);
+    defer shop.deinit(io);
+    var acme = try shop.registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const users: Users = .init(&acme);
+
+    const id = try users.signUp(io, .root, ann, now);
+
+    // One insert into acme.users, of one document.
+    const insert = shop.last(io).insert;
+    try testing.expectEqualStrings("acme", insert.ns.database);
+    try testing.expectEqualStrings("users", insert.ns.collection);
+    try testing.expectEqual(@as(usize, 1), insert.documents.len);
+    // Its _id comes first, and signUp returned it.
+    const doc = insert.documents[0];
+    const first = (try doc.first()).?;
+    try testing.expectEqualStrings("_id", first.key);
+    try testing.expectEqualSlices(u8, &id.bytes, &first.value.object_id.bytes);
+    try testing.expectEqualStrings("ann@example.com", (try doc.get("email")).?.string);
+    // No null went out: Ann has no nickname.
+    try testing.expectEqual(@as(?bson.Value, null), try doc.get("nickname"));
+}
+
+test "a second sign-up with the same e-mail is EmailTaken" {
+    const io = testing.io;
+    var shop: Shop = undefined;
+    try shop.init(io);
+    defer shop.deinit(io);
+    var acme = try shop.registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const users: Users = .init(&acme);
+
+    // The fake refuses the next write, as the unique index of mongod does.
+    try shop.fake.reply("fake://shop", .{ .failure = .{
+        .err = error.DuplicateKey,
+        .code = 11000,
+        .index = 0,
+        .message = "E11000 duplicate key error collection: acme.users index: email_1",
+    } });
+    try testing.expectError(error.EmailTaken, users.signUp(io, .root, ann, now));
+    // The session keeps what the driver said.
+    try testing.expectEqual(@as(?i32, 11000), acme.diagnostics().code);
+}
+
+test "a bad e-mail is refused before anything goes out" {
+    const io = testing.io;
+    var shop: Shop = undefined;
+    try shop.init(io);
+    defer shop.deinit(io);
+    var acme = try shop.registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const users: Users = .init(&acme);
+    const sent = shop.fake.journal(io).len;
+
+    var bad = ann;
+    bad.email = "ann at example";
+    try testing.expectError(error.ValidationFailed, users.signUp(io, .root, bad, now));
+    try testing.expectEqualStrings("email", acme.diagnostics().path());
+    try testing.expectEqual(sent, shop.fake.journal(io).len);
+}
+
+test "byEmail asks for one user by e-mail, and reads it into a User" {
+    const io = testing.io;
+    var shop: Shop = undefined;
+    try shop.init(io);
+    defer shop.deinit(io);
+    var acme = try shop.registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const users: Users = .init(&acme);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    // The fake answers the next find with Ann, as another program wrote
+    // her: without an id or a nickname.
+    const doc = try bson.encode(arena.allocator(), .{
+        .email = "ann@example.com",
+        .name = "Ann",
+        .address = .{ .city = "Lisbon", .country = "PT" },
+        .createdAt = now,
+    }, .{});
+    try shop.fake.reply("fake://shop", .{ .documents = &.{doc.raw()} });
+    const found = (try users.byEmail(io, .root, arena.allocator(), "ann@example.com")).?;
+    try testing.expectEqualStrings("Ann", found.name);
+    try testing.expectEqualStrings("Lisbon", found.address.city);
+    try testing.expectEqual(@as(?[]const u8, null), found.nickname);
+
+    // findOne is a find of the e-mail, for one document.
+    const find = shop.last(io).find;
+    try testing.expectEqualStrings("ann@example.com", (try find.filter.get("email")).?.string);
+    try testing.expectEqual(@as(u32, 1), find.limit);
+}
+
+test "rename says whether the user was there" {
+    const io = testing.io;
+    var shop: Shop = undefined;
+    try shop.init(io);
+    defer shop.deinit(io);
+    var acme = try shop.registry.tenant(io, "acme");
+    defer acme.deinit(io);
+    const users: Users = .init(&acme);
+    const id = try bson.ObjectId.parseHex("6ad571408b9f503e4a218a8b");
+
+    // Without a reply the fake answers a write with zeros: no user matched.
+    try testing.expect(!try users.rename(io, .root, id, "Ann B."));
+    try shop.fake.reply("fake://shop", .{ .write = .{ .matched = 1, .modified = 1 } });
+    try testing.expect(try users.rename(io, .root, id, "Ann B."));
+
+    // An update of the user's id, which sets the name.
+    const update = shop.last(io).update;
+    try testing.expectEqualSlices(u8, &id.bytes, &(try update.filter.get("_id")).?.object_id.bytes);
+    try testing.expectEqualStrings("Ann B.", (try update.update.getPath("$set.name")).?.string);
+}
+```
+
+- `Users` sees an `odm.Collection(User)`, so the same code runs on
+  `mongo.OdmDriver` in the service and on the fake here.
+- A test checks what went out in the journal, and the answer of the
+  server is a `reply` queued before the call.
+- The first test checks every model of the shop with `odm.assertModel`,
+  as the compiler checks only the code that is used.
+- `zig build test-odm` runs these tests, in the build of zefir.
+
+## For authors of drivers
+
+odm reaches a database through its driver contract only, three
+interfaces:
+
+- **`odm.Driver`** has a `name` and `open(io, config)`, which gives an
+  `odm.Client` for the settings of a connection, without the network.
+- **`odm.Client`** has `connect`, `ping`, `close`, `deinit`, `stats`,
+  `insert`, `update`, `delete` and `find`, and, by its `capabilities`,
+  `aggregate`, `count`, `createIndexes` and `command`. odm makes the BSON
+  of every request before the driver gets it.
+- **`odm.RawCursor`** has `next`, which gives a document borrowed until
+  its next call, and `deinit`.
+
+A driver writes them as structs, and `odm.Driver.init(&driver)`,
+`odm.Client.init(&client)` and `odm.RawCursor.init(&cursor)` make the
+interfaces. The compiler checks each method against the contract, and
+the capabilities against the methods: a capability that is true needs
+its method, and a method needs its capability. A missing method names
+what to write:
+
+```text
+error: odm.Client.init: my_driver.Client has no method insert; expected pub fn insert(self: *@This(), io: std.Io, ctx: core.Context, request: *const odm.Client.InsertRequest, options: odm.Client.CallOptions) odm.DriverError!odm.Client.InsertResult
+```
+
+The rules of the contract, which the header of `src/odm/driver.zig`
+holds in full:
+
+1. A client is called from any task at once; a cursor serves one task at
+   a time.
+2. Every wait goes through the `io` that `open` got.
+3. `open` does no network I/O. `connect` checks the link and the login,
+   may come again after a failure, and does nothing once connected.
+4. With less than 1 ms to the deadline of `ctx`, a call is
+   `DeadlineExceeded` and sends nothing; once sent, the deadline is
+   `Timeout`.
+5. A canceled token is `Cancelled` before sending, and `Interrupted` after
+   it.
+6. A request is borrowed until the call returns; what a result points to
+   comes from `options.allocator`, during the call only.
+7. The documents of an insert come with their `_id`, and go as they are,
+   in order, up to the first that the server refuses: `DuplicateKey`
+   with its index for a unique index, `WriteFailed` for anything else. A
+   replacement comes without `_id`.
+8. A find with `limit = 1` leaves no cursor open on the server.
+9. `close` refuses new calls with `Closed`, cuts the calls in flight at
+   once, and closes the cursors on the server within a short budget; the
+   `next` of a cursor after it is `Closed`, without I/O.
+10. `deinit` frees memory only, after `close` and after the `deinit` of
+    every cursor of the client.
+11. The errors are those of `odm.DriverError`, and no text holds a
+    password.
+12. Nothing is sent twice: odm decides on retries, never the driver.
+13. The capabilities are exactly the optional methods that the client
+    has.
+
+The conformance suite, `odm.testing.conformance`, checks them. A driver
+that passes it is "zefir compatible":
+
+| Check | What it proves |
+|---|---|
+| C1 | `open` does no I/O; `connect` to a server that is not there fails within its deadline |
+| C2 | `connect` succeeds, again does nothing, and is `Closed` after `close` |
+| C3 | a login that the server refuses is `AuthenticationFailed` |
+| C4 | with less than 1 ms left, every operation is `DeadlineExceeded`, and nothing is sent |
+| C5 | with a canceled token, every operation is `Cancelled`, and nothing is sent |
+| C6 | `close` from two tasks and again: the call in flight is cut within 2 s, new calls are `Closed` |
+| C7 | after `close` of the client its cursors are `Closed`, and their `deinit` works |
+| C8 | nothing is left after `deinit`; results come only from the allocator of the call, during it |
+| C9 | 16 tasks of 20 `ping` and `find` each, at once |
+| C10 | the password is in no text after errors of the settings, the login and the network |
+| D1 | `insert` and `find`: documents with an `_id` of ObjectId, string and int64 come back the same |
+| D2 | a repeated `_id` is `DuplicateKey` with its index, and the documents before it are in |
+| D3 | indexes: again is no error; a unique one refuses a second key; a sparse one lets documents without it in |
+| D4 | `find`: equality, `$gte`, `$in`, `$regex`, two sort keys, skip, limit, projection, batches, limit 1 |
+| D5 | a deadline before `getMore` is `DeadlineExceeded`, and the cursor goes on with a new context |
+| D6 | `update`: matched and modified, none matched, the `_id` of an upsert; a replacement keeps `_id` |
+| D7 | `delete` of one and of many; `count` with a filter |
+| D8 | `aggregate` with `$match` and `$group` |
+| D9 | `command`: `ping`; an unknown command is `CommandFailed` with code 59 |
+| D10 | a document of `next` stays whole until the next call of its cursor, while another cursor works |
+
+Group C checks the contract without data; group D needs a server that runs
+the queries. The author of a driver runs the suite in the tests of the
+driver's package, through a harness, as here for `FakeDriver`:
+
+```zig
+//! A driver is "zefir compatible" when it passes the conformance suite of
+//! odm, `odm.testing.conformance`. The author of a driver runs it in the
+//! tests of the driver's package, through a harness that sets the driver
+//! up for each check. Here the driver is `odm.testing.FakeDriver`, which
+//! has no server, so the suite runs group C, the rules of the contract; a
+//! driver with a server runs group D, the data, too.
+
+const std = @import("std");
+const odm = @import("odm");
+const conformance = odm.testing.conformance;
+const FakeDriver = odm.testing.FakeDriver;
+
+/// What the suite needs of the driver: a fresh setup for each check, and
+/// the hooks that the driver can give.
+const Harness = struct {
+    fake: FakeDriver = undefined,
+    gate: FakeDriver.Gate = .{},
+
+    /// The driver, the settings of a server that works, and an empty
+    /// database on it. The driver takes its memory from `gpa`, which the
+    /// suite counts: what is left after `tearDown` is a leak.
+    pub fn setUp(h: *Harness, io: std.Io, gpa: std.mem.Allocator) !conformance.Setup {
+        _ = io;
+        h.fake = .init(gpa);
+        errdefer h.fake.deinit();
+        h.gate = .{};
+        // The plans of the fake stand for a server that is not there and
+        // for a login that the server refuses.
+        try h.fake.plan("fake://away", .{ .connects = &.{error.Unavailable} });
+        try h.fake.plan("fake://refused", .{ .connects = &.{error.AuthenticationFailed} });
+        return .{ .driver = h.fake.driver(), .config = .{ .uri = "fake://shop" }, .database = "conformance" };
+    }
+
+    /// Frees what `setUp` made; the harness of a driver with a server drops
+    /// the database here too.
+    pub fn tearDown(h: *Harness, io: std.Io, setup: conformance.Setup) void {
+        _ = setup;
+        h.gate.open(io);
+        h.fake.deinit();
+    }
+
+    /// A login that the server refuses. Its password is the one that the
+    /// suite looks for in every text of the driver.
+    pub fn badCredentials(h: *Harness) odm.ConnectionConfig {
+        _ = h;
+        return .{ .uri = "fake://refused", .password = conformance.secret };
+    }
+
+    /// A server that is not there.
+    pub fn unreachableServer(h: *Harness) odm.ConnectionConfig {
+        _ = h;
+        return .{ .uri = "fake://away" };
+    }
+
+    /// Makes the next find of the clients of `setup` hang on the server,
+    /// so that the suite can check that `close` cuts a call in flight.
+    pub fn stall(h: *Harness, io: std.Io, setup: conformance.Setup) !void {
+        _ = io;
+        try h.fake.plan(setup.config.uri, .{ .gate = &h.gate });
+    }
+};
+
+test "the driver is zefir compatible" {
+    var harness: Harness = .{};
+    var report = try conformance.run(std.testing.io, std.testing.allocator, &harness, .{ .data = false });
+    defer report.deinit();
+    if (report.failedCount() > 0) {
+        std.debug.print("{f}", .{&report});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(usize, 10), report.passedCount());
+}
+```
+
+- **`setUp`** gives the driver, the settings of a server that works, and
+  a fresh, empty database on it, for each check; **`tearDown`** frees
+  what it made, and drops the database.
+- **The hooks** are optional, and a check that needs a missing one is
+  skipped, with the reason in the report: `badCredentials` for C3 and
+  C10, `unreachableServer` for C1 and C10 (without it the suite tries
+  `127.0.0.1:1`), and `stall`, which makes the next find hang on the
+  server, for C6.
+- **`run`** returns a report rather than failing a test itself, so any
+  test runner can call it; `{f}` prints it, a line per check. Each check
+  runs in a task of its own, within 60 s; `Options.time_scale` stretches
+  the times for a slow machine, and `.data = false` leaves out group D.
+
+`mongo.OdmDriver` passes both groups against mongod in `tests/odm`, and
+`FakeDriver` group C in the build of zefir, in this test.
