@@ -262,14 +262,15 @@ jobs:
       # start too.
       - name: Start the Redis servers
         run: docker compose --profile redis up --detach --wait redis-plain redis-auth redis-stall redis-restart redis-cluster redis-old
-      # Why a server did not start or a test failed: what the servers said.
-      - name: Show the logs of the Redis servers
-        if: failure()
-        run: docker compose --profile redis logs --no-color --tail 200 redis-plain redis-auth redis-stall redis-restart redis-cluster redis-old
       - name: Run the end-to-end tests
         working-directory: tests/redis
         timeout-minutes: 15
         run: zig build e2e --summary all
+      # Why a server did not start or a test failed: what the servers said.
+      # After the tests, so that it runs when either step fails.
+      - name: Show the logs of the Redis servers
+        if: failure()
+        run: docker compose --profile redis logs --no-color --tail 200 redis-plain redis-auth redis-stall redis-restart redis-cluster redis-old
       - name: Stop the Redis servers
         if: always()
         run: docker compose --profile redis down
