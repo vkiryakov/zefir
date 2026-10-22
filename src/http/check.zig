@@ -19,8 +19,9 @@
 //!
 //! At run time it compares:
 //! - each input call (`ctx.path`, `query`, `headers`, `cookies`, `json`,
-//!   `form`, and so `ctx.input`): its type must be one the route or a
-//!   middleware of its chain declares for that source;
+//!   `form`, and so `ctx.input`) until the error handler answers: its type
+//!   must be one the route or a middleware of its chain declares for that
+//!   source;
 //! - each response of the route, from the handler, from a middleware that
 //!   answers `.handled`, from the error handler: its status and the media
 //!   type of its body must be among the responses of the route and of its
@@ -291,7 +292,8 @@ pub const State = if (enabled) struct {
     /// as it is.
     untouched: bool = false,
     /// The error handler answers the request: its answer may also be one
-    /// that `mapError` gives an error of the route.
+    /// that `mapError` gives an error of the route, and its input calls are
+    /// its own.
     error_path: bool = false,
 } else struct {};
 
@@ -316,10 +318,13 @@ pub fn begin(ctx: *Context, info: *const routes.RouteInfo, table: TableRef) void
     ctx.internal.check.route = .{ .info = info, .table = t };
 }
 
-/// An input call of `ctx` reads `source` as a `T`.
+/// An input call of `ctx` reads `source` as a `T`. Once the error handler
+/// answers, what it reads to choose its answer is not the route's input.
 pub fn input(ctx: *Context, comptime source: Source, comptime T: type) void {
     if (!enabled) return;
-    const route = ctx.internal.check.route orelse return;
+    const state = &ctx.internal.check;
+    const route = state.route orelse return;
+    if (state.error_path) return;
     if (allowsInput(route.table, source, idOf(T))) return;
     record(ctx, route, .{ .input = .{ .source = source, .read = comptime plan.typeName(T) } });
 }
@@ -661,6 +666,7 @@ const OtherEvent = union(enum) { other: u32 };
 const OtherQuery = struct { q: ?[]const u8 = null };
 const PageQuery = struct { limit: u32 = 20 };
 const TokenHeaders = struct { authorization: ?[]const u8 = null };
+const AcceptHeaders = struct { accept: ?[]const u8 = null };
 
 /// The form of `zefir.openapi.MiddlewareDoc`, as far as the check reads it:
 /// types, `void` for none, and a field per status of `std.http.Status`,
@@ -763,7 +769,7 @@ const ItemsV1Controller = struct {
 
     pub fn get(_: *ItemsV1Controller, ctx: *Context) !Json(Item) {
         const path = try ctx.path(TodoPath);
-        if (is(ctx, "missing") or is(ctx, "html") or is(ctx, "410")) return error.TodoNotFound;
+        if (is(ctx, "missing") or is(ctx, "html") or is(ctx, "410") or is(ctx, "negotiate")) return error.TodoNotFound;
         // Its value under 409, which it declares, or under 404, the status
         // mapError gives its error, which it does not.
         const status: u16 = if (is(ctx, "201")) 201 else if (is(ctx, "own 409")) 409 else if (is(ctx, "own 404")) 404 else 200;
@@ -818,7 +824,8 @@ const PlainV1Controller = struct {
 };
 
 /// Maps the errors of the controllers; `handle` answers in HTML, or with
-/// another status, when `x-mode` asks.
+/// another status, when `x-mode` asks, and reads a typed header of its own
+/// to choose its answer.
 const ItemErrors = struct {
     pub fn mapError(err: anyerror) errors.ErrorResponse(ApiError) {
         return switch (err) {
@@ -829,6 +836,7 @@ const ItemErrors = struct {
 
     pub fn handle(_: *ItemErrors, ctx: *Context, err: anyerror, res: *errors.ErrorResponse(ApiError)) !errors.ErrorAction {
         if (err != error.TodoNotFound) return .respond;
+        if (is(ctx, "negotiate")) _ = try ctx.headers(AcceptHeaders);
         if (is(ctx, "410")) res.status = 410;
         if (!is(ctx, "html")) return .respond;
         try ctx.response.status(404).html("<p>Not found</p>");
@@ -1003,6 +1011,8 @@ test "check: what the error handler's handle changes is compared too" {
 
     try f.expectRefused(.GET, "/api/v1/items/1", "html", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 404 as text/html, which it does not declare in .responses");
     try f.expectRefused(.GET, "/api/v1/items/1", "410", "zefir.http: GET /api/v1/items/{id} (ItemsV1Controller.get) answered 410, which it does not declare in .responses");
+    // What it reads to choose its answer is not the route's input.
+    try f.expectPassed(.GET, "/api/v1/items/1", "negotiate", 404);
 }
 
 test "check: subscribe with a manager of other events is a 500 with its line" {
