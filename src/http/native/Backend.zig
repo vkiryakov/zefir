@@ -181,12 +181,15 @@ fn start(ptr: *anyopaque, io: std.Io, handler: Interface.Handler) Interface.Star
     };
     b.address = listener.socket.address;
     b.listener = listener;
+    // Before the accept task runs: a listener that breaks at once makes
+    // that task fail the server.
+    b.accepting.store(true, .release);
     b.accept_task = io.concurrent(acceptLoop, .{ b, io }) catch |err| {
+        b.accepting.store(false, .release);
         listener.deinit(io);
         b.listener = null;
         return err;
     };
-    b.accepting.store(true, .release);
 }
 
 /// Takes a slot, then accepts a connection and serves it on a task of the

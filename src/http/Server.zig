@@ -1372,3 +1372,21 @@ test "after a failure shutdown returns the same error" {
     try testing.expectError(error.Unavailable, server.wait(io));
     try testing.expectError(error.Unavailable, server.shutdown(io, far(io)));
 }
+
+test "a testing backend that fails once the server has stopped does nothing" {
+    const io = testing.io;
+    var backend: TestingBackend = .init(testing.allocator);
+    defer backend.deinit();
+    var health: HealthController = .{};
+    var server = try init(testing.allocator, .{ .controllers = .{&health} }, .{ .listen = .{ .backend = backend.backend() } });
+    defer server.deinit(io);
+    try server.start(io);
+    try server.shutdown(io, far(io));
+    const level = testing.log_level;
+    testing.log_level = .err; // were the failure taken, the server would warn
+    defer testing.log_level = level;
+
+    backend.fail(io, error.Unavailable);
+    try server.wait(io);
+    try server.shutdown(io, far(io));
+}
