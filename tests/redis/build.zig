@@ -51,7 +51,14 @@ const plain: []const [2][]const u8 = &.{.{ "APP_REDIS_URL", "redis://127.0.0.1:1
 
 /// The programs, in the order of the guide: `server_programs` of
 /// src/redis/examples/cases.zig, which guide_test.zig checks.
-const examples = [_]Example{};
+const examples = [_]Example{
+    .{ .name = "quick_start", .env = plain, .command = "$ zig build run" },
+    .{
+        .name = "connect",
+        .env = &.{ .{ "APP_REDIS_URL", "redis://app@127.0.0.1:16380" }, .{ "APP_REDIS_PASSWORD", "app-pass" } },
+        .command = "$ APP_REDIS_URL=redis://127.0.0.1:6380 APP_REDIS_PASSWORD=change-me zig build run",
+    },
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
