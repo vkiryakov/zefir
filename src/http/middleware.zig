@@ -432,7 +432,7 @@ fn FieldSelf(comptime C: type, comptime field: []const u8) type {
     };
 }
 
-/// The object of the server's list at `path`: `options.middleware[1]`, or
+/// The object of the server's list at `path`: `parts.middleware[1]`, or
 /// `[1][0]` inside a set.
 pub fn objectAt(list: anytype, comptime path: []const usize) *anyopaque {
     if (path.len == 1) return list[path[0]];
@@ -522,6 +522,7 @@ pub fn onFinishPhases(ctx: *Context, outcome: Outcome, over: *const std.atomic.V
 // ships none.
 
 const testing = std.testing;
+const far = @import("wait.zig").far;
 const core = @import("core");
 const Server = @import("Server.zig");
 const TestingBackend = @import("testing/Backend.zig");
@@ -670,10 +671,11 @@ const OrderFixture = struct {
         f.backend = .init(testing.allocator);
         errdefer f.backend.deinit();
         f.server = try .init(testing.allocator, .{
-            .backend = f.backend.backend(),
             .controllers = .{&f.controller},
             .middleware = .{ first, &f.a, .{ Typed, onResponse(stamp) } },
             .strict_errors = false,
+        }, .{
+            .listen = .{ .backend = f.backend.backend() },
         });
         f.server.start(testing.io) catch |err| {
             f.server.deinit(testing.io);
@@ -698,7 +700,6 @@ test "a set unfolds in place on every level, nested sets too" {
     defer f.stop();
     // At compile time: the server's elements, the controller's, the method's.
     const names = comptime chainNames(@TypeOf(.{
-        .backend = f.backend.backend(),
         .controllers = .{&f.controller},
         .middleware = .{ first, &f.a, .{ Typed, onResponse(stamp) } },
         .strict_errors = false,
@@ -715,11 +716,10 @@ test "a set unfolds in place on every level, nested sets too" {
     try testing.expectEqualStrings("handler", journal.words[7]);
 }
 
-test "chainNames takes options whose pointers are undefined: a pointer's value is never read" {
-    // The options of a test, without a server: the pointers stand for
+test "chainNames takes parts whose pointers are undefined: a pointer's value is never read" {
+    // The parts of a test, without a server: the pointers stand for
     // objects that do not exist.
     const names = comptime chainNames(@TypeOf(.{
-        .backend = @as(@import("Backend.zig"), undefined),
         .controllers = .{@as(*OrderV1Controller, undefined)},
         .middleware = .{ first, @as(*Step, undefined), .{ Typed, onResponse(stamp) } },
         .strict_errors = false,
@@ -869,7 +869,7 @@ test "global middleware runs before routing: a preflight OPTIONS to an unknown p
     var plain: PlainController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&plain}, .middleware = .{&preflight} });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&plain}, .middleware = .{&preflight} }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1057,10 +1057,11 @@ test "onFinish runs exactly once: success, error, early response, client gone, d
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     var server = try Server.init(testing.allocator, .{
-        .backend = b.backend(),
         .controllers = .{&outcomes},
         .middleware = .{ &finisher, &early },
         .strict_errors = false,
+    }, .{
+        .listen = .{ .backend = b.backend() },
         .shutdown_grace = std.Io.Duration.fromMilliseconds(100),
     });
     defer server.deinit(io);
@@ -1099,7 +1100,7 @@ test "onFinish runs exactly once: success, error, early response, client gone, d
     defer client.cancel(io) catch {};
     defer if (result) |*res| res.deinit();
     try waitCount(io, &outcomes.entered, 1);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try client.await(io);
     try testing.expect(result.?.aborted);
     try expectOutcome(&finisher, 6, 0, true, error.Canceled);
@@ -1115,10 +1116,11 @@ test "onFinish gets a fresh context: same trace and tracestate, not canceled, it
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     var server = try Server.init(testing.allocator, .{
-        .backend = b.backend(),
         .controllers = .{&outcomes},
         .middleware = .{&finisher},
         .strict_errors = false,
+    }, .{
+        .listen = .{ .backend = b.backend() },
         .finish_timeout = std.Io.Duration.fromSeconds(2),
     });
     defer server.deinit(io);
@@ -1173,10 +1175,11 @@ test "onFinish past finish_timeout is canceled" {
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     var server = try Server.init(testing.allocator, .{
-        .backend = b.backend(),
         .controllers = .{&outcomes},
         .middleware = .{ &sleeper, &after },
         .strict_errors = false,
+    }, .{
+        .listen = .{ .backend = b.backend() },
         .finish_timeout = std.Io.Duration.fromMilliseconds(50),
     });
     defer server.deinit(io);
@@ -1205,7 +1208,7 @@ test "the request's token and tracestate stay valid until onFinish ends" {
     var outcomes: OutcomeController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&outcomes}, .middleware = .{&keeper}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&outcomes}, .middleware = .{&keeper}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1251,7 +1254,7 @@ test "deinit of stored values runs after onFinish, last put first" {
     var outcomes: OutcomeController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&outcomes}, .middleware = .{&putter}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&outcomes}, .middleware = .{&putter}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
     journal = .{};
@@ -1296,7 +1299,7 @@ test "onFinish runs once when the handler ends at its deadline" {
     var outcomes: OutcomeController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&outcomes}, .middleware = .{&finisher}, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&outcomes}, .middleware = .{&finisher}, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -1352,10 +1355,11 @@ test "in-flight slots come back after .handled, a failing run and a failing onFi
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
     var server = try Server.init(testing.allocator, .{
-        .backend = b.backend(),
         .controllers = .{&outcomes},
         .middleware = .{&choice},
         .strict_errors = false,
+    }, .{
+        .listen = .{ .backend = b.backend() },
         .max_in_flight = 4,
     });
     defer server.deinit(io);
@@ -1507,15 +1511,13 @@ test "the chain of DELETE /v1/todos/{id} for the sketch's options" {
     var todos: sketch.TodosV1Controller = .{ .audit = &audit };
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    const options = .{
-        .backend = b.backend(),
-        .prefix = "/api",
+    const parts = .{
         .controllers = .{&todos},
         .middleware = .{ sketch.requestId, &access_log, &timing, onResponse(sketch.securityHeaders), &maintenance, &cors, &jwt_auth },
     };
 
     // The order of the guide's chapter "Middleware", at compile time.
-    const names = comptime chainNames(@TypeOf(options), .DELETE, "/v1/todos/{id}");
+    const names = comptime chainNames(@TypeOf(parts), .DELETE, "/v1/todos/{id}");
     const want = [_][]const u8{
         "requestId",           "AccessLog",                "ServerTiming",                    "onResponse(securityHeaders)",
         "Maintenance",         "Cors",                     "JwtAuth",                         "requireUser",
@@ -1525,7 +1527,7 @@ test "the chain of DELETE /v1/todos/{id} for the sketch's options" {
     for (want, names) |w, n| try testing.expectEqualStrings(w, n);
 
     // And each phase at run time, forward.
-    var server = try Server.init(testing.allocator, options);
+    var server = try Server.init(testing.allocator, parts, .{ .listen = .{ .backend = b.backend() }, .prefix = "/api" });
     defer server.deinit(io);
     try server.start(io);
     journal = .{};
@@ -1563,7 +1565,7 @@ test "a failing onFinish is logged and the next one runs" {
     var outcomes: OutcomeController = .{};
     var b: TestingBackend = .init(testing.allocator);
     defer b.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = b.backend(), .controllers = .{&outcomes}, .middleware = .{ &failing, &after }, .strict_errors = false });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&outcomes}, .middleware = .{ &failing, &after }, .strict_errors = false }, .{ .listen = .{ .backend = b.backend() } });
     defer server.deinit(io);
     try server.start(io);
     const level = testing.log_level;

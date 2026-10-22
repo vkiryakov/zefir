@@ -28,4 +28,5 @@ test {
     _ = conformance;
     _ = @import("testing/conformance_tests.zig");
     _ = @import("testing/mini_app.zig");
+    _ = @import("testing/sleep.zig");
 }

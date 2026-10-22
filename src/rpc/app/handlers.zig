@@ -1,4 +1,4 @@
-//! The compile-time checks of `rpc.Server.init`: its options, the handlers
+//! The compile-time checks of `rpc.Server.init`: its parts, the handlers
 //! it serves and their middleware. Each check returns the message of the
 //! first problem it finds, or null; `rpc.Server.init` stops the build with
 //! it. The messages of handlers are those of the specification, word for
@@ -6,8 +6,6 @@
 
 const std = @import("std");
 const contract = @import("contract.zig");
-const ServerTransport = @import("../ServerTransport.zig");
-const Limits = @import("../engine/RawServer.zig").Limits;
 const Context = @import("../engine/Context.zig").Context;
 const middleware = @import("../middleware.zig");
 const MiddlewareFn = middleware.MiddlewareFn;
@@ -21,64 +19,40 @@ const ClientNext = middleware.ClientNext;
 pub const eval_quota = 10_000_000;
 
 const at = "rpc.Server.init: ";
-const options_list = ".transport, .handlers, .authenticator, .middleware, .limits and .shutdown_grace";
+const parts_list = ".handlers, .middleware and .authenticator";
 const link_function = "fn (*rpc.Context, *rpc.Next) anyerror!void";
 const link_method = "pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void";
 
-/// The compile error for the options of `rpc.Server.init`, of type `O`, or
-/// null. Checks the shape of the options, the transport, the
-/// authenticator, every handler and the links of the server's level.
-pub fn optionsProblem(comptime O: type) ?[]const u8 {
+/// The compile error for the parts of `rpc.Server.init`, of type `P`, or
+/// null. Checks the shape of the parts, the authenticator, every handler
+/// and the links of the server's level.
+pub fn partsProblem(comptime P: type) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
-    const shape = "options must be a struct literal such as .{ .transport = memory.serverTransport(), .handlers = .{&users} }, got ";
-    const info = switch (@typeInfo(O)) {
+    const shape = "parts must be a struct literal such as .{ .handlers = .{&users} }, got ";
+    const info = switch (@typeInfo(P)) {
         .@"struct" => |info| info,
-        else => return at ++ shape ++ @typeName(O),
+        else => return at ++ shape ++ @typeName(P),
     };
     if (info.is_tuple and info.field_names.len > 0) return at ++ shape ++ "a tuple";
     for (info.field_names) |name| {
-        if (!isOneOf(name, &.{ "transport", "handlers", "authenticator", "middleware", "limits", "shutdown_grace" }))
-            return at ++ "unknown option ." ++ name ++ "; the options are " ++ options_list;
+        if (!isOneOf(name, &.{ "handlers", "middleware", "authenticator" }))
+            return at ++ "unknown part ." ++ name ++ "; the parts are " ++ parts_list;
     }
-    if (!@hasField(O, "transport")) return at ++ ".transport is missing; pass the server side of a transport, such as memory.serverTransport()";
-    if (@FieldType(O, "transport") != ServerTransport)
-        return at ++ ".transport must be an rpc.ServerTransport, such as memory.serverTransport(); got " ++ @typeName(@FieldType(O, "transport"));
-    if (hasAuthenticator(O)) {
-        if (authenticatorProblem(@FieldType(O, "authenticator"))) |found| return found;
+    if (hasAuthenticator(P)) {
+        if (authenticatorProblem(@FieldType(P, "authenticator"))) |found| return found;
     }
-    if (!@hasField(O, "handlers")) return at ++ ".handlers is missing; pass pointers to the handlers, such as .{&users}";
-    if (handlersProblem(@FieldType(O, "handlers"), hasAuthenticator(O))) |found| return found;
-    if (@hasField(O, "middleware")) {
-        if (serverLinksProblem(@FieldType(O, "middleware"))) |found| return found;
-    }
-    if (@hasField(O, "limits")) {
-        if (limitsProblem(@FieldType(O, "limits"))) |found| return found;
-    }
-    if (@hasField(O, "shutdown_grace") and @FieldType(O, "shutdown_grace") != std.Io.Duration)
-        return at ++ ".shutdown_grace must be a std.Io.Duration, such as std.Io.Duration.fromSeconds(10); got " ++ @typeName(@FieldType(O, "shutdown_grace"));
-    return null;
-}
-
-/// `.limits` is `rpc.Limits`, or a struct literal of some of its fields,
-/// which `rpc.Server.init` copies over the defaults.
-fn limitsProblem(comptime L: type) ?[]const u8 {
-    if (L == Limits) return null;
-    const shape = ".limits must be rpc.Limits or a struct literal of its fields, such as .{ .max_active_tasks = 1024 }; got ";
-    const info = switch (@typeInfo(L)) {
-        .@"struct" => |info| info,
-        else => return at ++ shape ++ @typeName(L),
-    };
-    if (info.is_tuple and info.field_names.len > 0) return at ++ shape ++ "a tuple";
-    for (info.field_names) |name| {
-        if (!@hasField(Limits, name)) return at ++ ".limits has no field ." ++ name ++ "; the limits are the fields of rpc.Limits";
+    if (!@hasField(P, "handlers")) return at ++ ".handlers is missing; pass pointers to the handlers, such as .{&users}";
+    if (handlersProblem(@FieldType(P, "handlers"), hasAuthenticator(P))) |found| return found;
+    if (@hasField(P, "middleware")) {
+        if (serverLinksProblem(@FieldType(P, "middleware"))) |found| return found;
     }
     return null;
 }
 
-/// Whether the options of type `O` set an authenticator: `.authenticator`
+/// Whether the parts of type `P` set an authenticator: `.authenticator`
 /// is there and is not `null`.
-pub fn hasAuthenticator(comptime O: type) bool {
-    return @hasField(O, "authenticator") and @FieldType(O, "authenticator") != @TypeOf(null);
+pub fn hasAuthenticator(comptime P: type) bool {
+    return @hasField(P, "authenticator") and @FieldType(P, "authenticator") != @TypeOf(null);
 }
 
 fn authenticatorProblem(comptime A: type) ?[]const u8 {
@@ -399,14 +373,14 @@ const Orders = struct {
     }
 };
 
-/// The options of a server that serves `Handlers`.
-fn Options(comptime Handlers: type) type {
-    return struct { transport: ServerTransport, handlers: Handlers };
+/// The parts of a server that serves `Handlers`.
+fn Parts(comptime Handlers: type) type {
+    return struct { handlers: Handlers };
 }
 
 /// The same with an authenticator of type `A`.
-fn OptionsWith(comptime Handlers: type, comptime A: type) type {
-    return struct { transport: ServerTransport, handlers: Handlers, authenticator: A };
+fn PartsWith(comptime Handlers: type, comptime A: type) type {
+    return struct { handlers: Handlers, authenticator: A };
 }
 
 const Auth = struct {
@@ -417,8 +391,8 @@ const Auth = struct {
     }
 };
 
-fn expectProblem(comptime O: type, comptime expected: []const u8) !void {
-    const found = comptime optionsProblem(O);
+fn expectProblem(comptime P: type, comptime expected: []const u8) !void {
+    const found = comptime partsProblem(P);
     if (found == null) {
         std.debug.print("expected: {s}\ngot no problem\n", .{expected});
         return error.TestExpectedProblem;
@@ -426,48 +400,37 @@ fn expectProblem(comptime O: type, comptime expected: []const u8) !void {
     try testing.expectEqualStrings(expected, found.?);
 }
 
-fn expectNoProblem(comptime O: type) !void {
-    const found = comptime optionsProblem(O);
+fn expectNoProblem(comptime P: type) !void {
+    const found = comptime partsProblem(P);
     if (found) |message| {
         std.debug.print("unexpected: {s}\n", .{message});
         return error.TestUnexpectedProblem;
     }
 }
 
-test "good options pass" {
-    try expectNoProblem(Options(struct { *Users }));
-    try expectNoProblem(OptionsWith(struct { *Users }, @TypeOf(null)));
-    try expectNoProblem(OptionsWith(struct { *Users }, *Auth));
+test "good parts pass" {
+    try expectNoProblem(Parts(struct { *Users }));
+    try expectNoProblem(PartsWith(struct { *Users }, @TypeOf(null)));
+    try expectNoProblem(PartsWith(struct { *Users }, *Auth));
     // Two versions of one service, and two services, on one server.
-    try expectNoProblem(Options(struct { *Users, *UsersV2, *Orders }));
+    try expectNoProblem(Parts(struct { *Users, *UsersV2, *Orders }));
 }
 
 const NamedHandlers = struct { users: *Users };
 
-test "the shape of the options" {
-    try expectProblem(u32, "rpc.Server.init: options must be a struct literal such as .{ .transport = memory.serverTransport(), .handlers = .{&users} }, got u32");
-    try expectProblem(struct { ServerTransport }, "rpc.Server.init: options must be a struct literal such as .{ .transport = memory.serverTransport(), .handlers = .{&users} }, got a tuple");
-    try expectProblem(struct { transport: ServerTransport, handlers: struct { *Users }, handler: u8 }, "rpc.Server.init: unknown option .handler; the options are .transport, .handlers, .authenticator, .middleware, .limits and .shutdown_grace");
-    try expectProblem(struct { handlers: struct { *Users } }, "rpc.Server.init: .transport is missing; pass the server side of a transport, such as memory.serverTransport()");
-    try expectProblem(struct { transport: *u8, handlers: struct { *Users } }, "rpc.Server.init: .transport must be an rpc.ServerTransport, such as memory.serverTransport(); got *u8");
-    try expectProblem(struct { transport: ServerTransport }, "rpc.Server.init: .handlers is missing; pass pointers to the handlers, such as .{&users}");
-    try expectProblem(Options(@TypeOf(.{})), "rpc.Server.init: .handlers is empty; a server needs at least one handler");
-    try expectProblem(Options(*Users), "rpc.Server.init: .handlers must be a tuple of pointers to handlers, such as .{&users}; got *app.handlers.Users");
-    try expectProblem(Options(NamedHandlers), "rpc.Server.init: .handlers must be a tuple of pointers to handlers, such as .{&users}; got app.handlers.NamedHandlers");
-    try expectProblem(OptionsWith(struct { *Users }, u8), "rpc.Server.init: .authenticator must be a pointer to an authenticator, e.g. &auth; got u8");
-    try expectProblem(OptionsWith(struct { *Users }, []Auth), "rpc.Server.init: .authenticator must be a pointer to an authenticator, e.g. &auth; got []app.handlers.Auth");
-    try expectProblem(OptionsWith(struct { *Users }, Auth), "rpc.Server.init: .authenticator must be a pointer to an authenticator, e.g. &auth; got app.handlers.Auth");
-}
-
-test "the limits and the shutdown grace" {
-    const Handlers = struct { *Users };
-    try expectNoProblem(struct { transport: ServerTransport, handlers: Handlers, limits: Limits, shutdown_grace: std.Io.Duration });
-    try expectNoProblem(struct { transport: ServerTransport, handlers: Handlers, limits: struct { max_active_tasks: u32, max_json_depth: comptime_int } });
-    try expectNoProblem(struct { transport: ServerTransport, handlers: Handlers, limits: @TypeOf(.{}) });
-    try expectProblem(struct { transport: ServerTransport, handlers: Handlers, limits: struct { max_tasks: u32 } }, "rpc.Server.init: .limits has no field .max_tasks; the limits are the fields of rpc.Limits");
-    try expectProblem(struct { transport: ServerTransport, handlers: Handlers, limits: u32 }, "rpc.Server.init: .limits must be rpc.Limits or a struct literal of its fields, such as .{ .max_active_tasks = 1024 }; got u32");
-    try expectProblem(struct { transport: ServerTransport, handlers: Handlers, limits: struct { u32 } }, "rpc.Server.init: .limits must be rpc.Limits or a struct literal of its fields, such as .{ .max_active_tasks = 1024 }; got a tuple");
-    try expectProblem(struct { transport: ServerTransport, handlers: Handlers, shutdown_grace: comptime_int }, "rpc.Server.init: .shutdown_grace must be a std.Io.Duration, such as std.Io.Duration.fromSeconds(10); got comptime_int");
+test "the shape of the parts" {
+    try expectProblem(u32, "rpc.Server.init: parts must be a struct literal such as .{ .handlers = .{&users} }, got u32");
+    try expectProblem(struct { *Users }, "rpc.Server.init: parts must be a struct literal such as .{ .handlers = .{&users} }, got a tuple");
+    try expectProblem(struct { handlers: struct { *Users }, handler: u8 }, "rpc.Server.init: unknown part .handler; the parts are .handlers, .middleware and .authenticator");
+    // A setting among the parts: it goes into the options.
+    try expectProblem(struct { handlers: struct { *Users }, limits: u8 }, "rpc.Server.init: unknown part .limits; the parts are .handlers, .middleware and .authenticator");
+    try expectProblem(struct { middleware: @TypeOf(.{}) }, "rpc.Server.init: .handlers is missing; pass pointers to the handlers, such as .{&users}");
+    try expectProblem(Parts(@TypeOf(.{})), "rpc.Server.init: .handlers is empty; a server needs at least one handler");
+    try expectProblem(Parts(*Users), "rpc.Server.init: .handlers must be a tuple of pointers to handlers, such as .{&users}; got *app.handlers.Users");
+    try expectProblem(Parts(NamedHandlers), "rpc.Server.init: .handlers must be a tuple of pointers to handlers, such as .{&users}; got app.handlers.NamedHandlers");
+    try expectProblem(PartsWith(struct { *Users }, u8), "rpc.Server.init: .authenticator must be a pointer to an authenticator, e.g. &auth; got u8");
+    try expectProblem(PartsWith(struct { *Users }, []Auth), "rpc.Server.init: .authenticator must be a pointer to an authenticator, e.g. &auth; got []app.handlers.Auth");
+    try expectProblem(PartsWith(struct { *Users }, Auth), "rpc.Server.init: .authenticator must be a pointer to an authenticator, e.g. &auth; got app.handlers.Auth");
 }
 
 const NoDecl = struct {
@@ -489,15 +452,15 @@ const FnDecl = struct {
 };
 
 test "a handler is a pointer to a struct that declares rpc_handler with rpc.implement" {
-    try expectProblem(Options(struct { Users }), "rpc.Server.init: .handlers[0] is app.handlers.Users; pass a pointer to a handler, e.g. &users");
-    try expectProblem(Options(struct { *Users, []Users }), "rpc.Server.init: .handlers[1] is []app.handlers.Users; pass a pointer to a handler, e.g. &users");
-    try expectProblem(Options(struct { *u32 }), "rpc.Server.init: .handlers[0] is *u32; pass a pointer to a handler, e.g. &users");
-    try expectProblem(Options(struct { *const Users }), "rpc.Server.init: .handlers[0] is *const app.handlers.Users; the handler must be mutable, declared with var");
-    try expectProblem(Options(struct { *NoDecl }), "rpc.Server.init: app.handlers.NoDecl has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)");
-    try expectProblem(Options(struct { *WrongDecl }), "rpc.Server.init: app.handlers.WrongDecl.rpc_handler must be built with rpc.implement(Api, ...)");
-    try expectProblem(Options(struct { *TypeDecl }), "rpc.Server.init: app.handlers.TypeDecl.rpc_handler must be built with rpc.implement(Api, ...)");
-    try expectProblem(Options(struct { *VarDecl }), "rpc.Server.init: app.handlers.VarDecl.rpc_handler must be built with rpc.implement(Api, ...)");
-    try expectProblem(Options(struct { *FnDecl }), "rpc.Server.init: app.handlers.FnDecl.rpc_handler must be built with rpc.implement(Api, ...)");
+    try expectProblem(Parts(struct { Users }), "rpc.Server.init: .handlers[0] is app.handlers.Users; pass a pointer to a handler, e.g. &users");
+    try expectProblem(Parts(struct { *Users, []Users }), "rpc.Server.init: .handlers[1] is []app.handlers.Users; pass a pointer to a handler, e.g. &users");
+    try expectProblem(Parts(struct { *u32 }), "rpc.Server.init: .handlers[0] is *u32; pass a pointer to a handler, e.g. &users");
+    try expectProblem(Parts(struct { *const Users }), "rpc.Server.init: .handlers[0] is *const app.handlers.Users; the handler must be mutable, declared with var");
+    try expectProblem(Parts(struct { *NoDecl }), "rpc.Server.init: app.handlers.NoDecl has no `pub const rpc_handler = rpc.implement(Api, ...)`; every handler must declare it (and it must be pub)");
+    try expectProblem(Parts(struct { *WrongDecl }), "rpc.Server.init: app.handlers.WrongDecl.rpc_handler must be built with rpc.implement(Api, ...)");
+    try expectProblem(Parts(struct { *TypeDecl }), "rpc.Server.init: app.handlers.TypeDecl.rpc_handler must be built with rpc.implement(Api, ...)");
+    try expectProblem(Parts(struct { *VarDecl }), "rpc.Server.init: app.handlers.VarDecl.rpc_handler must be built with rpc.implement(Api, ...)");
+    try expectProblem(Parts(struct { *FnDecl }), "rpc.Server.init: app.handlers.FnDecl.rpc_handler must be built with rpc.implement(Api, ...)");
 }
 
 const MissingMethod = struct {
@@ -551,14 +514,14 @@ const NotAFunction = struct {
 };
 
 test "a handler has a pub fn of the contract's signature for each method" {
-    try expectProblem(Options(struct { *MissingMethod }), "rpc: app.handlers.MissingMethod implements users.v1 but has no pub fn deleteUser(self: *app.handlers.MissingMethod, ctx: *rpc.Context, req: app.handlers.DeleteUserRequest) !void");
+    try expectProblem(Parts(struct { *MissingMethod }), "rpc: app.handlers.MissingMethod implements users.v1 but has no pub fn deleteUser(self: *app.handlers.MissingMethod, ctx: *rpc.Context, req: app.handlers.DeleteUserRequest) !void");
     // A function is shown as it is written: `!` for an inferred error set.
-    try expectProblem(Options(struct { *NoContext }), "rpc: app.handlers.NoContext.getUser: expected fn (*app.handlers.NoContext, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoContext, app.handlers.GetUserRequest) !app.handlers.User");
-    try expectProblem(Options(struct { *NoErrors }), "rpc: app.handlers.NoErrors.getUser: expected fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) app.handlers.User");
-    try expectProblem(Options(struct { *ConstSelf }), "rpc: app.handlers.ConstSelf.getUser: expected fn (*app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*const app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) error{X}!app.handlers.User");
-    try expectProblem(Options(struct { *OtherResponse }), "rpc: app.handlers.OtherResponse.getUser: expected fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) error{X}![]const u8");
-    try expectProblem(Options(struct { *Generic }), "rpc: app.handlers.Generic.getUser: expected fn (*app.handlers.Generic, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.Generic, *rpc.Context, anytype) error{X}!app.handlers.User");
-    try expectProblem(Options(struct { *NotAFunction }), "rpc: app.handlers.NotAFunction.getUser: expected fn (*app.handlers.NotAFunction, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found comptime_int");
+    try expectProblem(Parts(struct { *NoContext }), "rpc: app.handlers.NoContext.getUser: expected fn (*app.handlers.NoContext, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoContext, app.handlers.GetUserRequest) !app.handlers.User");
+    try expectProblem(Parts(struct { *NoErrors }), "rpc: app.handlers.NoErrors.getUser: expected fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.NoErrors, *rpc.Context, app.handlers.GetUserRequest) app.handlers.User");
+    try expectProblem(Parts(struct { *ConstSelf }), "rpc: app.handlers.ConstSelf.getUser: expected fn (*app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*const app.handlers.ConstSelf, *rpc.Context, app.handlers.GetUserRequest) error{X}!app.handlers.User");
+    try expectProblem(Parts(struct { *OtherResponse }), "rpc: app.handlers.OtherResponse.getUser: expected fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.OtherResponse, *rpc.Context, app.handlers.GetUserRequest) error{X}![]const u8");
+    try expectProblem(Parts(struct { *Generic }), "rpc: app.handlers.Generic.getUser: expected fn (*app.handlers.Generic, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found fn (*app.handlers.Generic, *rpc.Context, anytype) error{X}!app.handlers.User");
+    try expectProblem(Parts(struct { *NotAFunction }), "rpc: app.handlers.NotAFunction.getUser: expected fn (*app.handlers.NotAFunction, *rpc.Context, app.handlers.GetUserRequest) !app.handlers.User, found comptime_int");
 }
 
 const UnknownSetting = struct {
@@ -568,7 +531,7 @@ const UnknownSetting = struct {
 };
 
 test "rpc_handler sets only methods of its contract" {
-    try expectProblem(Options(struct { *UnknownSetting }), "rpc: app.handlers.UnknownSetting.rpc_handler: getUsers is not a method of users.v1");
+    try expectProblem(Parts(struct { *UnknownSetting }), "rpc: app.handlers.UnknownSetting.rpc_handler: getUsers is not a method of users.v1");
 }
 
 /// The methods of `Users`, for handlers of other types: `self` is any
@@ -603,18 +566,18 @@ const RequiredMethod = struct {
 };
 
 test "a method that requires auth needs an authenticator" {
-    try expectProblem(Options(struct { *RequiredByDefault }), "rpc.Server.init: app.handlers.RequiredByDefault.deleteUser requires auth, but .authenticator is not set");
-    try expectProblem(Options(struct { *RequiredMethod }), "rpc.Server.init: app.handlers.RequiredMethod.getUser requires auth, but .authenticator is not set");
-    try expectProblem(OptionsWith(struct { *RequiredMethod }, @TypeOf(null)), "rpc.Server.init: app.handlers.RequiredMethod.getUser requires auth, but .authenticator is not set");
-    try expectNoProblem(OptionsWith(struct { *RequiredByDefault }, *Auth));
-    try expectNoProblem(OptionsWith(struct { *RequiredMethod }, *Auth));
+    try expectProblem(Parts(struct { *RequiredByDefault }), "rpc.Server.init: app.handlers.RequiredByDefault.deleteUser requires auth, but .authenticator is not set");
+    try expectProblem(Parts(struct { *RequiredMethod }), "rpc.Server.init: app.handlers.RequiredMethod.getUser requires auth, but .authenticator is not set");
+    try expectProblem(PartsWith(struct { *RequiredMethod }, @TypeOf(null)), "rpc.Server.init: app.handlers.RequiredMethod.getUser requires auth, but .authenticator is not set");
+    try expectNoProblem(PartsWith(struct { *RequiredByDefault }, *Auth));
+    try expectNoProblem(PartsWith(struct { *RequiredMethod }, *Auth));
 }
 
 test "two handlers may not serve one route" {
-    try expectProblem(Options(struct { *Users, *MoreUsers }), "rpc.Server.init: app.handlers.Users and app.handlers.MoreUsers both serve users.v1");
-    try expectProblem(Options(struct { *Orders, *Users, *Users }), "rpc.Server.init: app.handlers.Users and app.handlers.Users both serve users.v1");
+    try expectProblem(Parts(struct { *Users, *MoreUsers }), "rpc.Server.init: app.handlers.Users and app.handlers.MoreUsers both serve users.v1");
+    try expectProblem(Parts(struct { *Orders, *Users, *Users }), "rpc.Server.init: app.handlers.Users and app.handlers.Users both serve users.v1");
     // The same name and version with other methods: no route is shared.
-    try expectNoProblem(Options(struct { *Users, *OtherUsers }));
+    try expectNoProblem(Parts(struct { *Users, *OtherUsers }));
 }
 
 const OtherUserApi = contract.Contract(.{
@@ -682,8 +645,8 @@ fn linkMessage(comptime T: type, comptime where: []const u8, comptime index: usi
 }
 
 test "the links of a handler and of a method are functions or fields that hold an object" {
-    try expectNoProblem(Options(struct { *Linked(.{ audit, .limiter, .embedded }, .{ audit, .limiter, .embedded, audit }) }));
-    try expectNoProblem(Options(struct { *Linked(.{}, .{}) }));
+    try expectNoProblem(Parts(struct { *Linked(.{ audit, .limiter, .embedded }, .{ audit, .limiter, .embedded, audit }) }));
+    try expectNoProblem(Parts(struct { *Linked(.{}, .{}) }));
     inline for (.{
         .{ .{5}, .{}, "rpc_handler", 0 },
         .{ .{ audit, .missing }, .{}, "rpc_handler", 1 },
@@ -696,7 +659,7 @@ test "the links of a handler and of a method are functions or fields that hold a
         .{ .{}, .{&audit}, "deleteUser", 0 },
     }) |case| {
         const T = Linked(case[0], case[1]);
-        try expectProblem(Options(struct { *T }), comptime linkMessage(T, case[2], case[3]));
+        try expectProblem(Parts(struct { *T }), comptime linkMessage(T, case[2], case[3]));
     }
 }
 
@@ -704,7 +667,7 @@ test "the links of the server are functions or pointers to objects" {
     const Handlers = struct { *Users };
     const With = struct {
         fn Links(comptime L: type) type {
-            return struct { transport: ServerTransport, handlers: Handlers, middleware: L };
+            return struct { handlers: Handlers, middleware: L };
         }
     };
     try expectNoProblem(With.Links(struct { @TypeOf(audit), *Limiter }));
@@ -718,7 +681,7 @@ test "the links of the server are functions or pointers to objects" {
     try expectProblem(With.Links(struct { @TypeOf(audit), @TypeOf(inferred) }), "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*rpc.Context, *rpc.Next) !void");
     try expectProblem(With.Links(struct { @TypeOf(noNext) }), "rpc.Server.init: .middleware[0] must be fn (*rpc.Context, *rpc.Next) anyerror!void, with anyerror written out, not inferred; got fn (*rpc.Context) anyerror!void");
     try expectProblem(With.Links(*Limiter), "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got *app.handlers.Limiter");
-    try expectProblem(struct { transport: ServerTransport, handlers: Handlers, middleware: NamedLinks }, "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got app.handlers.NamedLinks");
+    try expectProblem(struct { handlers: Handlers, middleware: NamedLinks }, "rpc.Server.init: .middleware must be a tuple such as .{ mw.logCalls, &limiter }; got app.handlers.NamedLinks");
 }
 
 const NamedLinks = struct { first: *Limiter };

@@ -58,9 +58,6 @@ production.
 >   write concerns in the options of operations; no `createCollection` or
 >   `renameCollection`, which `Database.runCommand` does, see
 >   [Reports, indexes and collections](#reports-indexes-and-collections).
-> - **The App container.** `main` builds the client and closes it; the App
->   of zefir-core, which will start and stop it with the rest of a
->   service, is planned.
 
 From [the quick start](#quick-start): a customer in, three more, and the
 adults out, the oldest first.
@@ -120,6 +117,7 @@ while (try adults.next(io, op)) |doc| {
 - [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
 - [Deadlines and cancellation](#deadlines-and-cancellation)
 - [The pool, closing and statistics](#the-pool-closing-and-statistics)
+- [Under zefir.App](#under-zefirapp)
 - [Logs](#logs)
 - [Tests without MongoDB](#tests-without-mongodb)
 - [Under zefir-odm](#under-zefir-odm)
@@ -127,7 +125,8 @@ while (try adults.next(io, op)) |doc| {
 Programs that `zig build e2e` in `tests/mongo` builds and runs against
 mongod, checking what they print against this guide:
 [quick start](quick_start.zig) · [connecting](connect.zig) ·
-[orders](orders.zig) · [reports](reports.zig) · [errors](errors.zig).
+[orders](orders.zig) · [reports](reports.zig) · [errors](errors.zig) ·
+[under zefir.App](app.zig).
 Examples that `zig build test-mongo` runs without a server:
 [documents](documents.zig) · [a write cut short](import_test.zig) ·
 [deadlines](deadlines_test.zig) · [tests of an application](users_test.zig).
@@ -519,6 +518,7 @@ warning in the log, as they change nothing that v0.1 does:
 |---|---|---|
 | `uri` | none, required | the connection string |
 | `password` | null | the password of the user of `uri`, when the string has none |
+| `start_timeout` | 10 s | how long `start`, under [zefir.App](#under-zefirapp), waits for the first connection |
 | `close_timeout` | 5 s | how long `close` lets the calls in flight finish |
 | `cursor_close_timeout` | 1 s | the budget of the `killCursors` that closing a cursor sends |
 | `diagnostics` | null | why `init` refused the options; it never shows the password |
@@ -1881,6 +1881,198 @@ line of [the quick start](#quick-start) shows:
 | `waiting` | calls waiting for a connection |
 | `generation`, `clears` | the generation of the pool, and how many times it was cleared |
 | `open_cursors` | cursors that the server holds |
+
+## Under zefir.App
+
+A service with a server next to its client of MongoDB, or with clients of
+MongoDB and NATS, hands their lifecycle to `zefir.App` of zefir-core: App
+builds the beans of the service out of modules, starts them in order,
+watches them, and stops them all within one deadline. The client is a bean
+as it is. The guides of the modules write App `core.App`: it is
+`zefir.App` of the umbrella module.
+
+The module below declares what App builds. `Mongo` is a struct of
+factories, whose functions make beans: `mongoClient` the client, from the
+config that `main` hands to `init`; `usersDb` the database of the users,
+from that client and the generator of ObjectIds. The generator and the
+repository `Users` are providers, built by their `init`, whose parameters
+App passes by their types:
+
+```zig
+//! The users of the shop under zefir.App: a module declares the client of
+//! MongoDB and the database of the users, which factories make, the
+//! generator of ObjectIds and the repository of the users; App builds them
+//! in the order of their dependencies, starts the client, and closes it at
+//! the stop. The program signs a user up, finds them, and stops. Each run
+//! starts from an empty collection.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
+//!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
+//!                        it names one
+//!
+//! In tests/mongo, `zig build example-app` runs it against the servers of
+//! the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const mongo = @import("mongo");
+const zio = @import("zio");
+const bson = mongo.bson;
+
+/// App and the client log through std.log; this sends their records to
+/// the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    mongo: struct {
+        uri: []const u8 = "mongodb://127.0.0.1:27017",
+        /// Kept out of the URI, and out of every log.
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+/// The database of the users. App gives every dependency by its type, so a
+/// database has a type of its own: a second one would be a second struct
+/// like this.
+pub const UsersDb = struct { db: mongo.Database };
+
+/// The users of the shop, in the collection "users" of their database.
+pub const Users = struct {
+    collection: mongo.Collection,
+
+    pub const User = struct {
+        /// null: the insert makes an ObjectId.
+        _id: ?bson.ObjectId = null,
+        email: []const u8,
+        name: []const u8,
+    };
+
+    /// App passes the database it built.
+    pub fn init(users_db: *UsersDb) Users {
+        return .{ .collection = users_db.db.collection("users") };
+    }
+
+    /// Signs `user` up, and returns the `_id` that the insert made.
+    pub fn signUp(users: *Users, io: std.Io, op: mongo.OperationContext, arena: std.mem.Allocator, user: User) mongo.Error!bson.ObjectId {
+        const inserted = try users.collection.insertOne(io, op, user, .{ .allocator = arena });
+        return inserted.inserted_id.object_id;
+    }
+
+    /// The user with `email`, or null; its strings live in `arena`.
+    pub fn byEmail(users: *Users, io: std.Io, op: mongo.OperationContext, arena: std.mem.Allocator, email: []const u8) (mongo.Error || bson.DecodeError)!?User {
+        const doc = try users.collection.findOne(io, op, .{ .email = email }, .{ .allocator = arena }) orelse return null;
+        return try bson.decode(User, arena, doc.raw(), .{});
+    }
+};
+
+/// What App builds: the generator of ObjectIds, whose init takes only io,
+/// the users, and the client and the database, which factories make.
+pub const AppModule = struct {
+    pub const module: core.app.Module = .{
+        .providers = &.{ bson.ObjectId.Generator, Users },
+        .factories = &.{Mongo},
+        .values = &.{*const Config},
+    };
+
+    pub const Mongo = struct {
+        /// The client: App starts it (`start`, a connect) before the beans
+        /// that take it, and closes it (`shutdown`) after them.
+        pub fn mongoClient(gpa: std.mem.Allocator, io: std.Io, config: *const Config) !mongo.Client {
+            return .init(gpa, io, .{
+                .uri = config.mongo.uri,
+                .password = if (config.mongo.password) |password| password.expose() else null,
+            });
+        }
+
+        /// The database "shop", on the client App built.
+        pub fn usersDb(client: *mongo.Client, ids: *bson.ObjectId.Generator) UsersDb {
+            return .{ .db = .init(client, "shop", ids) };
+        }
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // the tasks of the runtime may log too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app_log = logger.scoped("app");
+
+    // One runtime for the program: App, the client and their tasks run on
+    // its `io`.
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Builds the beans, then starts the client: it is connected once start
+    // returns. App's own deinit comes before the runtime's.
+    var app = try core.App(AppModule).init(init.gpa, io, .{&config}, .{});
+    defer app.deinit();
+    try app.start();
+
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const op: mongo.OperationContext = .of(core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromSeconds(5))));
+    const users: *Users = app.get(Users);
+    // Start afresh.
+    try users.collection.drop(io, op, .{ .allocator = arena });
+    const id = try users.signUp(io, op, arena, .{ .email = "ann@example.com", .name = "Ann" });
+    app_log.info("Signed up", .{ .name = "Ann", ._id = id });
+    const ann = (try users.byEmail(io, op, arena, "ann@example.com")) orelse return error.UserNotFound;
+    app_log.info("Found", .{ .name = ann.name, .email = ann.email });
+
+    // What a signal does in a service: App closes the client within its
+    // shutdown_timeout, and wait returns.
+    app.requestStop();
+    try app.wait();
+    app_log.info("Stopped", .{ .state = app.state() });
+}
+```
+
+```text
+$ zig build run
+2026-10-22T01:27:42.720Z INFO  [zefir_app] AppModule.Mongo.mongoClient started
+2026-10-22T01:27:42.728Z INFO  [app] Signed up name=Ann _id=6ad9668e16082487fdc6816d
+2026-10-22T01:27:42.729Z INFO  [app] Found name=Ann email=ann@example.com
+2026-10-22T01:27:42.729Z INFO  [zefir_app] stopping
+2026-10-22T01:27:42.729Z INFO  [zefir_app] AppModule.Mongo.mongoClient stopped
+2026-10-22T01:27:42.729Z INFO  [zefir_app] stopped
+2026-10-22T01:27:42.729Z INFO  [app] Stopped state=stopped
+```
+
+- **One type, one bean.** App gives a dependency by its type, so the
+  database goes in a struct of its own, `UsersDb`, and `Users` takes
+  `*UsersDb`. A second database of the same client would be a second
+  struct, `ReportsDb { db: mongo.Database }`, made by a second factory.
+- **`start`** is `connect` under a deadline of `start_timeout`, 10 s by
+  default. App starts the client before every bean that takes it; when
+  the client cannot connect, App starts nothing more, and `start` writes
+  why to the log, as a warning of the scope `mongo`:
+  `start failed: error.Unavailable: …`, with the message that
+  `Diagnostics` would hold. A program that wants the `Diagnostics` calls
+  `connect` itself.
+- **`shutdown(io, deadline)`** is `close`, cut by the deadline of App's
+  stop, `.shutdown_timeout`, 25 s by default: the calls in flight get
+  `close_timeout` to end, then the `killCursors` get
+  `cursor_close_timeout`, each no longer than what is left 250 ms before
+  the deadline, so App has time for the rest. App closes the client after
+  the beans that use it, the reverse of their creation.
+- The client has no `wait`: it does not stop by itself. A pool that
+  cannot reach the server is no failure of the service; its calls get
+  `Unavailable`, as [the pool](#the-pool-closing-and-statistics) says.
 
 ## Logs
 

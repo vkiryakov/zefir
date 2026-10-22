@@ -23,7 +23,7 @@ const Harness = struct {
     pub fn setUp(h: *Harness, io: std.Io, gpa: std.mem.Allocator) !conformance.Pair {
         _ = io;
         h.fake = .init(gpa, .{});
-        h.bus = try .init(gpa, h.fake.conn(), .{});
+        h.bus = try .initConn(gpa, h.fake.conn(), .{});
         return .{ .client = h.bus.clientTransport(), .server = h.bus.serverTransport() };
     }
 
@@ -93,7 +93,7 @@ const Stage = struct {
         const io = testing.io;
         s.fake = .init(testing.allocator, .{});
         errdefer s.fake.deinit(io);
-        s.bus = try .init(testing.allocator, s.fake.conn(), .{});
+        s.bus = try .initConn(testing.allocator, s.fake.conn(), .{});
         errdefer s.bus.deinit(io);
         const methods = [_]rpc.Method{.{ .route = echo_route, .handler = .{ .ptr = &s.state, .handle = Seen.handle } }};
         s.server = try .init(testing.allocator, .{ .transport = s.bus.serverTransport(), .methods = &methods });

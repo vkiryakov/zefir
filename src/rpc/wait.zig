@@ -33,7 +33,7 @@ pub fn untilSet(event: *std.Io.Event, io: std.Io, deadline: core.Deadline) (std.
 
 const testing = std.testing;
 
-fn far(io: std.Io) core.Deadline {
+fn ages(io: std.Io) core.Deadline {
     // About 35 000 years: one wait that long overflows on some targets (see
     // `max_step`).
     return .after(std.Io.Clock.awake.now(io), .fromSeconds(1 << 40));
@@ -64,12 +64,12 @@ test "an event set by another task ends a wait with a far deadline" {
     var event: std.Io.Event = .unset;
     var setter = try io.concurrent(setLater, .{ &event, io });
     defer setter.cancel(io) catch {};
-    try untilSet(&event, io, far(io));
+    try untilSet(&event, io, ages(io));
     try setter.await(io);
 }
 
 fn waitForCancel(event: *std.Io.Event, io: std.Io) !void {
-    untilSet(event, io, far(io)) catch |err| switch (err) {
+    untilSet(event, io, ages(io)) catch |err| switch (err) {
         error.Canceled => {
             // A real cancelation: recancel re-arms it (in Debug it checks
             // that one came), and the next cancelation point sees it.
@@ -87,4 +87,10 @@ test "canceling the task ends the wait with Canceled" {
     var waiter = try io.concurrent(waitForCancel, .{ &event, io });
     try io.sleep(.fromMilliseconds(10), .awake);
     try testing.expectError(error.Canceled, waiter.cancel(io));
+}
+
+/// For the module's tests: a deadline 30 s away, for a test that only
+/// needs a stop.
+pub fn far(io: std.Io) std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(30), .clock = .awake });
 }

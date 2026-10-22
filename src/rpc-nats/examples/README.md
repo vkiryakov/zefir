@@ -81,6 +81,7 @@ sequenceDiagram
 - [Installation](#installation)
 - [Getting started](#getting-started)
 - [The transport](#the-transport)
+- [Under zefir.App](#under-zefirapp)
 - [Permissions](#permissions)
 - [The NATS CLI](#the-nats-cli)
 - [On the wire](#on-the-wire)
@@ -91,7 +92,8 @@ sequenceDiagram
 Examples that `zig build e2e` in `tests/rpc-nats` builds and runs against
 the NATS servers of the repository's `docker-compose.yml`, checking what
 they print against this guide:
-[the users service on NATS](getting_started.zig) · [two services with permissions of their own](two_services.zig)
+[the users service on NATS](getting_started.zig) · [two services with permissions of their own](two_services.zig) ·
+[the users service under zefir.App](app.zig)
 
 ## Installation
 
@@ -241,22 +243,22 @@ pub fn main(init: std.process.Init) !void {
     const io = rt.io();
     const gpa = init.gpa;
 
-    // The connection to NATS, which the program owns; the adapter gives the
-    // transport what it needs of it; the transport carries the calls of the
-    // server and of the clients alike. Each stays where it is from here on.
+    // The connection to NATS, which the program owns, and the transport on
+    // it, which carries the calls of the server and of the clients alike.
+    // Each stays where it is from here on.
     var nc: nats.Client = try .init(gpa, io, .{ .servers = &.{config.nats.url}, .name = "user-service" });
     defer nc.deinit();
     try nc.connect();
-    var adapter: rpc_nats.ZefirNats = .{ .client = &nc };
-    var bus: rpc_nats.Transport = try .init(gpa, adapter.conn(), .{});
+    var bus: rpc_nats.Transport = try .init(gpa, &nc, .{});
     defer bus.deinit(io); // after the server's deinit, before the connection's
 
     var repo: users.UserRepository = .init(gpa);
     defer repo.deinit();
     var handler: users.UserHandler = .{ .repo = &repo };
     var server = try rpc.Server.init(gpa, .{
-        .transport = bus.serverTransport(),
         .handlers = .{&handler},
+    }, .{
+        .transport = bus.serverTransport(),
     });
     defer server.deinit(io);
     // Subscribes to users.v1.createUser and the other methods; returns once
@@ -264,7 +266,7 @@ pub fn main(init: std.process.Init) !void {
     try server.start(io);
     app.info("Serving", .{ .service = "users", .version = 1 });
 
-    var client = try rpc.Client.init(gpa, .{ .transport = bus.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = bus.clientTransport() });
     defer client.deinit();
 
     var created = try client.call(io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
@@ -304,14 +306,12 @@ What is new, next to the memory transport of the guide of rpc:
   it, and it stays where it is from then on. The
   [guide of nats](../../nats/examples/README.md) has all of its options:
   servers, reconnects, limits.
-- **The adapter.** `rpc_nats.ZefirNats` gives the transport the six
-  operations it needs of a connection (publish, subscribe, next message,
-  flush, drain, unsubscribe). One adapter serves one transport: a second
-  `adapter.conn()` panics in safe builds, and a second transport on the
-  same connection takes an adapter of its own.
 - **The transport.** `rpc_nats.Transport` is both sides of rpc on that
   connection: `serverTransport()` for `rpc.Server`, `clientTransport()` for
-  `rpc.Client`. Its `deinit` comes after the server's and before the
+  `rpc.Client`. Its `init` makes an adapter of zefir-nats,
+  `rpc_nats.ZefirNats`, which gives the transport the six operations it
+  needs of a connection (publish, subscribe, next message, flush, drain,
+  unsubscribe). Its `deinit` comes after the server's and before the
   connection's.
 - **The runtime.** Everything runs on the `std.Io` of zio, `rt.io()`; the
   logger takes `init.io`, so that any thread may log.
@@ -339,7 +339,7 @@ its calls: time to call it from [the NATS CLI](#the-nats-cli).
 
 ## The transport
 
-`rpc_nats.Transport.init(gpa, adapter.conn(), options)` copies its options;
+`rpc_nats.Transport.init(gpa, &nc, options)` copies its options;
 nothing happens on the network until the server starts or the first call
 goes out.
 
@@ -366,8 +366,186 @@ The values are typed here, so `.flush_timeout = .fromSeconds(2)` works.
   client in another language, is served as well, without metadata and
   with the method's own deadline.
 - The transport never closes the connection; `deinit` the transport, then
-  the connection. A second transport on the same connection takes an
-  adapter of its own.
+  the connection. A second transport on the same connection is one more
+  `init`, with an adapter of its own.
+
+## Under zefir.App
+
+A service with more than one server, or with clients of NATS and MongoDB
+next to its server, hands their lifecycle to `zefir.App` of zefir-core:
+App builds the beans of the service out of modules, starts them in order,
+watches them, and stops them all within one deadline. The guides of the
+modules write it `core.App`: it is `zefir.App` of the umbrella module.
+[The guide of rpc](../../rpc/examples/README.md#under-zefirapp) shows App
+on the memory transport.
+
+Here is the service of [Getting started](#getting-started) under App. The
+struct of factories `Nats` makes the connection, from the config that
+`main` hands to `init`, and the transport on it; `Servers` makes the
+server, of the handlers of the module, and a client. The repository is a
+provider and the handler a handler, as in the guide of rpc; App passes the
+parameters of every factory by their types:
+
+```zig
+//! The users service of the guide of rpc under zefir.App, on NATS: a module
+//! declares the connection to NATS, the transport of rpc on it, the
+//! repository and the handler, the server and a client; App builds them in
+//! the order of their dependencies, connects to NATS, starts the server,
+//! and stops it all in the reverse order. A real client lives in another
+//! service, with a connection of its own; here both share one.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_NATS_URL   the NATS server; nats://127.0.0.1:4222 by default
+//!
+//! In tests/rpc-nats, `zig build example-app` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const nats = @import("nats");
+const rpc = @import("rpc");
+const rpc_nats = @import("rpc-nats");
+const zio = @import("zio");
+const api = @import("users-api");
+const users = @import("users-service");
+
+/// App, the NATS client and the transport log through std.log; this sends
+/// their records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
+/// What App builds: the repository and the handler of the users service,
+/// and the connection, the transport, the server and a client, which
+/// factories make.
+pub const AppModule = struct {
+    pub const module: core.app.Module = .{
+        .providers = &.{users.UserRepository},
+        .handlers = &.{users.UserHandler},
+        .factories = &.{ Nats, Servers },
+        .values = &.{*const Config},
+    };
+
+    pub const Nats = struct {
+        /// The connection to NATS: App connects it (`start`) before the
+        /// beans that take it, watches it (`wait`), and drains it
+        /// (`shutdown`) after them.
+        pub fn natsClient(gpa: std.mem.Allocator, io: std.Io, config: *const Config) !nats.Client {
+            return .init(gpa, io, .{ .servers = &.{config.nats.url}, .name = "user-service" });
+        }
+
+        /// The transport of rpc on that connection. Its start, drain and
+        /// close belong to the server: App only builds and frees it.
+        pub fn bus(gpa: std.mem.Allocator, client: *nats.Client) !rpc_nats.Transport {
+            return .init(gpa, client, .{});
+        }
+    };
+
+    pub const Servers = struct {
+        /// The server of the handlers of the module, on the transport.
+        pub fn rpcServer(gpa: std.mem.Allocator, transport: *rpc_nats.Transport, handlers: core.app.Handlers(AppModule)) !rpc.Server {
+            return .init(gpa, .{ .handlers = handlers }, .{ .transport = transport.serverTransport() });
+        }
+
+        /// A client of the service, as another service has one.
+        pub fn usersClient(gpa: std.mem.Allocator, transport: *rpc_nats.Transport) !rpc.Client {
+            return .init(gpa, .{}, .{ .transport = transport.clientTransport() });
+        }
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    // The logger outlives the runtime, so it takes `init.io`, through
+    // which the tasks of the runtime may log too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app_log = logger.scoped("app");
+
+    // One runtime for the program: App, the NATS client, the transport and
+    // the server run their tasks on it.
+    const rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Builds the beans, connects to NATS and starts the server: it takes
+    // calls once start returns. App's own deinit comes before the
+    // runtime's.
+    var app = try core.App(AppModule).init(init.gpa, io, .{&config}, .{});
+    defer app.deinit();
+    try app.start();
+
+    const client: *rpc.Client = app.get(rpc.Client);
+    var created = try client.call(io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
+    defer created.deinit();
+    switch (created.outcome) {
+        .ok => |user| app_log.info("User created", .{ .id = user.id, .name = user.name }),
+        .failure => |failure| app_log.warn("Call failed", .{ .code = failure.code, .app_code = failure.app_code }),
+    }
+
+    // What a signal does in a service: App asks the server to stop, shuts
+    // it down, then drains the connection, all within its
+    // shutdown_timeout, and wait returns.
+    app.requestStop();
+    try app.wait();
+    app_log.info("Stopped", .{ .state = app.state() });
+}
+```
+
+```text
+$ zig build run
+2026-10-22T01:33:30.242Z INFO  [zefir_app] AppModule.Nats.natsClient started
+2026-10-22T01:33:30.245Z INFO  [zefir_app] AppModule.Servers.rpcServer started
+2026-10-22T01:33:30.248Z INFO  [app] User created id=1 name="Ada Lovelace"
+2026-10-22T01:33:30.248Z INFO  [zefir_app] stopping
+2026-10-22T01:33:30.250Z INFO  [zefir_app] AppModule.Servers.rpcServer stopped
+2026-10-22T01:33:30.257Z INFO  [zefir_app] AppModule.Nats.natsClient stopped
+2026-10-22T01:33:30.257Z INFO  [zefir_app] stopped
+2026-10-22T01:33:30.257Z INFO  [app] Stopped state=stopped
+```
+
+- **The order.** App builds the connection first and the transport on it,
+  then the server and the client, which take the transport; it starts
+  them in that order and stops them in the reverse one. The `start` of
+  the connection is its `connect`, so the server starts on a connected
+  client; the stop shuts the server down first, and only then drains the
+  connection (`shutdown` of `nats.Client`), after the last responses went
+  out.
+- **The transport is a bean that App does not drive.** It declares
+  `pub const app_lifecycle = false;`: App builds and frees it, and its
+  start, drain and close stay with the server, as without App.
+  `Transport.init(gpa, client, options)` takes the client and makes the
+  adapter of zefir-nats on the heap, so the factory is one line.
+- **A broker that goes away.** While the connection reconnects, the
+  server is not ready, `app.isReady()` is false, and App waits. When the
+  client gives up, after `reconnect.max_attempts` failed attempts, its
+  `wait` returns `error.ReconnectFailed`, the server's subscriptions end
+  with `error.Unavailable`, and App stops the service: `app.wait()`
+  returns one of the two errors, and `app.failure()` names the bean that
+  told App first. With the default `reconnect` the client never gives up.
+
+Under App the adapter keeps the default queue of every subscription,
+`pending` of `rpc_nats.ZefirNats`: 4352 messages, as many as a server
+holds calls at once under the default `rpc.Limits` (see
+[Memory](#memory)). A service that raises the limits of its server gives
+the queues the same room: a factory makes the adapter, a bean of its own
+with `.pending = .{ .messages = n }`, and the factory of the transport
+takes `*rpc_nats.ZefirNats` and returns
+`rpc_nats.Transport.initConn(gpa, adapter.conn(), .{})`.
 
 ## Permissions
 
@@ -519,14 +697,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer users_nc.deinit();
     try users_nc.connect();
-    var users_adapter: rpc_nats.ZefirNats = .{ .client = &users_nc };
-    var users_bus: rpc_nats.Transport = try .init(gpa, users_adapter.conn(), .{ .inbox_prefix = "_INBOX_users" });
+    var users_bus: rpc_nats.Transport = try .init(gpa, &users_nc, .{ .inbox_prefix = "_INBOX_users" });
     defer users_bus.deinit(io);
     var repo: users.UserRepository = .init(gpa);
     defer repo.deinit();
     _ = try repo.insert(.root, io, init.arena.allocator(), "Ada Lovelace", "ada@example.com");
     var handler: users.UserHandler = .{ .repo = &repo };
-    var server = try rpc.Server.init(gpa, .{ .transport = users_bus.serverTransport(), .handlers = .{&handler} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&handler} }, .{ .transport = users_bus.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
     logger.scoped("users").info("Serving", .{ .nats_user = config.users.nats_user });
@@ -539,21 +716,19 @@ pub fn main(init: std.process.Init) !void {
     });
     defer orders_nc.deinit();
     try orders_nc.connect();
-    var orders_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
-    var orders_bus: rpc_nats.Transport = try .init(gpa, orders_adapter.conn(), .{ .inbox_prefix = "_INBOX_orders" });
+    var orders_bus: rpc_nats.Transport = try .init(gpa, &orders_nc, .{ .inbox_prefix = "_INBOX_orders" });
     defer orders_bus.deinit(io);
-    var client = try rpc.Client.init(gpa, .{ .transport = orders_bus.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = orders_bus.clientTransport() });
     defer client.deinit();
     const orders_log = logger.scoped("orders");
     try getUser(&client, io, orders_log, "_INBOX_orders");
 
     // The same NATS user with the default inbox, _INBOX: the broker refuses
     // the subscription, and the first call says so. A second transport on
-    // one connection takes an adapter of its own.
-    var default_adapter: rpc_nats.ZefirNats = .{ .client = &orders_nc };
-    var default_bus: rpc_nats.Transport = try .init(gpa, default_adapter.conn(), .{});
+    // one connection makes an adapter of its own, as every init does.
+    var default_bus: rpc_nats.Transport = try .init(gpa, &orders_nc, .{});
     defer default_bus.deinit(io);
-    var default_client = try rpc.Client.init(gpa, .{ .transport = default_bus.clientTransport() });
+    var default_client = try rpc.Client.init(gpa, .{}, .{ .transport = default_bus.clientTransport() });
     defer default_client.deinit();
     try getUser(&default_client, io, orders_log, "_INBOX");
 }
@@ -819,14 +994,15 @@ does not fit is dropped as a slow consumer, logged, and counted in
 messages as the server holds calls at once (`max_inflight` of
 `rpc.Limits`, 4352) and up to `limits.subscription_bytes` of the
 connection, 8 MiB: a server of R routes in C contracts, with its client's
-inbox, has R + 9 × C + 1 of them. `pending` of `rpc_nats.ZefirNats` sets
-other numbers.
+inbox, has R + 9 × C + 1 of them. An adapter of your own sets other
+numbers: `rpc_nats.ZefirNats` with its `pending`, whose `conn()` goes to
+`rpc_nats.Transport.initConn` in place of `init`.
 
 ## Tests and other NATS libraries
 
 **Tests without a broker.** `rpc_nats.testing.FakeConn` is a NATS server
-in memory with one connection to it: its `fake.conn()` goes where
-`adapter.conn()` goes, so a test runs the transport and the services on it
+in memory with one connection to it: `rpc_nats.Transport.initConn` takes
+its `fake.conn()`, so a test runs the transport and the services on it
 without a network or Docker. Its options deny subjects to publish to or
 subscribe to (`.deny_publish`, `.deny_subscribe`), and its hooks drop the
 link and bring it back (`disconnect`, `reconnect`), close it for good
@@ -839,7 +1015,8 @@ transport.
 **Another NATS library.** The transport sees NATS only through
 `rpc_nats.Conn`: six operations (`publish`, `subscribe`, `next`, `drain`,
 `unsubscribe`, `flush`) and `isConnected`, which an adapter of the library
-fills in and hands out with `rpc_nats.Conn.init(&adapter)`.
+fills in and hands out with `rpc_nats.Conn.init(&adapter)`, for
+`rpc_nats.Transport.initConn`.
 `rpc_nats.ZefirNats` is the one for zefir-nats; the doc of
 [`Conn.zig`](../Conn.zig) lists the rules that an adapter of another
 library keeps. Subjects, headers, statuses and the budget stay in the

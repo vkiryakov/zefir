@@ -98,6 +98,11 @@
 //! such check: a batch of `getMore` has moved the cursor on the server
 //! already. Each call starts the caller's `Diagnostics` afresh.
 //!
+//! Under zefir.App the client is a bean of its own: `start` is `connect`
+//! under a deadline of `Options.start_timeout`, which logs why it failed,
+//! and `shutdown` is `close` by the deadline of App's stop. `connect` and
+//! `close` stay for direct use.
+//!
 //! After `connect` the client must stay where it is, and every call comes
 //! on the `io` of `init`: in safe builds, a call on a moved copy of the
 //! client or on another `std.Io`, a cursor used by two tasks at once, and
@@ -226,6 +231,38 @@ pub fn connect(self: *Client, io: Io, ctx: core.Context, diagnostics: ?*Diagnost
 /// call returns once the first is done. The task's cancelation waits until
 /// it returns.
 pub fn close(self: *Client, io: Io) void {
+    self.closeBy(io, null);
+}
+
+/// For zefir.App, which starts the client before the beans that take it:
+/// `connect` under a deadline `Options.start_timeout` away. Why it failed
+/// goes to the log, as a warning: under App no caller gets the
+/// `Diagnostics`. A program that wants them calls `connect`.
+pub fn start(self: *Client, io: Io) mongo.Error!void {
+    var diagnostics: Diagnostics = .{};
+    const ctx = core.Context.root.withDeadline(.after(time.now(io), self.options.start_timeout));
+    self.connect(io, ctx, &diagnostics) catch |err| {
+        log.warn("start failed: error.{t}: {s}", .{ err, diagnostics.message() });
+        return err;
+    };
+}
+
+/// For zefir.App, which stops the client after the beans that use it:
+/// `close` by `deadline`. The calls in flight get `close_timeout` to end,
+/// then the `killCursors` get `cursor_close_timeout`, each cut so that it
+/// ends 250 ms before `deadline` at the latest, and the client is closed
+/// when it returns. As a second `close`, it returns once the first is done.
+pub fn shutdown(self: *Client, io: Io, deadline: Io.Clock.Timestamp) void {
+    self.closeBy(io, .at(deadline.toClock(io, .awake).raw.subDuration(shutdown_reserve)));
+}
+
+/// How much earlier than its deadline `shutdown` ends its waits, so that
+/// the caller still has time for what comes after it.
+const shutdown_reserve: Io.Duration = .fromMilliseconds(250);
+
+/// `close`, with each of its waits cut to what is left until `due`, when
+/// there is one.
+fn closeBy(self: *Client, io: Io, due: ?core.Deadline) void {
     self.checkUse(io);
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
@@ -234,10 +271,17 @@ pub fn close(self: *Client, io: Io) void {
         return;
     }
     // Only the first close gets here: the pool is drained by it.
-    _ = self.pool.drain(io, self.options.close_timeout);
-    cursor_.closeAll(self.runner(), io);
+    _ = self.pool.drain(io, budgetUntil(io, self.options.close_timeout, due));
+    cursor_.closeAll(self.runner(), io, budgetUntil(io, self.options.cursor_close_timeout, due));
     self.pool.finish(io);
     self.closed.set(io);
+}
+
+/// `limit`, or what is left until `due` when that is less; never below
+/// zero.
+fn budgetUntil(io: Io, limit: Io.Duration, due: ?core.Deadline) Io.Duration {
+    const left = (due orelse return limit).remaining(time.now(io));
+    return if (left.nanoseconds < limit.nanoseconds) left else limit;
 }
 
 /// A snapshot of the connections and the calls waiting for them.

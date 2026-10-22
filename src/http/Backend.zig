@@ -10,7 +10,8 @@
 //! the backend calls `handler.serve` on a task of its own with an
 //! `Exchange`: the parsed head, the body to read, and the functions that
 //! send the response. A backend keeps no pointer into the memory of a
-//! request after its response.
+//! request after its response. A backend that breaks and can serve no
+//! more calls `handler.fail`: the server stops.
 const std = @import("std");
 const h1 = @import("h1/head.zig");
 
@@ -36,6 +37,10 @@ pub const Capabilities = packed struct(u8) {
 /// system is out of something, or the runtime gave it no task.
 pub const StartError = error{ AddressInUse, AccessDenied, SystemResources, OutOfMemory, Unexpected } ||
     std.Io.ConcurrentError || std.Io.Cancelable;
+
+/// Why a backend broke and serves no more: `Unavailable`, it takes no new
+/// requests (its listener failed); `Unexpected`, anything else.
+pub const FatalError = error{ Unavailable, Unexpected };
 
 pub const VTable = struct {
     capabilities: *const fn (ptr: *anyopaque) Capabilities,
@@ -79,12 +84,17 @@ pub fn isReady(b: Backend) bool {
     return b.vtable.isReady(b.ptr);
 }
 
-/// What the backend calls for each request: the server.
+/// What the backend calls for each request, and when it breaks: the
+/// server.
 pub const Handler = struct {
     ptr: *anyopaque,
     /// Serves one request to its end, the response sent or aborted; on a
     /// task of the backend, which may run many at once.
     serve: *const fn (ptr: *anyopaque, io: std.Io, exchange: *Exchange) void,
+    /// The backend broke and serves no more. The server keeps the first
+    /// error, stops as `requestStop` stops it, and its `wait` returns the
+    /// error at once. From any task of the backend; never waits.
+    fail: *const fn (ptr: *anyopaque, io: std.Io, err: FatalError) void,
 };
 
 /// One request and its response, between the backend and the server.

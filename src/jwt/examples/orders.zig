@@ -73,11 +73,12 @@ pub fn main(init: std.process.Init) !void {
     var backend: http.testing.Backend = .init(gpa);
     defer backend.deinit();
     var server = try http.Server.init(gpa, .{
-        .backend = backend.backend(),
-        .prefix = "/api",
         .controllers = .{ &login, &orders },
         .middleware = .{&jwt_auth},
         .error_handler = &app_errors,
+    }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
     });
     defer server.deinit(io);
     try server.start(io);

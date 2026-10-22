@@ -5,12 +5,13 @@
 //! ```zig
 //! var users: UserHandler = .init(&repo);
 //! var server = try rpc.Server.init(gpa, .{
-//!     .transport = bus.serverTransport(),  // rpc_nats.Transport; in tests the memory transport
 //!     .handlers = .{ &users, &orders },     // pointers to handlers, at least one
 //!     // .authenticator = &auth,            // checks the credentials of calls
 //!     // .middleware = .{ mw.logCalls, &limiter }, // around every call
+//! }, .{
+//!     .transport = bus.serverTransport(),  // rpc_nats.Transport; in tests the memory transport
 //!     // .limits = .{ .max_active_tasks = 1024 },
-//!     // .shutdown_grace = std.Io.Duration.fromSeconds(10),
+//!     // .shutdown_grace = .fromSeconds(10),
 //! });
 //! defer server.deinit(io);
 //! try server.run(io); // start and wait; server.requestStop(io) from any task stops it
@@ -55,6 +56,7 @@ const Next = @import("../middleware.zig").Next;
 const Context = @import("../engine/Context.zig").Context;
 const handlers = @import("handlers.zig");
 const method = @import("method.zig");
+const ServerTransport = @import("../ServerTransport.zig");
 
 const Server = @This();
 
@@ -71,9 +73,25 @@ pub const StartError = RawServer.StartError;
 pub const WaitError = RawServer.WaitError;
 pub const ShutdownError = RawServer.ShutdownError;
 
-/// Builds a server from `options`, a struct literal:
+/// The settings of a server, the second argument of `init`.
+pub const Options = struct {
+    /// The server side of a transport, such as `bus.serverTransport()`;
+    /// its owner keeps it until after the server's `deinit`.
+    transport: ServerTransport,
+    /// The limits of the engine, such as `.{ .max_active_tasks = 1024 }`.
+    /// The limit of a call is the `timeout_ms` of its method (3 seconds by
+    /// default), cut to `max_timeout`. `default_timeout` is for methods of
+    /// the engine without a limit of their own and does not apply here:
+    /// `init` lowers it to `max_timeout` when it is above.
+    limits: RawServer.Limits = .{},
+    /// How long calls in flight may run after `requestStop`.
+    shutdown_grace: std.Io.Duration = .fromSeconds(10),
+};
+
+/// Builds a server from its parts and its options.
 ///
-/// - `.transport`: the server side of a transport, `rpc.ServerTransport`;
+/// `parts` is a struct literal of what the compiler checks by type:
+///
 /// - `.handlers`: a tuple of pointers to handlers, at least one: `.{ &users, &orders }`;
 /// - `.authenticator` (optional): a pointer to an object with
 ///   `pub fn authenticate(self: *@This(), ctx: *const rpc.AuthContext) rpc.AuthError!?rpc.IdentityView`;
@@ -84,28 +102,17 @@ pub const ShutdownError = RawServer.ShutdownError;
 ///   names of the handler's fields that hold an object or point to one
 ///   (`.fraud` is `self.fraud`, read on every call). A call runs the
 ///   server's links, then the handler's, then the method's, each level
-///   left to right, and unwinds them in reverse;
-/// - `.limits` (optional): a struct literal of the limits to change, such
-///   as `.{ .max_active_tasks = 1024 }`, or a whole `rpc.Limits`. The limit
-///   of a call is the `timeout_ms` of its method (3 seconds by default),
-///   cut to `max_timeout`. `default_timeout` is for methods of the engine
-///   without a limit of their own and does not apply here; a literal
-///   without it lowers it to a lower `max_timeout`;
-/// - `.shutdown_grace` (optional): how long calls in flight may run after
-///   `requestStop`, 10 seconds by default.
+///   left to right, and unwinds them in reverse.
 ///
-/// Options are `anytype`, so a value inside them has no type to take a
-/// declaration literal from: write `std.Io.Duration.fromSeconds(10)`, not
-/// `.fromSeconds(10)`, also among the limits:
-/// `.limits = .{ .max_timeout = std.Io.Duration.fromSeconds(60) }`.
+/// `options` are its settings, `Options`.
 ///
 /// No I/O and no tasks; memory only for the tables of the engine.
-pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
+pub fn init(gpa: std.mem.Allocator, parts: anytype, options: Options) InitError!Server {
     // The loops below unroll once per method and link.
     @setEvalBranchQuota(handlers.eval_quota);
-    const O = @TypeOf(options);
-    comptime check(O);
-    const Handlers = @FieldType(O, "handlers");
+    const P = @TypeOf(parts);
+    comptime check(P);
+    const Handlers = @FieldType(P, "handlers");
     // The engine copies these lists; they live only until it has.
     const methods = try gpa.alloc(RawServer.Method, comptime methodCount(Handlers));
     defer gpa.free(methods);
@@ -114,7 +121,7 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
     var next_method: usize = 0;
     var next_link: usize = 0;
     inline for (@typeInfo(Handlers).@"struct".field_names) |field| {
-        const handler = @field(options.handlers, field);
+        const handler = @field(parts.handlers, field);
         const T = @typeInfo(@TypeOf(handler)).pointer.child;
         const Impl = T.rpc_handler;
         const C = @TypeOf(Impl.api);
@@ -140,15 +147,23 @@ pub fn init(gpa: std.mem.Allocator, options: anytype) InitError!Server {
             next_method += 1;
         }
     }
-    const ServerLinks = if (@hasField(O, "middleware")) @FieldType(O, "middleware") else @TypeOf(.{});
+    const ServerLinks = if (@hasField(P, "middleware")) @FieldType(P, "middleware") else @TypeOf(.{});
     var server_links: [@typeInfo(ServerLinks).@"struct".field_names.len]Middleware = undefined;
-    if (@hasField(O, "middleware")) {
-        inline for (@typeInfo(ServerLinks).@"struct".field_names, &server_links) |item, *link| link.* = .of(@field(options.middleware, item));
+    if (@hasField(P, "middleware")) {
+        inline for (@typeInfo(ServerLinks).@"struct".field_names, &server_links) |item, *link| link.* = .of(@field(parts.middleware, item));
     }
-    var engine_options: RawServer.Options = .{ .transport = options.transport, .methods = methods, .middleware = &server_links };
-    if (comptime handlers.hasAuthenticator(O)) engine_options.authenticator = Authenticator.init(options.authenticator);
-    if (@hasField(O, "limits")) engine_options.limits = limitsOf(options.limits);
-    if (@hasField(O, "shutdown_grace")) engine_options.shutdown_grace = options.shutdown_grace;
+    // No method of rpc.Server uses the default, and the engine refuses one
+    // over the maximum.
+    var limits = options.limits;
+    limits.default_timeout.nanoseconds = @min(limits.default_timeout.nanoseconds, limits.max_timeout.nanoseconds);
+    var engine_options: RawServer.Options = .{
+        .transport = options.transport,
+        .methods = methods,
+        .middleware = &server_links,
+        .limits = limits,
+        .shutdown_grace = options.shutdown_grace,
+    };
+    if (comptime handlers.hasAuthenticator(P)) engine_options.authenticator = Authenticator.init(parts.authenticator);
     return .{ .engine = try .init(gpa, engine_options) };
 }
 
@@ -166,23 +181,8 @@ fn handlerLink(comptime T: type, handler: *T, comptime item: anytype) Middleware
     }.run };
 }
 
-/// `given`, `rpc.Limits` or a struct literal of some of its fields, over
-/// the defaults: options are `anytype`, so a literal keeps a type of its
-/// own. A literal without `default_timeout` lowers it to a lower
-/// `max_timeout`: no method of `rpc.Server` uses it, and the engine
-/// refuses a default over the maximum.
-fn limitsOf(given: anytype) RawServer.Limits {
-    const Given = @TypeOf(given);
-    if (Given == RawServer.Limits) return given;
-    var limits: RawServer.Limits = .{};
-    inline for (@typeInfo(Given).@"struct".field_names) |name| @field(limits, name) = @field(given, name);
-    if (!@hasField(Given, "default_timeout"))
-        limits.default_timeout.nanoseconds = @min(limits.default_timeout.nanoseconds, limits.max_timeout.nanoseconds);
-    return limits;
-}
-
-fn check(comptime O: type) void {
-    if (handlers.optionsProblem(O)) |message| @compileError(message);
+fn check(comptime P: type) void {
+    if (handlers.partsProblem(P)) |message| @compileError(message);
 }
 
 /// The methods of all contracts of the handlers of type `Handlers`.
@@ -235,13 +235,15 @@ pub fn requestStop(server: *Server, io: std.Io) void {
     server.engine.requestStop(io);
 }
 
-/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// handlers did not end within `shutdown_grace` and one second more after
-/// they were canceled: the server stays in `draining`. Treat it as fatal
-/// and end the process; `deinit` would wait for such handlers without a
-/// limit.
-pub fn shutdown(server: *Server, io: std.Io) ShutdownError!void {
-    return server.engine.shutdown(io);
+/// `requestStop` and a wait for the stop, which returns 250 ms before
+/// `deadline` at the latest: the deadline cuts `shutdown_grace`, so that
+/// the calls it cancels have time to end (see `rpc.RawServer.shutdown`).
+/// `error.ShutdownTimeout` when a handler still runs a second after its
+/// cancelation, or when the server has not stopped by then, whichever
+/// comes first: the server stays in `draining`. Treat it as fatal and end
+/// the process; `deinit` would wait for such handlers without a limit.
+pub fn shutdown(server: *Server, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {
+    return server.engine.shutdown(io, deadline);
 }
 
 /// Running and the transport's own condition holds. Thread-safe; for

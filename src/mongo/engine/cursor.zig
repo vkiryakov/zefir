@@ -320,11 +320,11 @@ pub const Cursor = struct {
 
 /// For `close` of the client, between `drain` and `finish` of its pool:
 /// every cursor ends, and `killCursors` goes for those that the server
-/// holds, one per namespace with all its ids, within one
-/// `cursor_close_timeout` for all of them. They go on an idle connection
-/// of the pool, and on a new one only when none is idle. The task's
-/// cancelation waits until it is done.
-pub fn closeAll(r: Runner, io: Io) void {
+/// holds, one per namespace with all its ids, within one `budget` for all
+/// of them: `cursor_close_timeout`, or less by the deadline of a
+/// `shutdown`. They go on an idle connection of the pool, and on a new one
+/// only when none is idle. The task's cancelation waits until it is done.
+pub fn closeAll(r: Runner, io: Io, budget: Io.Duration) void {
     const protection = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(protection);
     var arena: std.heap.ArenaAllocator = .init(r.gpa);
@@ -344,7 +344,7 @@ pub fn closeAll(r: Runner, io: Io) void {
     }
     reg.mutex.unlock(io);
     if (kills.items.len == 0) return;
-    const deadline: core.Deadline = .after(time.now(io), r.cursor_close_timeout);
+    const deadline: core.Deadline = .after(time.now(io), budget);
     const entry = r.pool.takeIdle(io) orelse open: {
         var attempt: connect_.Attempt = .{};
         break :open r.opener.open(r.opener.context, io, .{ .deadline = deadline, .checkout = deadline }, &attempt, null) catch return;

@@ -98,12 +98,13 @@ const App = struct {
         app.origins = .{app.config.cors_origin};
         app.cors = .{ .origins = &app.origins };
         app.server = try .init(testing.allocator, .{
-            .backend = app.backend.backend(),
-            .prefix = "/api",
             .controllers = .{ &app.todos_v1, &app.health },
             // CORS first: a preflight needs no user.
             .middleware = .{ &app.cors, &app.token_auth },
             .error_handler = &app.app_errors,
+        }, .{
+            .listen = .{ .backend = app.backend.backend() },
+            .prefix = "/api",
         });
         app.server.start(testing.io) catch |err| {
             app.server.deinit(testing.io);

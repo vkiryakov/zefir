@@ -34,6 +34,6 @@ test {
     var memory: rpc.testing.MemoryTransport = try .init(std.testing.allocator, .{});
     defer memory.deinit(std.testing.io);
     var users: UserHandler = .{};
-    var server: rpc.Server = try .init(std.testing.allocator, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server: rpc.Server = try .init(std.testing.allocator, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(std.testing.io);
 }

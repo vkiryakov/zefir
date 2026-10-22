@@ -24,6 +24,6 @@ test {
     var timing: Timing = .{};
     var backend: http.testing.Backend = .init(std.testing.allocator);
     defer backend.deinit();
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&users}, .middleware = .{&timing} });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&users}, .middleware = .{&timing} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(std.testing.io);
 }

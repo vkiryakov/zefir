@@ -46,9 +46,13 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "route_negative_timeout.zig", .expect = "zefir.http: http.get(\"/export.csv\"): .timeout is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(300), or null for no deadline" },
     .{ .file = dir ++ "sse_zero_heartbeat.zig", .expect = "zefir.http: http.sse.get(\"/events\"): .heartbeat is a std.Io.Duration above zero, such as std.Io.Duration.fromSeconds(15), or null for none" },
     .{ .file = dir ++ "methods_not_route.zig", .expect = "zefir.http: http.routes: .methods.get must be a route, such as http.get(\"/{id}\", .{})" },
-    .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown option .contollers" },
-    .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "zefir.http: Server.init: UnknownFieldsOptions has no option .bdy" },
-    .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "zefir.http: Server.init: .trusted_proxies is .all, .private, .none or .{ .list = &.{\"10.1.0.0/16\"} }" },
+    // The parts of Server.init, and its typed options, which Zig checks.
+    .{ .file = dir ++ "server_unknown_option.zig", .expect = "zefir.http: Server.init: unknown part .contollers" ++ parts_list },
+    .{ .file = dir ++ "parts_unknown.zig", .expect = "zefir.http: Server.init: unknown part .prefix" ++ parts_list },
+    .{ .file = dir ++ "parts_not_struct.zig", .expect = "zefir.http: Server.init takes a struct literal of parts, got *parts_not_struct.UsersV1Controller" },
+    .{ .file = dir ++ "options_no_listen.zig", .expect = "missing struct field: listen" },
+    .{ .file = dir ++ "server_unknown_nested_option.zig", .expect = "no field named 'bdy' in struct 'Server.UnknownFieldsOptions'" },
+    .{ .file = dir ++ "server_trusted_proxies.zig", .expect = "no field named 'lst' in union 'proxies.TrustedProxies'" },
     // DTOs of the input.
     .{ .file = dir ++ "header_dto_rename.zig", .expect = "zefir.http: header_dto_rename.Headers.field_rules.request_id: v.rename does not apply to headers; field request_id reads the header Request-Id" },
     .{ .file = dir ++ "query_nested_struct.zig", .expect = "zefir.http: query_nested_struct.Query.filter: a struct field comes only from JSON; query, form, path, headers and cookies hold strings" },
@@ -82,6 +86,7 @@ pub const compile_errors = [_]Fixture{
 };
 
 const strict_hint = " (strict error check; .strict_errors = false turns it off)";
+const parts_list = "; the parts are .controllers, .middleware, .error_handler and .strict_errors";
 
 const dir = "src/http/tests/compile_errors/";
 

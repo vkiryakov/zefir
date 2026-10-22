@@ -101,13 +101,17 @@ wait_event: std.Io.Event = .unset,
 /// Set when the server has stopped or the stop ran out of time: `shutdown`
 /// returns.
 shutdown_event: std.Io.Event = .unset,
+/// The earliest deadline a `shutdown` gave, on the awake clock; under
+/// `mutex`. It ends the grace of the stop, and the waits after it, in time.
+deadline: ?core.Deadline = null,
 
 /// Calls from admission until their end.
 inflight: std.atomic.Value(u32) = .init(0),
 /// The memory all calls take now.
 live_bytes: std.atomic.Value(usize) = .init(0),
-/// Set when `inflight` drops to zero. Only the lifecycle task waits on it,
-/// and resets it before it looks at `inflight`.
+/// Set when `inflight` drops to zero, and when a `shutdown` brings a
+/// deadline. Only the lifecycle task waits on it, and resets it before it
+/// looks at `inflight` and the deadline.
 idle: std.Io.Event = .unset,
 /// Calls whose outcome is chosen and whose response has not gone out yet
 /// (a client that gave up gets none): `owe` and `answered`. The stop waits
@@ -312,8 +316,12 @@ pub const ShutdownError = error{ShutdownTimeout} || WaitError;
 
 /// How long the stop waits for the calls it ended to answer before it
 /// closes the transport, and, once the transport has closed, for the calls
-/// it canceled to end.
+/// it canceled to end: a deadline ends the grace twice this much earlier.
 const cancel_budget: std.Io.Duration = .fromSeconds(1);
+
+/// How much earlier than its deadline `shutdown` returns, so that the
+/// caller still has time for what comes after it.
+const shutdown_reserve: std.Io.Duration = .fromMilliseconds(250);
 
 const log = std.log.scoped(.rpc);
 
@@ -383,27 +391,65 @@ pub fn run(server: *RawServer, io: std.Io) (StartError || WaitError)!void {
 
 /// Begins a graceful stop. From any task, also from a handler; never
 /// waits; a second call does nothing. The server drains its transport,
-/// lets the calls in flight run for `shutdown_grace`, cancels the rest,
-/// closes the transport once their failures have gone out (one second at
-/// most) and stops.
+/// lets the calls in flight run for `shutdown_grace` (less, by the
+/// deadline of a `shutdown`), cancels the rest, closes the transport once
+/// their failures have gone out (one second at most) and stops.
 pub fn requestStop(server: *RawServer, io: std.Io) void {
     server.mutex.lockUncancelable(io);
     defer server.mutex.unlock(io);
     server.stopLocked(io);
 }
 
-/// `requestStop` and a wait for the stop. `error.ShutdownTimeout` when
-/// handlers did not end within `shutdown_grace` and one second more after
-/// they were canceled: the server stays in `draining`. Treat it as fatal
-/// and end the process; `deinit` would wait for such handlers without a
-/// limit.
-pub fn shutdown(server: *RawServer, io: std.Io) ShutdownError!void {
+/// `requestStop` and a wait for the stop, which returns 250 ms before
+/// `deadline` at the latest. The deadline cuts `shutdown_grace`, also a
+/// grace that began before this call: the grace ends by `deadline` less
+/// two seconds and those 250 ms, the time of the two waits that come after
+/// it (one second each), so that the caller has time for what comes after
+/// the stop. Closing the transport keeps its own limit. Of several calls
+/// the earliest deadline counts.
+///
+/// `error.ShutdownTimeout` when a handler still runs a second after its
+/// cancelation, or when the server has not stopped 250 ms before
+/// `deadline`, whichever comes first: a handler that ignores its
+/// cancelation, or a transport slow to close. The server stays in
+/// `draining`. Treat it as fatal and end the process;
+/// `deinit` would wait for such handlers without a limit. Once stopped,
+/// the error of a transport that broke, as `wait` returns it.
+pub fn shutdown(server: *RawServer, io: std.Io, deadline: std.Io.Clock.Timestamp) ShutdownError!void {
+    const due: core.Deadline = .at(deadline.toClock(io, .awake).raw);
+    server.limitGrace(io, due);
     server.requestStop(io);
-    try server.shutdown_event.wait(io);
+    waiting.untilSet(&server.shutdown_event, io, before(due, shutdown_reserve)) catch |err| switch (err) {
+        error.Timeout => return error.ShutdownTimeout,
+        error.Canceled => |e| return e,
+    };
     server.mutex.lockUncancelable(io);
     defer server.mutex.unlock(io);
     if (server.state_value.load(.monotonic) != .stopped) return error.ShutdownTimeout;
     if (server.fatal) |err| return err;
+}
+
+/// Keeps the earliest deadline of a `shutdown` and wakes the lifecycle
+/// task, whose grace it may cut.
+fn limitGrace(server: *RawServer, io: std.Io, due: core.Deadline) void {
+    {
+        server.mutex.lockUncancelable(io);
+        defer server.mutex.unlock(io);
+        server.deadline = if (server.deadline) |given| given.earliest(due) else due;
+    }
+    server.idle.set(io);
+}
+
+/// The deadline of a `shutdown`, if one came.
+fn dueDeadline(server: *RawServer, io: std.Io) ?core.Deadline {
+    server.mutex.lockUncancelable(io);
+    defer server.mutex.unlock(io);
+    return server.deadline;
+}
+
+/// `due`, `by` earlier.
+fn before(due: core.Deadline, by: std.Io.Duration) core.Deadline {
+    return .{ .expires = .{ .nanoseconds = due.expires.nanoseconds -| by.nanoseconds } };
 }
 
 /// Running and the transport's own condition holds. Thread-safe; for
@@ -480,14 +526,14 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
     server.start_done.waitUncancelable(io);
     if (server.rollback) return;
 
-    const grace_end: core.Deadline = .after(now(io), server.shutdown_grace);
+    const began = now(io);
     server.server_transport.drain(io);
-    _ = server.waitIdle(io, grace_end);
+    server.waitGrace(io, began);
     server.endGrace(io);
     // The calls it ended send their failures before the transport closes:
     // after the close, their clients would lose them. A deaf handler does
     // not hold this up: its failure goes out before it is canceled.
-    _ = waitZero(io, &server.owed, &server.all_answered, .after(now(io), cancel_budget));
+    _ = waitZero(io, &server.owed, &server.all_answered, server.budgetEnd(io));
     server.server_transport.close(io);
     {
         // Since the grace ended, `start` refuses a call at once and no
@@ -496,7 +542,7 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
         defer server.mutex.unlock(io);
         std.debug.assert(server.queued == 0 and server.queue.first == null);
     }
-    if (!server.waitIdle(io, .after(now(io), cancel_budget))) {
+    if (!server.waitIdle(io, server.budgetEnd(io))) {
         // Handlers that ignore cancelation: `shutdown` returns
         // `ShutdownTimeout` while the server stays in draining, and the
         // stop goes on without a limit.
@@ -513,6 +559,42 @@ fn runLifecycle(server: *RawServer, io: std.Io) void {
 /// is. Only the lifecycle task calls it.
 fn waitIdle(server: *RawServer, io: std.Io, deadline: ?core.Deadline) bool {
     return waitZero(io, &server.inflight, &server.idle, deadline);
+}
+
+/// Waits until no call is in flight or the grace of the stop that `began`
+/// ends; a deadline of a `shutdown` that comes meanwhile wakes it to cut
+/// the grace. Only the lifecycle task calls it.
+fn waitGrace(server: *RawServer, io: std.Io, began: std.Io.Timestamp) void {
+    while (true) {
+        server.idle.reset();
+        // A read-modify-write, as in `waitZero`.
+        if (server.inflight.fetchAdd(0, .acq_rel) == 0) return;
+        waiting.untilSet(&server.idle, io, server.graceEnd(io, began)) catch |err| switch (err) {
+            error.Timeout => return,
+            // The lifecycle task waits with cancelation blocked.
+            error.Canceled => unreachable,
+        };
+    }
+}
+
+/// The end of the grace of the stop that `began`: `shutdown_grace` later,
+/// or earlier by the deadline of a `shutdown`, which keeps the two waits
+/// after the grace and the reserve of `shutdown`; never before `began`.
+fn graceEnd(server: *RawServer, io: std.Io, began: std.Io.Timestamp) core.Deadline {
+    const grace: core.Deadline = .after(began, server.shutdown_grace);
+    const due = server.dueDeadline(io) orelse return grace;
+    const after_grace: std.Io.Duration = .{ .nanoseconds = 2 * cancel_budget.nanoseconds + shutdown_reserve.nanoseconds };
+    const cut = before(due, after_grace);
+    if (cut.expires.nanoseconds < began.nanoseconds) return .at(began);
+    return grace.earliest(cut);
+}
+
+/// The end of a wait after the grace: `cancel_budget` from now, or the
+/// reserve before the deadline of a `shutdown`, whichever comes first.
+fn budgetEnd(server: *RawServer, io: std.Io) core.Deadline {
+    const budget: core.Deadline = .after(now(io), cancel_budget);
+    const due = server.dueDeadline(io) orelse return budget;
+    return budget.earliest(before(due, shutdown_reserve));
 }
 
 /// Waits until `count` is zero or `deadline` passes; true when it is zero.
@@ -1088,7 +1170,7 @@ test "lifecycle: a server that never starts" {
     try testing.expectEqual(State.stopped, server.state());
     try testing.expectError(error.InvalidState, server.start(io));
     try server.wait(io);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
     server.requestStop(io);
     try testing.expectEqualSlices(FakeTransport.Step, &.{}, fake.recorded());
 }
@@ -1116,7 +1198,7 @@ test "lifecycle: start, requestStop and wait drain the transport, then close it"
     try testing.expectError(error.InvalidState, server.start(io));
     server.requestStop(io);
     try server.wait(io);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "lifecycle: a transport that does not start leaves the server stopped" {
@@ -1174,7 +1256,7 @@ test "lifecycle: a broken transport wakes wait with its error, and the server st
     fake.dispatcher_value.?.fail(io, error.AccessDenied, null);
     try testing.expectError(error.Unavailable, server.wait(io));
     try testing.expect(server.state() == .draining or server.state() == .stopped);
-    try testing.expectError(error.Unavailable, server.shutdown(io));
+    try testing.expectError(error.Unavailable, server.shutdown(io, waiting.far(io)));
     try testing.expectEqual(State.stopped, server.state());
     try testing.expectError(error.Unavailable, server.wait(io));
     try testing.expectEqualSlices(FakeTransport.Step, &.{ .start, .drain, .close }, fake.recorded());
@@ -1211,7 +1293,7 @@ test "lifecycle: canceling wait does not stop the server" {
     try io.sleep(.fromMilliseconds(10), .awake);
     try testing.expectError(error.Canceled, waiter.cancel(io));
     try testing.expectEqual(State.running, server.state());
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
     try testing.expectEqual(State.stopped, server.state());
 }
 

@@ -13,6 +13,7 @@ const OwnedOptions = @This();
 uri: Uri,
 /// The copy of `Options.password`.
 password: ?[]u8,
+start_timeout: Duration,
 close_timeout: Duration,
 cursor_close_timeout: Duration,
 
@@ -31,6 +32,7 @@ pub const Credentials = struct {
 
 pub fn init(gpa: Allocator, options: Options) Error!OwnedOptions {
     const d = options.diagnostics;
+    if (options.start_timeout.nanoseconds <= 0) return fail(d, "start_timeout is not above zero: start would fail at once", .{});
     if (options.close_timeout.nanoseconds < 0) return fail(d, "close_timeout is negative; 0 cuts the operations in flight at once", .{});
     if (options.cursor_close_timeout.nanoseconds < 0) return fail(d, "cursor_close_timeout is negative", .{});
     var uri = try Uri.parse(gpa, options.uri, d);
@@ -45,6 +47,7 @@ pub fn init(gpa: Allocator, options: Options) Error!OwnedOptions {
     return .{
         .uri = uri,
         .password = password,
+        .start_timeout = options.start_timeout,
         .close_timeout = options.close_timeout,
         .cursor_close_timeout = options.cursor_close_timeout,
     };
@@ -93,6 +96,7 @@ test "the copy holds everything the caller may free" {
     try testing.expectEqualStrings("db.internal", owned.uri.host);
     try testing.expectEqual(@as(u16, 27018), owned.uri.port);
     try testing.expectEqualStrings("orders", owned.uri.app_name.?);
+    try testing.expectEqual(Duration.fromSeconds(10), owned.start_timeout);
     try testing.expectEqual(Duration.fromSeconds(2), owned.close_timeout);
     try testing.expectEqual(Duration.fromSeconds(1), owned.cursor_close_timeout);
     const c = owned.credentials().?;
@@ -129,6 +133,7 @@ test "a password given twice, a password without a user and a user without a pas
         .{ .{ .uri = "mongodb://app:one@host", .password = "two" }, "the password is given twice, in the connection string and in options.password; keep one" },
         .{ .{ .uri = "mongodb://host", .password = "secret" }, "options.password is set, but the connection string names no user: mongodb://user@host" },
         .{ .{ .uri = "mongodb://app@host/app" }, "the connection string names a user but no password: add it percent-encoded, mongodb://user:password@host, or pass options.password" },
+        .{ .{ .uri = "mongodb://host", .start_timeout = .zero }, "start_timeout is not above zero: start would fail at once" },
         .{ .{ .uri = "mongodb://host", .close_timeout = .fromSeconds(-1) }, "close_timeout is negative; 0 cuts the operations in flight at once" },
         .{ .{ .uri = "mongodb://host", .cursor_close_timeout = .fromMilliseconds(-1) }, "cursor_close_timeout is negative" },
     };

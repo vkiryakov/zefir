@@ -52,6 +52,7 @@ const model = @import("../model.zig");
 const transport = @import("../transport.zig");
 const ClientTransport = @import("../ClientTransport.zig");
 const ServerTransport = @import("../ServerTransport.zig");
+const sleepAtLeast = @import("sleep.zig").sleepAtLeast;
 const Pending = transport.Pending;
 const Reply = transport.Reply;
 const Incoming = transport.Incoming;
@@ -86,6 +87,10 @@ lose_next: std.atomic.Value(bool) = .init(false),
 fail_next: std.atomic.Value(ErrorInt) = .init(0),
 
 const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
+
+/// zefir.App builds and frees this transport, but its start, drain and close
+/// belong to the rpc server: App does not drive them.
+pub const app_lifecycle = false;
 
 /// The errors `failNext` injects: those of `rpc.ClientTransport.call`
 /// except `Canceled`, which only a canceled task may get.
@@ -300,7 +305,7 @@ pub fn call(t: *MemoryTransport, io: std.Io, request: *const transport.Request, 
         // Never past the deadline: then Timeout comes on time.
         var pause: std.Io.Duration = .fromNanoseconds(delay_ns);
         if (deadline) |d| pause.nanoseconds = @min(pause.nanoseconds, d.remaining(now(io)).nanoseconds);
-        try io.sleep(pause, .awake);
+        try sleepAtLeast(io, pause);
         if (deadline) |d| if (d.remaining(now(io)).nanoseconds < std.time.ns_per_ms) return error.Timeout;
     }
 
@@ -671,6 +676,7 @@ fn now(io: std.Io) std.Io.Timestamp {
 
 const testing = std.testing;
 const RecordingDispatcher = @import("RecordingDispatcher.zig");
+const early_io = @import("early_io.zig");
 
 const get_user: model.Route = .{ .service = "users", .version = 1, .method = "getUser" };
 
@@ -1096,6 +1102,29 @@ test "setDelay holds a call before admit; the deadline still comes on time" {
 
     f.memory.setDelay(.zero);
     try testing.expectEqual(@as(u64, 1), f.recorder.dispatcher().routeStats(0).requests);
+    try f.expectClean(io);
+}
+
+test "setDelay holds a call for its whole delay, though a sleep of the Io ends early" {
+    // Each sleep of this io ends 16 ms early, as a sleep of std's Io on Windows may.
+    const io = early_io.io();
+    var f: Fixture = undefined;
+    try f.init(io, .{}, .{ .routes = &.{get_user} });
+    defer f.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    f.memory.setDelay(.fromMilliseconds(50));
+    const request = requestOf(io, "{}", .fromSeconds(5));
+    const sent = now(io);
+    var caller = try io.concurrent(callTask, .{ f.memory.clientTransport(), io, &request, optionsOf(&arena) });
+    defer if (caller.cancel(io)) |_| {} else |_| {};
+    try f.recorder.waitStarted(io, 1);
+    try testing.expect(sent.durationTo((try f.recorder.call(io, 0)).head.received_at).nanoseconds >= 50 * std.time.ns_per_ms);
+    try f.recorder.respond(io, 0, &.{ .status = .ok });
+    try f.recorder.releaseCall(io, 0, .completed);
+    _ = try caller.await(io);
+    f.memory.setDelay(.zero);
     try f.expectClean(io);
 }
 

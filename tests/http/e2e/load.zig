@@ -188,10 +188,11 @@ const Fixture = struct {
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0, .limits = limits });
         errdefer f.native.deinit();
         f.server = try http.Server.init(gpa, .{
-            .backend = f.native.backend(),
             .controllers = .{&f.app},
             .middleware = .{&f.ledger},
             .strict_errors = false,
+        }, .{
+            .listen = .{ .backend = f.native.backend() },
             .max_in_flight = max_in_flight,
         });
         errdefer f.server.deinit(io);
@@ -495,9 +496,10 @@ const SiteFixture = struct {
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0 });
         errdefer f.native.deinit();
         f.server = try http.Server.init(gpa, .{
-            .backend = f.native.backend(),
             .controllers = .{&f.app},
-            .static = .{http.static("/", .{ .root = root })},
+        }, .{
+            .listen = .{ .backend = f.native.backend() },
+            .static = &.{http.static("/", .{ .root = root })},
         });
         errdefer f.server.deinit(io);
         try f.server.start(io);
@@ -677,9 +679,10 @@ const StreamFixture = struct {
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0 });
         errdefer f.native.deinit();
         f.server = try http.Server.init(gpa, .{
-            .backend = f.native.backend(),
             .controllers = .{&f.app},
             .strict_errors = false,
+        }, .{
+            .listen = .{ .backend = f.native.backend() },
             .max_streams = 2 * stream_workers,
         });
         errdefer f.server.deinit(io);
@@ -745,7 +748,7 @@ fn streamSlots(io: Io) !void {
     }
 
     // The stop ends them, each with its last chunk.
-    try f.server.shutdown(io);
+    try f.server.shutdown(io, runtime.far(io));
     for (&held) |*c| {
         const res = try c.readResponse(io, arena.allocator(), .{});
         try testing.expectEqual(200, res.status);

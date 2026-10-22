@@ -28,6 +28,6 @@ test {
     var app_errors: AppErrors = .{};
     var backend: http.testing.Backend = .init(std.testing.allocator);
     defer backend.deinit();
-    var server = try http.Server.init(std.testing.allocator, .{ .backend = backend.backend(), .controllers = .{&users}, .error_handler = &app_errors });
+    var server = try http.Server.init(std.testing.allocator, .{ .controllers = .{&users}, .error_handler = &app_errors }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(std.testing.io);
 }

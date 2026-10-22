@@ -88,11 +88,12 @@ const App = struct {
         app.todos_v1 = .{ .repo = &app.repo, .live = &app.live, .plans = &app.plans };
         app.sessions = .{ .token_auth = &app.token_auth, .live = &app.live };
         app.server = try .init(gpa, .{
-            .backend = app.backend.backend(),
-            .prefix = "/api",
             .controllers = .{ &app.todos_v1, &app.sessions, &app.health },
             .middleware = .{ mw.requestId, &app.access_log, http.onResponse(mw.securityHeaders), &app.cors, &app.token_auth },
             .error_handler = &app.app_errors,
+        }, .{
+            .listen = .{ .backend = app.backend.backend() },
+            .prefix = "/api",
         });
         app.server.start(testing.io) catch |err| {
             app.server.deinit(testing.io);

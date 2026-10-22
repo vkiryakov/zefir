@@ -15,6 +15,7 @@ const MemoryTransport = @import("../testing/MemoryTransport.zig");
 const Credentials = @import("../credentials.zig").Credentials;
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 
 fn now(io: std.Io) std.Io.Timestamp {
     return std.Io.Clock.awake.now(io);
@@ -550,7 +551,7 @@ test "end to end through memory: the handler's response, its failure, a refusal"
     defer refused.deinit();
     try expectFailure(refused, failures.unknown_method);
     try testing.expect(refused.response.refused and refused.sent);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
 }
 
 fn callTask(client: *RawClient, io: std.Io, route: model.Route) RawClient.CallError!void {
@@ -581,7 +582,7 @@ test "max_pending: one call more than the client allows is not sent" {
     try first.await(io);
     var again = try client.call(io, .root, echo_route, "", .{});
     again.deinit();
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
 }
 
 const Observed = struct { result: RawClient.CallError!void, still_canceled: bool };
@@ -635,7 +636,7 @@ test "the caller's task canceled during the transport's call: Cancelled once, an
     const timed_out = callAndLook(&client, io, second_route, .fromMilliseconds(30));
     try testing.expectError(error.DeadlineExceeded, timed_out.result);
     try testing.expect(!timed_out.still_canceled);
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
 }
 
 /// A handler that calls another service with its own context.
@@ -711,7 +712,7 @@ test "a nested call: the handler's context shortens the deadline, goes on in the
         r.deinit();
     } else |err| try testing.expect(err == error.DeadlineExceeded);
     // The handler ends before the server lets the call go.
-    try server.shutdown(io);
+    try server.shutdown(io, far(io));
     try testing.expectError(error.DeadlineExceeded, nested.nested);
     try testing.expectEqual(calls, recorder.calls);
 }

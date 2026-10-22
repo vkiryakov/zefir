@@ -13,6 +13,7 @@ const TestingBackend = @import("../testing/Backend.zig");
 const http_testing = @import("../testing.zig");
 
 const testing = std.testing;
+const far = @import("../wait.zig").far;
 const Stream = TestingBackend.Stream;
 
 // The middleware and the controller below are application code of the
@@ -183,9 +184,10 @@ const Fixture = struct {
         f.events = .{ .live = &f.live };
         f.backend = .init(testing.allocator);
         f.server = Server.init(testing.allocator, .{
-            .backend = f.backend.backend(),
             .controllers = .{&f.events},
             .middleware = .{ identify, &f.finisher },
+        }, .{
+            .listen = .{ .backend = f.backend.backend() },
             .max_streams = limits.max_streams,
             .max_in_flight = limits.max_in_flight,
             .request_timeout = limits.request_timeout,
@@ -793,7 +795,7 @@ test "on_close runs exactly once: client left, overflow, close(key), server stop
     const a = try f.open("/v1/events/lobby?key=a");
     const b = try f.open("/v1/events/lobby?key=b");
     const start = std.Io.Clock.awake.now(io);
-    try f.server.shutdown(io);
+    try f.server.shutdown(io, far(io));
     try testing.expect(sinceMs(start) < 5000);
     for ([_]*Stream{ a, b }) |s| {
         try expectEnd(s);
@@ -826,7 +828,7 @@ test "the stop cuts a stream whose last events a client that reads nothing holds
     try f.publish("stuck", .{ .data = "stuck" });
     try io.sleep(.fromMilliseconds(20), .awake);
     const start = std.Io.Clock.awake.now(io);
-    try f.server.shutdown(io);
+    try f.server.shutdown(io, far(io));
     // Within the grace and the second after it, the stream cut.
     const elapsed = sinceMs(start);
     try testing.expect(elapsed >= 150 and elapsed < 5000);
@@ -891,7 +893,7 @@ test "Manager.deinit while the server runs waits for its streams, which never to
     var slow: SlowFinish = .{};
     var backend: TestingBackend = .init(testing.allocator);
     defer backend.deinit();
-    var server = try Server.init(testing.allocator, .{ .backend = backend.backend(), .controllers = .{&rooms}, .middleware = .{&slow} });
+    var server = try Server.init(testing.allocator, .{ .controllers = .{&rooms}, .middleware = .{&slow} }, .{ .listen = .{ .backend = backend.backend() } });
     defer server.deinit(io);
     try server.start(io);
 
@@ -965,7 +967,7 @@ test "stream slots come back after every way a stream ends" {
     try testing.expectEqual(503, over.status);
 
     // The stop ends them, and their places come back.
-    try f.server.shutdown(io);
+    try f.server.shutdown(io, far(io));
     for (held) |s| {
         try expectEnd(s);
         try testing.expect(!s.aborted());
