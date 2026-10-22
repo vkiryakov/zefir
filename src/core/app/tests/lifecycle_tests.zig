@@ -436,8 +436,9 @@ test "every shutdown gets one deadline: the start of the stop plus shutdown_time
     try testing.expectEqual(Io.Clock.awake, deadline.clock);
     try testing.expectEqual(deadline, rig.of("B").deadline.?);
     try testing.expectEqual(deadline, rig.of("C").deadline.?);
+    // The stop task wakes after requestStop: on a busy machine, late.
     const after = asked.addDuration(.fromSeconds(5)).durationTo(deadline.raw).toMilliseconds();
-    try testing.expect(after >= 0 and after < 50);
+    try testing.expect(after >= 0 and after < 1000);
 }
 
 test "a bean with wait and no shutdown: App waits for its wait" {

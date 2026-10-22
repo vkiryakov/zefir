@@ -79,6 +79,11 @@ pub fn App(comptime Root: type) type {
         /// returned. A stop requested meanwhile lets the current start end,
         /// starts no more and returns `{}`. `error.InvalidState` unless the
         /// App was just built: there is no restart.
+        /// `error.ConcurrencyUnavailable` when the Io had no task left for
+        /// App: for its stop task, or to watch a bean with `wait`.
+        /// `error.ShutdownTimeout` when stopping what had started ran out of
+        /// time: tasks may still use the beans, so end the process then, as
+        /// `run` does; `failure()` keeps the error of the start.
         pub fn start(app: *@This()) anyerror!void {
             return lifecycle.start(&app.internal.block.runtime);
         }
@@ -86,7 +91,9 @@ pub fn App(comptime Root: type) type {
         /// Waits for the end of the stop. `{}`: stopped on request; a
         /// bean's error: it stopped by itself, and App stopped the rest
         /// (`failure()` names it); `error.ShutdownTimeout`: the stop ran out
-        /// of its budget. Canceling `wait` stops nothing.
+        /// of its budget, or a bean returned it. After that one, tasks may
+        /// still use the beans: end the process, as `run` does with code 1.
+        /// Canceling `wait` stops nothing.
         pub fn wait(app: *@This()) anyerror!void {
             return lifecycle.wait(&app.internal.block.runtime);
         }
@@ -121,7 +128,8 @@ pub fn App(comptime Root: type) type {
 
         /// Destroys the beans App built, in reverse creation order, then
         /// frees the block. A running App is stopped first. Values are
-        /// never destroyed.
+        /// never destroyed. After `error.ShutdownTimeout` it frees nothing
+        /// that a task may still use: the process is to end instead.
         pub fn deinit(app: *@This()) void {
             const block = app.internal.block;
             if (!lifecycle.finish(&block.runtime)) return;
