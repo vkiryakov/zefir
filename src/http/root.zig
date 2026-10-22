@@ -117,4 +117,5 @@ test {
     _ = @import("testing.zig");
     _ = @import("native.zig");
     _ = @import("sse.zig");
+    _ = @import("app_tests.zig");
 }

@@ -201,8 +201,9 @@ GET /api/v1/todos
 - [Benchmark](#benchmark)
 - [Stopping gracefully](#stopping-gracefully)
 
-`zig build test-http` builds and runs "http in a minute" and the tests of
-the example app, and checks them against this guide. The service runs on
+`zig build test-http` builds and runs "http in a minute", the service
+under zefir.App and the tests of the example app, and checks them against
+this guide. The service runs on
 the network: in `tests/http`, `zig build examples` starts it, sends it every
 curl command of this guide, and checks each response, and the log of the
 service, against what the guide shows.
@@ -3283,10 +3284,141 @@ $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
 Every request of the guide left a record of `AccessLog`, with its status,
 its user, the error it ended with, and the id of the request, which the
 response carried as `x-request-id`; the stream ended by Ctrl+C has
-`err=Canceled`. The deadline of `shutdown(io, deadline)` cuts
-`.shutdown_grace`: the grace ends by the deadline less one second,
-`.finish_timeout` and 250 ms, so that the canceled requests have time to
-end, and `shutdown` returns by `deadline − 250 ms`. When a handler ignores its
-cancelation and runs on, `shutdown` returns `error.ShutdownTimeout` then,
-and the server stays `draining`: end the process. The App of zefir-core will drive these
-methods for a whole service, on its signals.
+`err=Canceled`.
+
+The deadline of `shutdown(io, deadline)` cuts `.shutdown_grace`: the grace
+ends by the deadline less one second, `.finish_timeout` and 250 ms, so that
+the canceled requests have time to end, and `shutdown` returns by
+`deadline − 250 ms`. When a handler ignores its cancelation and runs on,
+`shutdown` returns `error.ShutdownTimeout` then, and the server stays
+`draining`: end the process.
+
+### Under zefir.App
+
+A service with several servers, or with clients of NATS and MongoDB next to
+its server, hands their lifecycle to `zefir.App` of zefir-core: App builds
+the beans of the service out of modules, starts them in order, watches
+them, and stops them all within one deadline. The guides of the modules
+write it `core.App`: it is `zefir.App` of the umbrella module.
+
+The module below declares what App builds: the backend in memory, a
+provider; `HealthController`, a controller; and `Servers`, whose function
+`httpServer` makes the server of them. App passes each parameter of that
+function by its type: its allocator, the config that `main` hands to
+`init`, the backend it built, and `core.app.Controllers(AppModule)`, the
+controllers of the module:
+
+```zig
+//! The health check of the todo service under zefir.App, on the backend in
+//! memory: a module declares the backend, the controller and the factory
+//! of the server; App builds them in the order of their dependencies,
+//! starts the server, and stops it. Its setting comes from the environment
+//! through confy:
+//!
+//!   APP_PREFIX   before the routes of the controllers, `/api` by default
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const http = @import("http");
+const HealthController = @import("HealthController.zig");
+
+/// App writes each start and stop of a bean to the log, at info: this run
+/// prints warnings only.
+pub const std_options: std.Options = .{ .log_level = .warn };
+
+const Config = struct {
+    prefix: []const u8 = "/api",
+};
+
+/// What App builds: the backend, the controller, and the server, which a
+/// factory makes of them.
+pub const AppModule = struct {
+    pub const module: core.app.Module = .{
+        .providers = &.{http.testing.Backend},
+        .controllers = &.{HealthController},
+        .factories = &.{Servers},
+        .values = &.{*const Config},
+    };
+
+    pub const Servers = struct {
+        /// The server: App passes the controllers of the module, and the
+        /// backend and the config, by their types.
+        pub fn httpServer(
+            gpa: std.mem.Allocator,
+            config: *const Config,
+            backend: *http.testing.Backend,
+            controllers: core.app.Controllers(AppModule),
+        ) !http.Server {
+            return .init(gpa, .{ .controllers = controllers }, .{
+                .listen = .{ .backend = backend.backend() },
+                .prefix = config.prefix,
+            });
+        }
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const io = init.io;
+
+    // Builds the backend, the controller and the server, and starts the
+    // server: it takes requests once start returns.
+    var app = try core.App(AppModule).init(init.gpa, io, .{&config}, .{});
+    defer app.deinit();
+    try app.start();
+
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &buffer);
+    const out = &stdout.interface;
+    try out.print("the app is {t}\n", .{app.state()});
+
+    const target = try std.fmt.allocPrint(init.arena.allocator(), "{s}/health", .{config.prefix});
+    var res = try app.get(http.testing.Backend).request(io, .{ .method = .GET, .target = target });
+    defer res.deinit();
+    try out.print("GET {s}\n→ {d} {s}\n", .{ target, res.status, res.body });
+
+    // What a signal does in a service: App asks every server to stop, then
+    // shuts each down within its shutdown_timeout, and wait returns.
+    app.requestStop();
+    try app.wait();
+    try out.print("the app is {t}\n", .{app.state()});
+    try out.flush();
+}
+```
+
+```text
+$ zig build run
+the app is running
+GET /api/health
+→ 200 {"status":"ok"}
+the app is stopped
+```
+
+- **`init`** builds the beans in the order of their dependencies: the
+  backend and the controller, then the server, which takes them.
+- **`app.start()`** starts the server, then watches its `wait`: a server
+  that stops by itself, such as one whose backend broke and whose `wait`
+  returns `error.Unavailable`, stops the whole App.
+- **`app.requestStop()`** begins the stop. App asks every server to stop at
+  once, then calls the `shutdown(io, deadline)` of each, the last built
+  first, with one deadline for all: its `.shutdown_timeout`, 25 seconds by
+  default, after the stop began. Each server's `shutdown` returns
+  250 ms before that deadline at the latest, so App has time for the rest.
+- **`app.wait()`** returns once the stop is over: `{}` here, or the error
+  of the bean that stopped the App, which `app.failure()` names.
+
+App writes each step to `std.log`, at info: `AppModule.Servers.httpServer
+started`, `stopping`, `AppModule.Servers.httpServer stopped`, `stopped`;
+this run prints warnings only. On the network, the factory takes a port
+from the config instead of the backend in memory, which leaves
+`.providers`: `.listen = .{ .port = config.port }`. A service's `main` calls
+`app.run()`, which starts App and waits for its stop, and a task on
+`zio.Signal` calls `app.requestStop()`, as `stopOnSignal` calls
+`server.requestStop` above.
