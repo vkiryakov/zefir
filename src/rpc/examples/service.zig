@@ -112,17 +112,18 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
         .authenticator = &auth,
         // The server's level: around every call of every handler.
         .middleware = .{&limiter},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io);
     try server.start(io);
 
     // One client; every call brings the credentials of its caller.
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     var admin_tokens: AdminTokens = .{ .token = config.auth.admin_token };
     const anonymous: rpc.Credentials = .none;

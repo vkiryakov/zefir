@@ -1,5 +1,7 @@
 const std = @import("std");
 const manifest = @import("build.zig.zon");
+const app_cases = @import("src/core/app/tests/cases.zig");
+const app_guide = @import("src/core/examples/app/cases.zig");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
@@ -78,8 +80,8 @@ pub fn build(b: *std.Build) void {
     });
     nats.addImport("build_options", build_options);
 
-    // nats only for its adapter, rpc_nats.ZefirNats: Zig compiles that file
-    // only for an application that uses it.
+    // nats for the connection of the transport: rpc_nats.Transport.init
+    // takes a *nats.Client and makes its adapter, rpc_nats.ZefirNats.
     const rpc_nats = b.addModule("zefir-rpc-nats", .{
         .root_source_file = b.path("src/rpc-nats/root.zig"),
         .target = target,
@@ -204,6 +206,7 @@ pub fn build(b: *std.Build) void {
     }
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
+    addAppCompileChecks(b, test_core, core, target, optimize);
     addHttpCompileChecks(b, test_http, http, validator, target, optimize);
     // The examples of the zefir-http guide: the middleware of an
     // application (authentication, CORS) and their tests. Like an
@@ -238,6 +241,9 @@ pub fn build(b: *std.Build) void {
         .rpc = rpc,
         .jwt = jwt,
     }, target, optimize, tsan);
+    // The guide of zefir.App: the tests of its shop, which imports the
+    // umbrella module, and a program whose server does not stop.
+    addAppGuide(b, test_zefir, zefir, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -356,6 +362,57 @@ pub fn build(b: *std.Build) void {
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
         test_log.dependOn(&run.step);
+    }
+
+    // zefir.App's run and log, in a process of their own (see
+    // src/core/app/tests/programs/run_timeout.zig): when the stop runs out
+    // of time, run writes which bean did not stop and ends the process with
+    // code 1; when a bean breaks, run returns its error. Each mode checks
+    // the exit code and App's log lines. A Debug build with the Debug copy
+    // of core, whatever -Doptimize says, without TSan.
+    const app_run = b.addExecutable(.{
+        .name = "app-run-timeout",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/app/tests/programs/run_timeout.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "core", .module = panic_core }},
+        }),
+    });
+    for ([_]struct { mode: []const u8, exit: u8, lines: []const []const u8 }{
+        .{ .mode = "stop", .exit = 1, .lines = &.{
+            "debug(zefir_app): build order: Root.First, Root.Deaf\n",
+            "info(zefir_app): Root.First started\n",
+            "info(zefir_app): Root.Deaf started\n",
+            "info(zefir_app): stopping\n",
+            "warning(zefir_app): the stop ran out of time: Root.Deaf did not stop\n",
+            "error(zefir_app): Root.Deaf did not stop in time; the process exits with code 1\n",
+            "\nRoot.Deaf did not stop in time; the process exits with code 1\n",
+        } },
+        .{ .mode = "rollback", .exit = 1, .lines = &.{
+            "info(zefir_app): Root.First started\n",
+            "warning(zefir_app): Root.Second did not start: error.StartFailed\n",
+            "info(zefir_app): stopping\n",
+            "warning(zefir_app): the stop ran out of time: Root.First did not stop\n",
+            "error(zefir_app): Root.First did not stop in time; the process exits with code 1\n",
+            "\nRoot.First did not stop in time; the process exits with code 1\n",
+        } },
+        .{ .mode = "breaks", .exit = 2, .lines = &.{
+            "info(zefir_app): Root.First started\n",
+            "warning(zefir_app): Root.Broken stopped by itself: error.Broken\n",
+            "info(zefir_app): stopping\n",
+            "info(zefir_app): Root.Broken stopped\n",
+            "warning(zefir_app): Root.Fragile did not stop cleanly: error.ShutdownFailed\n",
+            "info(zefir_app): Root.First stopped\n",
+            "info(zefir_app): stopped\n",
+            "run returned error.Broken\n",
+        } },
+    }) |case| {
+        const run = b.addRunArtifact(app_run);
+        run.addArg(case.mode);
+        run.expectExitCode(case.exit);
+        for (case.lines) |line| run.expectStdErrMatch(line);
+        test_core.dependOn(&run.step);
     }
 
     // nats panic program: a client copied after connect() panics in safe
@@ -597,8 +654,9 @@ pub fn build(b: *std.Build) void {
     // message next to its name (the whole text after "error: "), and the
     // notes that lead to the user's code: those of a contract lead through
     // the return type of rpc.Contract, that of rpc.implement straight to the
-    // call, that of rpc.Client.call through the type of its request. A type
-    // declared in a file is named after the file.
+    // call, that of rpc.Client.call through the type of its request. A
+    // mistake in the typed options of rpc.Client.init is Zig's own error,
+    // with Zig's notes. A type declared in a file is named after the file.
     const contract_notes: []const []const u8 = &.{ "note: called at comptime here", "note: generic function instantiated here" };
     const implement_notes: []const []const u8 = &.{"note: called at comptime here"};
     const server_notes: []const []const u8 = &.{"note: called at comptime here"};
@@ -635,8 +693,10 @@ pub fn build(b: *std.Build) void {
         .{ "server_same_route", "rpc.Server.init: server_same_route.UserHandler and server_same_route.OtherUserHandler both serve users.v1", server_notes },
         .{ "server_auth_without_authenticator", "rpc.Server.init: server_auth_without_authenticator.UserHandler.getUser requires auth, but .authenticator is not set", server_notes },
         .{ "server_middleware", "rpc.Server.init: .middleware[1] must be fn (*rpc.Context, *rpc.Next) anyerror!void or a pointer to a type with pub fn run(self, *rpc.Context, *rpc.Next) anyerror!void", server_notes },
-        .{ "client_unknown_option", "rpc.Client.init: unknown option .timeout; the options are .transport, .credentials, .middleware, .default_timeout, .max_pending and .max_response_bytes", client_notes },
-        .{ "client_credentials_literal", "rpc.Client.init: .credentials = .bearer needs a value, such as .{ .bearer = token }; only .none stands alone", client_notes },
+        .{ "server_unknown_part", "rpc.Server.init: unknown part .transport; the parts are .handlers, .middleware and .authenticator", server_notes },
+        .{ "client_unknown_part", "rpc.Client.init: unknown part .credentials; the parts are .middleware", client_notes },
+        .{ "client_unknown_option", "no field named 'timeout' in struct 'app.Client.Options'", &.{"note: struct declared here"} },
+        .{ "client_credentials_literal", "coercion from enum '@typeInfo(credentials.Credentials).@\"union\".tag_type.?' to union 'credentials.Credentials' must initialize '[]const u8' field 'bearer'", &.{ "note: field 'bearer' declared here", "note: union declared here" } },
         .{ "client_not_a_method", "rpc.Client.call: the method must be a method of a contract, such as UserApi.getUser; got the contract users.v1 itself", call_notes },
     }) |case| {
         const compile = b.addTest(.{
@@ -1635,6 +1695,147 @@ fn addHttpGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The examples of src/core/examples/app/README.md, the guide of zefir.App,
+/// as cases.zig there lists them, on the umbrella module: the tests of the
+/// shop, and stuck.zig, a program whose server does not stop, run through
+/// example_main.zig, which exits with code 3 on a panic instead of aborting
+/// and with code 4 past its time limit; it must exit with 1 and say which
+/// bean did not stop. readme_test.zig then checks that README.md shows
+/// every file as it is, the run of stuck.zig as it printed, and the compile
+/// checks of App it shows with their messages. The shop's main.zig imports
+/// zio: only tests/app builds and runs it.
+fn addAppGuide(
+    b: *std.Build,
+    test_zefir: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/core/examples/app/";
+    const imports: []const std.Build.Module.Import = &.{.{ .name = "zefir", .module = zefir }};
+    const shop_test = b.addTest(.{
+        .name = "app-guide-shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "shop_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = imports,
+        }),
+    });
+    test_zefir.dependOn(&addRun(b, shop_test, tsan).step);
+
+    const stuck = b.addExecutable(.{
+        .name = "app-guide-stuck",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "example_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "stuck.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }) }},
+        }),
+    });
+    const run_stuck = addRun(b, stuck, tsan);
+    run_stuck.expectExitCode(1);
+    run_stuck.expectStdErrMatch("\nAppModule.Servers.httpServer did not stop in time; the process exits with code 1\n");
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            // The checks of the guides, and the list of App's compile
+            // checks: files of other directories of src/, which a module
+            // reaches only as modules.
+            .{ .name = "guide-check", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/examples/guide_check.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "app-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/core/app/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    readme.addAnonymousImport("stuck.err", .{ .root_source_file = run_stuck.captureStdErr(.{}) });
+    for (app_guide.fixtures) |name| {
+        readme.addAnonymousImport(b.fmt("fixture-{s}", .{name}), .{ .root_source_file = b.path(b.fmt("src/core/app/tests/compile_errors/{s}.zig", .{name})) });
+    }
+    test_zefir.dependOn(&addRun(b, b.addTest(.{ .name = "app-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The compile checks of zefir.App, from the list in
+/// src/core/app/tests/cases.zig: application code whose graph App must
+/// refuse, each file with the message it must fail with; and a large
+/// generated application that must compile. Each file imports "core"
+/// alone.
+fn addAppCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    core: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, as in
+    // addHttpCompileChecks.
+    for (app_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "core", .module = core }},
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_step.dependOn(&t.step);
+    }
+    // The scale guard: an application of 10 modules, each of 20 providers
+    // and 10 controllers, which gen_scale_app writes into the build cache.
+    // It must compile without an eval branch quota of its own; it is built
+    // and never run. The generator is built for the host, so it also runs
+    // when -Dtarget names another system.
+    const gen_scale = b.addExecutable(.{
+        .name = "app-gen-scale",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/app/tests/gen_scale_app.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_gen = b.addRunArtifact(gen_scale);
+    run_gen.addArgs(&.{ "10", "20", "10" });
+    const app_scale = b.addTest(.{
+        .name = "app_scale",
+        .root_module = b.createModule(.{
+            .root_source_file = run_gen.addOutputFileArg("app_scale.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "core", .module = core }},
+        }),
+    });
+    test_step.dependOn(&app_scale.step);
+    // A larger application, to measure by hand:
+    // `zig build app-gen-scale -- 50 20 10 <out.zig>`.
+    const run_gen_by_hand = b.addRunArtifact(gen_scale);
+    run_gen_by_hand.addPassthruArgs();
+    b.step("app-gen-scale", "Write an application of zefir.App to measure: -- <modules> <providers> <controllers> <out.zig>").dependOn(&run_gen_by_hand.step);
 }
 
 /// The compile checks of zefir-http, from the lists in

@@ -77,6 +77,12 @@ pub const Error = error{
     ConnectionDraining,
     /// The server refused the credentials.
     AuthenticationFailed,
+    /// The connection was lost and the client closed: reconnect is off,
+    /// or it was draining (`Client.wait`).
+    ConnectionLost,
+    /// The client gave up after `reconnect.max_attempts` failed attempts
+    /// in a row (`Client.wait`).
+    ReconnectFailed,
     /// The server wants TLS, which this client does not do.
     UnsupportedSecurityFeature,
     /// The server cannot do what was asked, such as headers or no-echo.
@@ -124,6 +130,7 @@ test {
     _ = @import("testing/messaging_tests.zig");
     _ = @import("testing/rpc_tests.zig");
     _ = @import("testing/reliability_tests.zig");
+    _ = @import("testing/lifecycle_tests.zig");
 }
 
 /// The errors of `std.Io` that the client passes through unchanged.
@@ -146,6 +153,7 @@ test "every error of the module's functions is in nats.Error or comes from std.I
         Client.PublishError,           Client.PublishTimeoutError, Client.SubscribeError,   Subscription.NextError,
         Subscription.UnsubscribeError, Client.RequestError,        Client.RespondError,     Client.RequestManyError,
         Responses.NextError,           Client.DrainError,          Subscription.DrainError, Client.NextEventError,
+        Client.WaitError,              Client.ShutdownError,
     }) |Set| {
         inline for (comptime @typeInfo(Set).error_set.error_names.?) |name| {
             if (comptime !isIn(Error, name) and !isIn(IoErrors, name)) {

@@ -27,13 +27,14 @@ pub fn main(init: std.process.Init) !void {
     defer memory.deinit(io);
 
     var server = try rpc.Server.init(gpa, .{
-        .transport = memory.serverTransport(),
         .handlers = .{&users},
+    }, .{
+        .transport = memory.serverTransport(),
     });
     defer server.deinit(io); // stops the server, after the client's deinit
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     // The caller's context. It has no deadline, so every call gets the
     // client's default timeout, 3 seconds.

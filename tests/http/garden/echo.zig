@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     defer native.deinit();
     // The echo keeps no state: the handler's pointer goes unused.
     var unused: u8 = 0;
-    try native.backend().start(io, .{ .ptr = &unused, .serve = serve });
+    try native.backend().start(io, .{ .ptr = &unused, .serve = serve, .fail = fail });
     std.debug.print("zefir-http echo on port {d}\n", .{native.port()});
     // Until the container stops.
     while (true) try io.sleep(.fromSeconds(3600), .awake);
@@ -57,6 +57,13 @@ pub fn main(init: std.process.Init) !void {
 
 fn serve(_: *anyopaque, io: Io, exchange: *Exchange) void {
     respond(io, exchange) catch exchange.abort(io);
+}
+
+/// The listener broke: the echo serves no more, and its container
+/// restarts it.
+fn fail(_: *anyopaque, _: Io, err: http.Backend.FatalError) void {
+    std.debug.print("the listener broke: {t}\n", .{err});
+    std.process.exit(1);
 }
 
 fn respond(io: Io, e: *Exchange) !void {

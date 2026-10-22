@@ -229,6 +229,10 @@ pub const Server = struct {
 
     const Phase = enum(u8) { idle, running, draining, closing, closed };
 
+    /// zefir.App builds and frees this transport, but its start, drain and close
+    /// belong to the rpc server: App does not drive them.
+    pub const app_lifecycle = false;
+
     pub fn init(broker: *Broker) Server {
         return .{ .broker = broker };
     }
@@ -846,7 +850,8 @@ test "the server answers only in reply queues: a reply_to that names another que
     try std.testing.expectEqualStrings("\"own\"", try echoOnce(&client, io, arena.allocator(), "\"own\""));
     // Once the server has stopped, every call it took has ended: nothing
     // went into the queue of orders.
-    try server.shutdown(io);
+    server.requestStop(io);
+    try server.wait(io);
     if (orders.takeLeft(io)) |landed| {
         landed.destroy();
         return error.TestUnexpectedResult;
@@ -891,5 +896,6 @@ test "a task drops a message of the other kind: a response in a request queue, a
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     try std.testing.expectEqualStrings("\"after\"", try echoOnce(&client, io, arena.allocator(), "\"after\""));
-    try server.shutdown(io);
+    server.requestStop(io);
+    try server.wait(io);
 }

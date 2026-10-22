@@ -8,6 +8,7 @@ const rpc = @import("rpc");
 const Conn = @import("Conn.zig");
 const Transport = @import("Transport.zig");
 const FakeConn = @import("testing/FakeConn.zig");
+const far = @import("shared.zig").far;
 const micro = @import("micro.zig");
 
 const testing = std.testing;
@@ -115,7 +116,7 @@ const Stage = struct {
         const io = testing.io;
         s.fake = .init(testing.allocator, .{});
         errdefer s.fake.deinit(io);
-        s.bus = try .init(testing.allocator, s.fake.conn(), options);
+        s.bus = try .initConn(testing.allocator, s.fake.conn(), options);
         errdefer s.bus.deinit(io);
         try s.startServer();
         errdefer s.server.deinit(io);
@@ -410,7 +411,7 @@ test "discovery subscribes nine subjects per contract without a queue group, and
         try testing.expect(stage.fake.hasSubscription(io, try std.fmt.bufPrint(&buffer, "$SRV.{s}.orders.{s}", .{ verb, ping.id }), null));
     }
     // A stopping replica leaves the lists: its subscriptions end.
-    try stage.server.shutdown(io);
+    try stage.server.shutdown(io, far(io));
     try testing.expectEqual(@as(usize, 1), stage.fake.subscriptionCount(io));
     _ = try stage.ask("$SRV.PING", 0);
 }
@@ -421,7 +422,7 @@ test "a server started again on the transport is a new instance: new ids, a late
     defer stage.deinit();
     const io = testing.io;
     const first = try stage.askOne(Stats, "$SRV.STATS.orders");
-    try stage.server.shutdown(io);
+    try stage.server.shutdown(io, far(io));
     stage.server.deinit(io);
     try stage.startServer();
     const second = try stage.askOne(Stats, "$SRV.STATS.orders");

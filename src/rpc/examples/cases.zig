@@ -26,6 +26,7 @@ pub const programs = [_]Program{
     .{ .name = "access_log" },
     .{ .name = "idempotency" },
     .{ .name = "shutdown" },
+    .{ .name = "app" },
 };
 
 /// The other files README.md shows as they are: the packages of the

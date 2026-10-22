@@ -31,6 +31,7 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 ## Highlights
 
 - **Built for services.** Zefir is growing into the layers every web service needs: configuration, deadlines and tracing, validation, RPC, logging, database access and HTTP.
+- **One container for the whole service.** [`zefir.App`](src/core/examples/app/README.md) builds a service out of its modules: it gives every part what it asks for by type, starts the servers and clients in order, watches them, and stops them all within one deadline when `main` asks it to, on SIGTERM for instance. A dependency that nothing provides is a compile error.
 - **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
 - **Not limited to what ships.** Where a module meets the outside world, it goes through an interface, a pointer to your object and its function pointers, as `std.Io` does, and an implementation of your own takes the place of zefir's: a transport of rpc (`rpc.ClientTransport` and `rpc.ServerTransport`, which every `rpc.Server` and `rpc.Client` is given: zefir ships NATS, and [your own](src/rpc-nats/examples/writing-a-transport.md) lives in a package of its own), `rpc_nats.Conn` for another NATS library, and the `std.Io.Writer` that zefir-log writes to (`.output = .{ .writer = … }`). Middleware, authenticators and credentials providers of your own join the calls of rpc the same way.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
@@ -44,7 +45,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | Module                             | What it does                                                                                                                                                                                                                  | Status                                                                                                            |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | **Core & Foundation**              |                                                                                                                                                                                                                               |                                                                                                                   |
-| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; application container and lifecycle planned                                                                                                                    | 🟡 Partial (no App container yet) · [docs](src/core/examples/README.md)                                            |
+| `zefir-core`                       | Execution context: deadlines, cancellation, W3C trace context; [`zefir.App`][app-guide]: the application container with DI and lifecycle                                                                                      | ✅ Done · [docs](src/core/examples/README.md)                                                                      |
 | `zefir-confy`                      | Typed configuration: JSON, INI, `.env` files, environment variables, secrets                                                                                                                                                  | ✅ Done · [docs](src/confy/examples/README.md)                                                                     |
 | `zefir-log`                        | Structured logging: JSON Lines, levels, context, redaction                                                                                                                                                                    | ✅ Done · [docs](src/log/examples/README.md)                                                                       |
 | `zefir-validator`                  | Typed schemas, validation rules, API field names, input normalization (trim, case), error reporting                                                                                                                           | ✅ Done · [docs](src/validator/examples/README.md)                                                                 |
@@ -79,6 +80,8 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-openapi`                    | OpenAPI generation from Zig types                                                                                                                                                                                             | 📋 Planned                                                                                                         |
 | `zefir-cli`                        | Project scaffolding, code generation                                                                                                                                                                                          | 📋 Planned                                                                                                         |
 | `zefir-test`                       | Testing helpers, mocks, fixtures                                                                                                                                                                                              | 📋 Planned                                                                                                         |
+
+[app-guide]: src/core/examples/app/README.md
 
 > [!NOTE]
 > Zefir is in early development. Until 1.0, any minor release may change the API.
@@ -157,7 +160,7 @@ fn findUser(ctx: core.Context, io: std.Io, id: u64) ![]const u8 {
 }
 ```
 
-Cancel the token when the client goes away, and every check below fails with `error.Cancelled`; once the deadline passes, they fail with `error.DeadlineExceeded`. `core.w3c` reads and writes the W3C `traceparent` and `tracestate` headers, and nothing in core allocates, reads a clock or does I/O. **[Read the core guide →](src/core/examples/README.md)**
+Cancel the token when the client goes away, and every check below fails with `error.Cancelled`; once the deadline passes, they fail with `error.DeadlineExceeded`. `core.w3c` reads and writes the W3C `traceparent` and `tracestate` headers, and none of these primitives allocates, reads a clock or does I/O; `zefir.App`, the root of an application, which core also holds, is the one exception. **[Read the core guide →](src/core/examples/README.md)** · **[Read the App guide →](src/core/examples/app/README.md)**
 
 ## log in a minute
 
@@ -267,11 +270,11 @@ pub fn main(init: std.process.Init) !void {
     var memory: rpc.testing.MemoryTransport = try .init(gpa, .{});
     defer memory.deinit(io);
     var users: Users = .{};
-    var server = try rpc.Server.init(gpa, .{ .transport = memory.serverTransport(), .handlers = .{&users} });
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = memory.serverTransport() });
     defer server.deinit(io);
     try server.start(io);
 
-    var client = try rpc.Client.init(gpa, .{ .transport = memory.clientTransport() });
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = memory.clientTransport() });
     defer client.deinit();
     for ([_]u64{ 42, 7 }) |id| {
         var result = try client.call(io, .root, UserApi.getUser, .{ .id = id }, .{});
@@ -351,12 +354,15 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     // The backend in memory serves the server without a network; on the
-    // network, http.native.Backend takes its place.
+    // network, .listen = .{ .port = 8080 } takes its place.
     var backend: http.testing.Backend = .init(gpa);
     defer backend.deinit();
     var todos: TodosV1Controller = .{ .gpa = gpa };
     defer todos.deinit();
-    var server = try http.Server.init(gpa, .{ .backend = backend.backend(), .prefix = "/api", .controllers = .{&todos} });
+    var server = try http.Server.init(gpa, .{ .controllers = .{&todos} }, .{
+        .listen = .{ .backend = backend.backend() },
+        .prefix = "/api",
+    });
     defer server.deinit(io);
     try server.start(io);
 
@@ -393,7 +399,7 @@ GET /api/v1/todos
 → 200 application/json [{"id":1,"title":"Buy milk"}]
 ```
 
-The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `http.native.Backend` on zio takes the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
+The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `.listen = .{ .port = 8080 }` puts `http.native.Backend` on zio in the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
 
 On a shared GitHub runner, 4 vCPUs of an AMD EPYC 7763, a server on zio with four executors, loaded by clients in the same process, answers plain text at about 11 800 requests per second over one connection kept alive and 122 000 over 64, JSON out at 11 700 and 120 000, a JSON body in and JSON out at 11 800 and 116 000; the [guide's benchmark](src/http/examples/README.md#benchmark) shows the whole run, the spread across runs, and why one connection is faster on one executor.
 
@@ -447,7 +453,7 @@ zig build test-log --summary all                                                
 zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
   --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg \
-  --exclude tests/redis/zig-pkg \
+  --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
@@ -513,6 +519,18 @@ zig build down       # stop the servers
 ```
 
 `REDIS_IMAGE` picks the image, redis:8.10.2 by default: `REDIS_IMAGE=valkey/valkey:9.1.2 zig build e2e`. Whenever CI tests redis, it builds the package on the three systems and runs its end-to-end tests on Linux against Redis 7.2, Redis 8.10 and Valkey 9.1; a change to `tests/redis/` or to `docker-compose.yml` counts as a change to redis.
+
+The end-to-end tests of zefir.App, with the shop of its guide, are a package of the same kind in `tests/app`, on zio:
+
+```sh
+cd tests/app
+zig build e2e        # the end-to-end tests, programs stopped by SIGTERM, then the shop of the guide with its curl commands, checked against the guide
+zig build examples   # only the shop of the guide and its check (Linux and macOS)
+zig build shop       # the shop with NATS and MongoDB, shop/, against the servers it starts in Docker
+zig build check      # build all of it without running it; no servers needed
+```
+
+Whenever CI tests zefir, it builds the package on the three systems and runs its end-to-end tests there; `zig build shop` runs on a developer's machine only. A change to `tests/app/` counts as a change to zefir.
 
 `examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
 

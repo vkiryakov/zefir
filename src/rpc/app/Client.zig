@@ -4,10 +4,11 @@
 //!
 //! ```zig
 //! var client = try rpc.Client.init(gpa, .{
+//!     // .middleware = .{ clientMetrics, &breaker },  // around every call, in order
+//! }, .{
 //!     .transport = bus.clientTransport(), // rpc_nats.Transport; in tests the memory transport
 //!     .credentials = .{ .bearer = config.users_token.expose() }, // for every call that brings none
-//!     // .middleware = .{ clientMetrics, &breaker },  // around every call, in order
-//!     // .default_timeout = std.Io.Duration.fromSeconds(3),
+//!     // .default_timeout = .fromSeconds(3),
 //! });
 //! defer client.deinit();
 //!
@@ -58,6 +59,7 @@ const transport = @import("../transport.zig");
 const RawClient = @import("../engine/RawClient.zig");
 const ClientMiddleware = @import("../middleware.zig").ClientMiddleware;
 const Credentials = @import("../credentials.zig").Credentials;
+const ClientTransport = @import("../ClientTransport.zig");
 const json = @import("json.zig");
 const violations = @import("violations.zig");
 const contract = @import("contract.zig");
@@ -164,63 +166,70 @@ pub fn Result(comptime Resp: type) type {
     };
 }
 
-/// Builds a client from `options`, a struct literal:
+/// The settings of a client, the second argument of `init`.
+pub const Options = struct {
+    /// The client side of a transport, such as `bus.clientTransport()`;
+    /// its owner keeps it until after the client's `deinit`.
+    transport: ClientTransport,
+    /// Those of every call that brings none of its own, such as
+    /// `.{ .bearer = token }`,
+    /// `.{ .basic = .{ .user = "billing", .password = secret } }`,
+    /// `.{ .provider = oauth.credentialsProvider() }` (asked before every
+    /// call) or `.none`. `init` copies them and `deinit` wipes the copy; a
+    /// provider is borrowed and must outlive the client.
+    credentials: Credentials = .none,
+    /// The deadline of a call without a timeout of its own; above zero.
+    default_timeout: std.Io.Duration = .fromSeconds(3),
+    /// Calls in flight at once, at least one; one more gets
+    /// `error.TooManyPendingRequests`.
+    max_pending: u32 = 1024,
+    /// The largest response body, at least one byte. A larger one is
+    /// `error.ResponseTooLarge`, and so is a response that takes more than
+    /// `decode_budget_factor` times as much memory once decoded (at least
+    /// `min_decode_budget`).
+    max_response_bytes: usize = 1 << 20,
+};
+
+/// `InvalidConfiguration`: a `max_pending` or `max_response_bytes` of 0,
+/// or a `default_timeout` that is not above zero: such a client would
+/// refuse every call.
+pub const InitError = error{ InvalidConfiguration, OutOfMemory };
+
+/// Builds a client from its parts and its options.
 ///
-/// - `.transport`: the client side of a transport, `rpc.ClientTransport`;
-///   its owner keeps it until after the client's `deinit`;
-/// - `.credentials` (optional): those of every call that brings none of
-///   its own, such as `.{ .bearer = token }`,
-///   `.{ .basic = .{ .user = "billing", .password = secret } }`,
-///   `.{ .provider = oauth.credentialsProvider() }` (asked before every
-///   call) or `.none`, the default. `init` copies them and `deinit` wipes
-///   the copy; a provider is borrowed and must outlive the client;
-/// - `.middleware` (optional): the links around every call, in order:
-///   functions of type `rpc.ClientMiddlewareFn` and pointers to objects
-///   with `run`, such as `.{ clientMetrics, &breaker }`. The objects are
-///   borrowed and serve all calls at once;
-/// - `.default_timeout` (optional): the deadline of a call without a
-///   timeout of its own, 3 seconds by default;
-/// - `.max_pending` (optional): calls in flight at once, 1024 by default;
-///   one more gets `error.TooManyPendingRequests`;
-/// - `.max_response_bytes` (optional): the largest response body, 1 MiB by
-///   default. A larger one is `error.ResponseTooLarge`, and so is a
-///   response that takes more than `decode_budget_factor` times as much
-///   memory once decoded (at least `min_decode_budget`).
+/// `parts` is a struct literal of what the compiler checks by type:
+/// `.middleware` (optional), the links around every call, in order:
+/// functions of type `rpc.ClientMiddlewareFn` and pointers to objects with
+/// `run`, such as `.{ clientMetrics, &breaker }`. The objects are borrowed
+/// and serve all calls at once. Without middleware, `.{}`.
 ///
-/// Options are `anytype`, so a value inside them has no type to take a
-/// declaration literal from: write `std.Io.Duration.fromSeconds(3)`, not
-/// `.fromSeconds(3)`. The limits are above zero; the compiler checks those
-/// written as literals.
+/// `options` are its settings, `Options`.
 ///
 /// `gpa` is thread-safe: calls from many tasks at once encode their
 /// requests and take the arenas of their results from it.
 ///
 /// No I/O: memory only for the copies of the credentials and of the list of
 /// middleware.
-pub fn init(gpa: std.mem.Allocator, options: anytype) error{OutOfMemory}!Client {
-    const O = @TypeOf(options);
-    comptime check(O);
-    var engine_options: RawClient.Options = .{ .transport = options.transport };
-    if (@hasField(O, "credentials")) {
-        if (@FieldType(O, "credentials") == @TypeOf(.enum_literal)) comptime checkLiteral(options.credentials);
-        engine_options.credentials = client_options.credentialsOf(options.credentials);
-    }
-    const Links = if (@hasField(O, "middleware")) @FieldType(O, "middleware") else @TypeOf(.{});
+pub fn init(gpa: std.mem.Allocator, parts: anytype, options: Options) InitError!Client {
+    const P = @TypeOf(parts);
+    comptime check(P);
+    if (options.max_pending == 0 or options.max_response_bytes == 0 or options.default_timeout.nanoseconds <= 0)
+        return error.InvalidConfiguration;
+    const Links = if (@hasField(P, "middleware")) @FieldType(P, "middleware") else @TypeOf(.{});
     // The engine copies the list.
     var links: [@typeInfo(Links).@"struct".field_names.len]ClientMiddleware = undefined;
-    if (@hasField(O, "middleware")) engine_options.middleware = client_options.linksOf(options.middleware, &links);
-    if (@hasField(O, "default_timeout")) engine_options.default_timeout = options.default_timeout;
-    if (@hasField(O, "max_pending")) engine_options.max_pending = options.max_pending;
-    if (@hasField(O, "max_response_bytes")) engine_options.max_response_bytes = options.max_response_bytes;
-    return .{ .engine = try .init(gpa, engine_options) };
+    return .{ .engine = try .init(gpa, .{
+        .transport = options.transport,
+        .credentials = options.credentials,
+        .middleware = if (@hasField(P, "middleware")) client_options.linksOf(parts.middleware, &links) else &.{},
+        .default_timeout = options.default_timeout,
+        .max_pending = options.max_pending,
+        .max_response_bytes = options.max_response_bytes,
+    }) };
 }
 
-fn check(comptime O: type) void {
-    if (client_options.optionsProblem(O)) |message| @compileError(message);
-}
-
-fn checkLiteral(comptime literal: @TypeOf(.enum_literal)) void {
-    if (client_options.literalProblem(literal)) |message| @compileError(message);
+fn check(comptime P: type) void {
+    if (client_options.partsProblem(P)) |message| @compileError(message);
 }
 
 /// Wipes the copy of the credentials and frees what `init` took. No call

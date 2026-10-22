@@ -12,7 +12,7 @@ const guide = @embedFile("README.md");
 const tutorial = @embedFile("writing-a-transport.md");
 
 /// The examples, as tests/rpc-nats/build.zig runs them.
-const examples = [_][]const u8{ "getting_started", "two_services" };
+const examples = [_][]const u8{ "getting_started", "two_services", "app" };
 
 const example_files = files: {
     var files: [examples.len][]const u8 = undefined;

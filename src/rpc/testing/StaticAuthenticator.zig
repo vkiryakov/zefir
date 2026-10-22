@@ -7,7 +7,7 @@
 //! var t = try rpc.testing.Server.init(std.testing.allocator, std.testing.io, .{
 //!     .handlers = .{&users},
 //!     .authenticator = &auth,
-//! });
+//! }, .{});
 //! ```
 //!
 //! A test may change `identity` between calls, not while one runs.

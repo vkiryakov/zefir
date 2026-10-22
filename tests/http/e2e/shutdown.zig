@@ -80,9 +80,10 @@ const Fixture = struct {
         f.native = try .init(gpa, .{ .address = "127.0.0.1", .port = 0 });
         errdefer f.native.deinit();
         f.server = try http.Server.init(gpa, .{
-            .backend = f.native.backend(),
             .controllers = .{&f.app},
             .middleware = .{&f.ledger},
+        }, .{
+            .listen = .{ .backend = f.native.backend() },
             .shutdown_grace = std.Io.Duration.fromMilliseconds(grace_ms),
         });
         errdefer f.server.deinit(io);

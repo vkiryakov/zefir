@@ -309,7 +309,7 @@ test "a call runs its handler and the response comes back through the memory tra
     const refused = try client.call(io, &unknown, .{ .allocator = arena.allocator(), .max_response_bytes = 1024 });
     try expectFailureResponse(refused, failures.unknown_method);
     try testing.expect(refused.refused);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 fn mapTest(err: anyerror) ?model.Failure {
@@ -352,7 +352,7 @@ test "errors of a handler become failures: the contract's table, the framework's
         // The handler ran: not refused.
         try testing.expect(!response.refused);
     }
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "the deadline: deadline_exceeded goes out first, then the handler is canceled, release after its end" {
@@ -380,7 +380,7 @@ test "the deadline: deadline_exceeded goes out first, then the handler is cancel
         // the deadline still comes, once.
         try call.expectFailure(failures.deadline_exceeded, call.disposition == .not_started, call.disposition);
     }
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "a client that gives up: no response, the handler is canceled, release after its end" {
@@ -409,7 +409,7 @@ test "a client that gives up: no response, the handler is canceled, release afte
     const stats = test_transport.dispatcher.?.routeStats(0);
     try testing.expectEqual(@as(u64, 1), stats.errors);
     try testing.expectEqualStrings("rpc.cancelled", stats.last_error.?.appCode());
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "a handler that ends on its own: one response, completed" {
@@ -430,7 +430,7 @@ test "a handler that ends on its own: one response, completed" {
     const stats = test_transport.dispatcher.?.routeStats(0);
     try testing.expectEqual(@as(u64, 1), stats.requests);
     try testing.expectEqual(@as(u64, 0), stats.errors);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "the queue: two run, two wait, a fifth is refused; the waiting ones run as places free" {
@@ -463,7 +463,7 @@ test "the queue: two run, two wait, a fifth is refused; the waiting ones run as 
     }
     try testing.expectEqual(@as(u32, 4), gate.entered.load(.acquire));
     try waitRetired(io, &server);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 /// The calls in the server's queue, read under its lock.
@@ -518,7 +518,7 @@ test "a call whose deadline passes in the queue never starts: deadline_exceeded,
     try testing.expectEqual(@as(u32, 0), canceled.sends.load(.acquire));
     try testing.expectEqual(Reply.Disposition.not_started, canceled.disposition);
     try testing.expectEqual(@as(u32, 1), gate.entered.load(.acquire));
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "a response over max_response_bytes becomes resource_exhausted; one the transport cannot carry, a small failure" {
@@ -547,7 +547,7 @@ test "a response over max_response_bytes becomes resource_exhausted; one the tra
     const fit = try client.call(io, &requestOf(io, "fits", "{}", .fromSeconds(5)), options);
     try testing.expectEqual(@as(usize, 1024), fit.body.len);
     try expectFailureResponse(try client.call(io, &requestOf(io, "overLimit", "{}", .fromSeconds(5)), options), failures.response_too_large);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 
     // A limit of the server above what the transport carries.
     var second: RawServer = try .init(testing.allocator, .{
@@ -563,7 +563,7 @@ test "a response over max_response_bytes becomes resource_exhausted; one the tra
     const stats = second.stats[0].snapshot(io);
     try testing.expectEqual(@as(u64, 1), stats.errors);
     try testing.expectEqual(core.ErrorCode.resource_exhausted, stats.last_error.?.code);
-    try second.shutdown(io);
+    try second.shutdown(io, waiting.far(io));
 }
 
 test "a response the transport loses counts as an error of its route, a contract breach too" {
@@ -609,7 +609,7 @@ test "a response the transport loses counts as an error of its route, a contract
     const stats = d.routeStats(1);
     try testing.expectEqual(@as(u64, 1), stats.errors);
     try testing.expectEqualStrings(failures.permission_denied.app_code, stats.last_error.?.appCode());
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "no task: start refuses a call when no supervisor can start; a call whose handler gets no task is refused" {
@@ -632,7 +632,7 @@ test "no task: start refuses a call when no supervisor can start; a call whose h
         try testing.expectEqual(@as(u32, 0), server.inflight.load(.acquire));
         try testing.expectEqual(@as(usize, 0), server.live_bytes.load(.acquire));
         try testing.expectEqualStrings("No task for the call", failures.no_task.message);
-        try server.shutdown(io);
+        try server.shutdown(io, waiting.far(io));
     }
 
     // Two tasks: the stop task and a supervisor, but none for the handler.
@@ -652,7 +652,7 @@ test "no task: start refuses a call when no supervisor can start; a call whose h
         try deliver(io, test_transport.dispatcher.?, &headOf(io, "echo", null), "x", &call);
         try call.waitReleased(io);
         try call.expectFailure(failures.no_task, true, .not_started);
-        try server.shutdown(io);
+        try server.shutdown(io, waiting.far(io));
     }
 }
 
@@ -787,7 +787,7 @@ test "rpc.Context gives a handler its call: io, operation, allocator, route, req
     try testing.expectEqualStrings("client-7", inspector.peer_name[0..inspector.peer_name_len]);
     try testing.expectEqualStrings("memory", inspector.transport_name[0..inspector.transport_name_len]);
     for (inspector.metadata_errors) |err| try testing.expectEqual(@as(?Context.SetMetadataError, error.InvalidMetadata), err);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 /// Adds response metadata until the limits refuse.
@@ -830,7 +830,7 @@ test "setResponseMetadata keeps the server's limits on entries and bytes" {
     try testing.expectEqual(@as(usize, 1024), transport.metadataBytes(response.metadata));
     try testing.expectEqual(@as(?Context.SetMetadataError, error.ResourceExhausted), filler.refused_bytes);
     try testing.expectEqual(@as(?Context.SetMetadataError, error.ResourceExhausted), filler.refused_entry);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 /// Fails in the ways `rpc.Context` offers.
@@ -902,7 +902,7 @@ test "ctx.fail sends exactly its failure, with the response metadata; another er
 
     const third = try client.call(io, &requestOf(io, "replaced", "", .fromSeconds(5)), options);
     try expectFailureResponse(third, failures.permission_denied);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 /// A `std.Io` that starts the tasks of `io.concurrent` only once `gate` is
@@ -1061,7 +1061,7 @@ test "the token of a call is canceled by its deadline, by its client and by the 
     var by_stop: TestCall = .{};
     try deliver(io, d, &headOf(io, "long", null), "", &by_stop);
     try waitFor(io, &watcher.started, 3);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
     try by_stop.expectFailure(failures.stopped, false, by_stop.disposition);
     try testing.expect(std.mem.findScalar(Reply.Disposition, done, by_stop.disposition) != null);
     try testing.expectEqual(@as(u32, 3), watcher.saw_token.load(.acquire));
@@ -1183,7 +1183,7 @@ test "Review Focus 1: the deadline, the client's cancel and the handler's end ra
     const stats = d.routeStats(0);
     try testing.expectEqual(@as(u64, n), stats.requests);
     try testing.expectEqual(deadline + canceled, stats.errors);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 fn stopLater(server: *RawServer, io: std.Io, delay: std.Io.Duration) std.Io.Cancelable!void {
@@ -1389,13 +1389,13 @@ test "Review Focus 4: a stop with calls in every state and a deaf handler: Shutd
     try io.sleep(.fromMilliseconds(50), .awake);
 
     const stop_began = now(io);
-    try testing.expectError(error.ShutdownTimeout, server.shutdown(io));
+    try testing.expectError(error.ShutdownTimeout, server.shutdown(io, waiting.far(io)));
     // The grace, then the second the canceled calls get.
     try testing.expect(stop_began.durationTo(now(io)).toMilliseconds() >= 1100);
     try testing.expectEqual(RawServer.State.draining, server.state());
     try testing.expect(!server.isReady());
     // A second shutdown says the same at once.
-    try testing.expectError(error.ShutdownTimeout, server.shutdown(io));
+    try testing.expectError(error.ShutdownTimeout, server.shutdown(io, waiting.far(io)));
 
     try testing.expectEqual(@as(u32, 0), given_up.sends.load(.acquire));
     try testing.expectEqual(Reply.Disposition.canceled, given_up.disposition);
@@ -1418,7 +1418,7 @@ test "Review Focus 4: a stop with calls in every state and a deaf handler: Shutd
     try deaf_call.expectFailure(failures.stopped, false, .canceled);
     try server.wait(io);
     try testing.expectEqual(RawServer.State.stopped, server.state());
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
     try testing.expectEqual(@as(u32, 3), gate.entered.load(.acquire));
 }
 
@@ -1463,7 +1463,7 @@ test "Review Focus 4 through the memory transport: the cancelled of the stop rea
     try waitFor(io, &deaf.entered, 1);
 
     // The deaf handler keeps its call past the second the stop gives.
-    try testing.expectError(error.ShutdownTimeout, server.shutdown(io));
+    try testing.expectError(error.ShutdownTimeout, server.shutdown(io, waiting.far(io)));
     // Every client got the failure of the stop, the deaf handler's too,
     // not a connection lost to the close of the transport.
     for (&callers) |*slot| {
@@ -1697,7 +1697,7 @@ test "a handler that allocates past the memory of its call gets OutOfMemory: res
     const fits = try client.call(io, &requestOf(io, "modest", "{}", .fromSeconds(5)), options);
     try testing.expectEqualStrings("h", fits.body);
     try waitRetired(io, &server);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "Review Focus 2: a claimed gigabyte and 10 000 metadata entries are refused before any allocation" {
@@ -1735,7 +1735,7 @@ test "Review Focus 2: a claimed gigabyte and 10 000 metadata entries are refused
     var call: TestCall = .{};
     try testing.expectError(error.Refused, deliver(io, d, &headOf(io, "echo", .fromSeconds(5)), "", &call));
     try testing.expect(failing.has_induced_failure);
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 test "refusals at admission reach the client with their codes, marked refused; route stats count them all" {
@@ -1784,7 +1784,7 @@ test "refusals at admission reach the client with their codes, marked refused; r
     try testing.expectEqual(@as(u64, 2), failing_route.requests);
     try testing.expectEqual(@as(u64, 2), failing_route.errors);
     try testing.expectEqualStrings("rpc.unavailable", failing_route.last_error.?.appCode());
-    try server.shutdown(io);
+    try server.shutdown(io, waiting.far(io));
 }
 
 /// What a transport's task does with the dispatcher while a cancelation of
@@ -1902,4 +1902,141 @@ test "the examples of the doc comments work" {
     try testing.expectEqualStrings("miss", found.metadata[0].value);
     server.requestStop(io);
     try server.wait(io);
+}
+
+/// Holds its call: on a gate the test opens in its `defer`, or for
+/// `sleep`; notes when its wait ends with `error.Canceled`. `deaf` ignores
+/// the cancelation and waits for the gate alone.
+const Holder = struct {
+    io: std.Io,
+    gate: std.Io.Event = .unset,
+    entered: std.atomic.Value(u32) = .init(0),
+    sleep: ?std.Io.Duration = null,
+    deaf: bool = false,
+    canceled: std.atomic.Value(bool) = .init(false),
+    canceled_at: std.Io.Timestamp = .zero,
+
+    fn handle(h: *Holder, _: *Context, request: []const u8) anyerror![]const u8 {
+        _ = h.entered.fetchAdd(1, .acq_rel);
+        if (h.deaf) {
+            h.gate.waitUncancelable(h.io);
+            return request;
+        }
+        const held = if (h.sleep) |d| h.io.sleep(d, .awake) else h.gate.wait(h.io);
+        held catch |err| {
+            h.canceled_at = now(h.io);
+            h.canceled.store(true, .release);
+            return err;
+        };
+        return request;
+    }
+};
+
+/// A server of one method, `hold`, on the memory transport, with the grace
+/// `grace`, started, and one call of a client held in it; `stop` opens the
+/// gate, waits for the call and frees it all.
+const HoldFixture = struct {
+    holder: Holder,
+    memory: MemoryTransport = undefined,
+    server: RawServer = undefined,
+    arena: std.heap.ArenaAllocator = undefined,
+    pending: std.Io.Future(ClientTransport.CallError!model.Response) = undefined,
+
+    fn start(f: *HoldFixture, io: std.Io, grace: std.Io.Duration) !void {
+        f.memory = try .init(testing.allocator, .{});
+        errdefer f.memory.deinit(io);
+        f.server = try .init(testing.allocator, .{
+            .transport = f.memory.serverTransport(),
+            .methods = &.{.{ .route = routeOf("hold"), .handler = handlerOf(&f.holder) }},
+            .shutdown_grace = grace,
+        });
+        errdefer f.server.deinit(io);
+        try f.server.start(io);
+        f.arena = .init(testing.allocator);
+        errdefer f.arena.deinit();
+        f.pending = try io.concurrent(callMemory, .{ &f.memory, io, "hold", &f.arena });
+        waitFor(io, &f.holder.entered, 1) catch |err| {
+            f.holder.gate.set(io);
+            _ = f.pending.await(io) catch {};
+            return err;
+        };
+    }
+
+    fn stop(f: *HoldFixture, io: std.Io) void {
+        f.holder.gate.set(io);
+        _ = f.pending.await(io) catch {};
+        f.server.deinit(io);
+        f.arena.deinit();
+        f.memory.deinit(io);
+    }
+};
+
+/// Milliseconds from `deadline` to `t`: negative before it.
+fn msPast(deadline: std.Io.Clock.Timestamp, t: std.Io.Timestamp) i64 {
+    return deadline.raw.durationTo(t).toMilliseconds();
+}
+
+test "a deadline before the end of the grace cancels the calls in time" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .io = io } };
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(3), .clock = .awake });
+    try f.server.shutdown(io, deadline);
+    const returned = now(io);
+    // The grace ended two seconds and r before the deadline, not after 10 s,
+    // and the call was canceled then.
+    try testing.expect(f.holder.canceled.load(.acquire));
+    try testing.expect(msPast(deadline, f.holder.canceled_at) >= -2250);
+    try testing.expect(msPast(deadline, returned) <= -250 + 50);
+    try testing.expectEqual(RawServer.State.stopped, f.server.state());
+}
+
+test "a deadline that comes after requestStop shortens the grace" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .io = io } };
+    try f.start(io, .fromSeconds(10));
+    defer f.stop(io);
+
+    // The grace of 10 s runs.
+    f.server.requestStop(io);
+    try io.sleep(.fromMilliseconds(50), .awake);
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(3), .clock = .awake });
+    try f.server.shutdown(io, deadline);
+    const returned = now(io);
+    try testing.expect(f.holder.canceled.load(.acquire));
+    try testing.expect(msPast(deadline, f.holder.canceled_at) >= -2250);
+    try testing.expect(msPast(deadline, returned) <= -250 + 50);
+    try testing.expectEqual(RawServer.State.stopped, f.server.state());
+}
+
+test "a handler deaf to cancelation: shutdown returns ShutdownTimeout by deadline − r" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .io = io, .deaf = true } };
+    try f.start(io, .fromSeconds(10));
+    // Opens the gate first: the call ends, then the stop.
+    defer f.stop(io);
+
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake });
+    try testing.expectError(error.ShutdownTimeout, f.server.shutdown(io, deadline));
+    const returned = now(io);
+    try testing.expect(msPast(deadline, returned) >= -250);
+    try testing.expect(msPast(deadline, returned) <= -250 + 200);
+    try testing.expectEqual(RawServer.State.draining, f.server.state());
+}
+
+test "a far deadline keeps shutdown_grace" {
+    const io = testing.io;
+    var f: HoldFixture = .{ .holder = .{ .io = io, .sleep = .fromMilliseconds(500) } };
+    try f.start(io, .fromMilliseconds(300));
+    defer f.stop(io);
+
+    const begun = now(io);
+    try f.server.shutdown(io, waiting.far(io));
+    // The call of 500 ms is canceled at the end of the grace, 300 ms.
+    try testing.expect(f.holder.canceled.load(.acquire));
+    const at = begun.durationTo(f.holder.canceled_at).toMilliseconds();
+    try testing.expect(at >= 300 - 100 and at <= 300 + 300);
+    try testing.expectEqual(RawServer.State.stopped, f.server.state());
 }
