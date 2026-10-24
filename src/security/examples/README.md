@@ -163,8 +163,10 @@ for a weaker check.
 Add Zefir to your `build.zig.zon`; security ships since v0.11.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 ```
+
+This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.11.0, fetch `#v0.11.0` instead.
 
 Then import the modules in `build.zig`. The orders service of this guide
 signs and checks tokens with `security.jwt`, declares the rules of its

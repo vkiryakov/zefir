@@ -160,8 +160,10 @@ that fails is its violation, and nothing inside it is checked after that.
 Add Zefir to your `build.zig.zon`; validator ships since v0.4.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 ```
+
+This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.11.0, fetch `#v0.11.0` instead.
 
 Then import the `zefir-validator` module in `build.zig`:
 
