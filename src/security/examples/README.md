@@ -34,8 +34,8 @@ check tokens are code of your application, and this guide shows both.
 >   verified: zefir cannot sign with RSA, so only other providers would
 >   need it.
 > - **CORS, CSRF, passwords, refresh tokens, sessions, permissions, TOTP,
->   WebAuthn, rate limits and TLS of transports.** None of them is a part
->   of zefir-security.
+>   WebAuthn, rate limits and TLS of transports.** None of them is in
+>   zefir-security yet.
 > - **OAuth 2.0 and OpenID Connect flows.** No token is fetched from an
 >   authorization server, and no sign-in flow runs.
 > - **Ready-made middleware.** No middleware of zefir-http, authenticator
