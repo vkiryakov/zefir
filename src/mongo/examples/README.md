@@ -211,13 +211,8 @@ the client, which build the commands; copy them and keep them anywhere.
 Add Zefir to your `build.zig.zon`; mongo ships since v0.9.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
-
-This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.10.0, fetch `#v0.10.0` instead.
-zefir-mongo-bson is not in v0.10.0: there BSON is `mongo.bson`, inside
-zefir-mongo, so with `#v0.10.0` follow
-[the guide of that release](https://github.com/vkiryakov/zefir/blob/v0.10.0/src/mongo/examples/README.md).
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no
 release for Zig 0.17 yet, so pin the commit Zefir is tested with:

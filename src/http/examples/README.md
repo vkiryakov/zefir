@@ -323,14 +323,8 @@ flowchart TD
 Add Zefir to your `build.zig.zon`; http ships since v0.8.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
-
-This guide is on the `dev` branch: the declarations of a route's input and
-statuses, `ctx.input`, the typed events of a stream and the OpenAPI
-document are there until the next release. The command fetches the latest
-commit of `dev`; `--save` pins that commit. The latest release, v0.10.0,
-came before them, so `#v0.10.0` does not have them.
 
 A service runs on zio. zio has no release for Zig 0.17 yet, so pin the
 commit Zefir is tested with:

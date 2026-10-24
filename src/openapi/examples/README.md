@@ -115,15 +115,11 @@ runs is the one the document describes.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; openapi ships since v0.11.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
-
-zefir-openapi is on the `dev` branch until the next release. The command
-fetches the latest commit of `dev`; `--save` pins that commit. The latest
-release, v0.10.0, came before zefir-openapi, so `#v0.10.0` does not have it.
 
 The service runs on zio. zio has no release for Zig 0.17 yet, so pin the
 commit Zefir is tested with:
