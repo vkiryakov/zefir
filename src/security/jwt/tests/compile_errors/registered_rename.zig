@@ -1,5 +1,5 @@
 //! Must not compile: a field renamed to a registered claim.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const v = @import("validator");
 
 const Claims = struct {

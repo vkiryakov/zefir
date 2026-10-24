@@ -8,7 +8,7 @@
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const v = @import("validator");
 const auth = @import("auth.zig");
 

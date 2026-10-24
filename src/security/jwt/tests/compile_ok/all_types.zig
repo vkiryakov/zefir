@@ -1,6 +1,6 @@
 //! Must compile: every type a claim may have, alone, as ?T and as
 //! []const T, with names from claim_names and v.rename and a rule.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const v = @import("validator");
 
 const Level = enum { low, high };

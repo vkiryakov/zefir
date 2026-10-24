@@ -1,6 +1,6 @@
 //! Must not compile: verify with claims of a type that JSON does not give.
 const std = @import("std");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Claims = struct {
     ratio: f16,

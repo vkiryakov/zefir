@@ -1,5 +1,5 @@
 //! Must not compile: two fields with one claim name.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Claims = struct {
     role: []const u8,

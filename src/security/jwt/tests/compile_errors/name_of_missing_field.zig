@@ -1,5 +1,5 @@
 //! Must not compile: claim_names names a field that is not there.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Claims = struct {
     is_root: bool = false,

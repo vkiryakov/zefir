@@ -1,9 +1,10 @@
-//! What build.zig compiles for the compile checks of zefir-jwt, read by
-//! `addJwtCompileChecks`. Paths are relative to the repository root and
+//! What build.zig compiles for the compile checks of `security.jwt`, read
+//! by `addJwtCompileChecks`. Paths are relative to the repository root and
 //! stay inside `src/`, the part of the package that `build.zig.zon` ships,
 //! since a client's build runs zefir's build.zig too. Each file is client
-//! code: a `test` block that imports "jwt" (and "validator") and checks a
-//! claims type, with `jwt.assertClaims` or through `verify` and `sign`.
+//! code: a `test` block that imports "security" (and "validator") and
+//! checks a claims type, with `jwt.assertClaims` or through `verify` and
+//! `sign`.
 
 /// A file that must fail to compile with an error whose message is
 /// `expect`: the whole text after `error: ` to the end of the line.
@@ -12,7 +13,7 @@ pub const Fixture = struct { file: []const u8, expect: []const u8 };
 const claim_types = "a claim is bool, an integer, f32, f64, an enum, []const u8 or a struct, alone, as ?T or as []const T";
 const registered = "is a registered claim, which jwt sets and checks itself (jwt.Registered); remove the field or give it another claim name";
 
-/// Files in src/jwt/tests/compile_errors/.
+/// Files in src/security/jwt/tests/compile_errors/.
 pub const compile_errors = [_]Fixture{
     // Types.
     .{ .file = dir ++ "not_struct.zig", .expect = "jwt: u32: claims are a struct, or void when jwt.Registered is enough" },
@@ -38,12 +39,12 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "sign_registered_name.zig", .expect = "jwt: sign_registered_name.Claims.sub: \"sub\" " ++ registered },
 };
 
-const dir = "src/jwt/tests/compile_errors/";
+const dir = "src/security/jwt/tests/compile_errors/";
 
-/// Files in src/jwt/tests/compile_ok/ that must compile.
+/// Files in src/security/jwt/tests/compile_ok/ that must compile.
 pub const must_compile = [_][]const u8{
-    "src/jwt/tests/compile_ok/all_types.zig",
-    "src/jwt/tests/compile_ok/void_claims.zig",
-    "src/jwt/tests/compile_ok/nested_registered_names.zig",
-    "src/jwt/tests/compile_ok/deepest.zig",
+    "src/security/jwt/tests/compile_ok/all_types.zig",
+    "src/security/jwt/tests/compile_ok/void_claims.zig",
+    "src/security/jwt/tests/compile_ok/nested_registered_names.zig",
+    "src/security/jwt/tests/compile_ok/deepest.zig",
 };

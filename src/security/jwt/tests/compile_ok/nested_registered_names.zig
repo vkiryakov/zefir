@@ -1,6 +1,6 @@
 //! Must compile: the names of registered claims are ordinary inside a
 //! nested struct.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Grant = struct {
     exp: i64,

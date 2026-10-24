@@ -1,7 +1,7 @@
 //! Must not compile: sign with claims that name a registered claim, which
 //! the signer writes itself.
 const std = @import("std");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Claims = struct {
     sub: []const u8,

@@ -18,7 +18,7 @@
 //! // .authenticator = &authenticator in the options of rpc.Server
 //! ```
 
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const rpc = @import("rpc");
 const v = @import("validator");
 

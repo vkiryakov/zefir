@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const http = @import("http");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const log = @import("log");
 const auth = @import("auth.zig");
 const errors = @import("errors.zig");

@@ -6,7 +6,7 @@
 //! `jwt.testing.FixedClock` sets the time.
 
 const std = @import("std");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const rpc = @import("rpc");
 const api = @import("billing-api");
 const BillingHandler = @import("BillingHandler.zig");

@@ -1,5 +1,5 @@
 //! Must not compile: an integer wider than 64 bits.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Claims = struct {
     total: u128,

@@ -211,7 +211,7 @@ refuses it, since the token is not meant for billing.
 ```zig
 const std = @import("std");
 const confy = @import("confy");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const log = @import("log");
 const v = @import("validator");
 
@@ -552,7 +552,7 @@ that checks a user's name and secret and signs a token for them:
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const v = @import("validator");
 const auth = @import("auth.zig");
 
@@ -731,7 +731,7 @@ The middleware `JwtAuth` checks the token of every request of orders:
 
 const std = @import("std");
 const http = @import("http");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const log = @import("log");
 const v = @import("validator");
 
@@ -921,7 +921,7 @@ The whole service, on the backend in memory, with Ann's app as its client:
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const log = @import("log");
 const auth = @import("auth.zig");
 const errors = @import("errors.zig");
@@ -1105,7 +1105,7 @@ expires without a wait of 15 minutes ([Tests](#tests) tells more):
 
 const std = @import("std");
 const http = @import("http");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const log = @import("log");
 const auth = @import("auth.zig");
 const errors = @import("errors.zig");
@@ -1444,7 +1444,7 @@ every call, with the public key of orders from its settings:
 //! // .authenticator = &authenticator in the options of rpc.Server
 //! ```
 
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const rpc = @import("rpc");
 const v = @import("validator");
 
@@ -1573,7 +1573,7 @@ orders made for them; billing gets only its public half:
 //! `jwt.testing.FixedClock` sets the time.
 
 const std = @import("std");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const rpc = @import("rpc");
 const api = @import("billing-api");
 const BillingHandler = @import("BillingHandler.zig");

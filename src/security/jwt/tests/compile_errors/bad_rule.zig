@@ -1,6 +1,6 @@
 //! Must not compile: a rule that does not fit its claim; the error is the
 //! validator's own.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const v = @import("validator");
 
 const Claims = struct {

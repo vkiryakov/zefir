@@ -1,5 +1,5 @@
 //! Must not compile: claims that are not a struct.
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 
 const Claims = u32;
 

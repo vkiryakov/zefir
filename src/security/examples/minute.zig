@@ -1,6 +1,6 @@
 const std = @import("std");
 const confy = @import("confy");
-const jwt = @import("jwt");
+const jwt = @import("security").jwt;
 const log = @import("log");
 const v = @import("validator");
 
