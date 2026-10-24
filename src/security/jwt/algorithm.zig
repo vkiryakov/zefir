@@ -1,4 +1,4 @@
-//! The algorithms of zefir-jwt: `jwt.Algorithm` and the sizes that go
+//! The algorithms of `security.jwt`: `jwt.Algorithm` and the sizes that go
 //! with each one.
 
 const std = @import("std");

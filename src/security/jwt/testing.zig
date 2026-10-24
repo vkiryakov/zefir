@@ -1,4 +1,4 @@
-//! Test support for services that use zefir-jwt. `verify` and `sign` read
+//! Test support for services that use `security.jwt`. `verify` and `sign` read
 //! the time from the clock of their `std.Io`, so a test sets the time
 //! through that `Io` with `FixedClock`, and the code under test stays as
 //! it runs in production.

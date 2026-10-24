@@ -1,4 +1,4 @@
-//! zefir-jwt: JSON Web Tokens of zefir services. A service signs its own
+//! `security.jwt`: JSON Web Tokens of zefir services. A service signs its own
 //! tokens with `jwt.Signer` after a login, and its routes and the other
 //! services of the system check them with `jwt.Verifier`: the signature,
 //! the issuer, the audience and the time. The algorithms are HS256, HS384,
@@ -17,11 +17,11 @@
 //! const verified = try verifier.verify(Claims, io, arena, token, .{}); // verified.registered.subject, verified.claims.roles
 //! ```
 //!
-//! The module has no network code, no tasks and no global state: `verify`
+//! `security.jwt` has no network code, no tasks and no global state: `verify`
 //! and `sign` take only the clock from `io` (and, for ECDSA, its random
 //! noise), and the keys are plain values with a `deinit` that wipes them.
 //!
-//! The guide, src/jwt/examples/README.md, follows two services step by
+//! The guide, src/security/examples/README.md, follows two services step by
 //! step: one of zefir-http that signs its users in and checks their tokens
 //! in a middleware, and one of zefir-rpc that checks them in an
 //! authenticator; with the claims, the keys and their rotation, the

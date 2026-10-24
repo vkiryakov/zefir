@@ -55,7 +55,7 @@ pub fn hmac(algorithm: Algorithm, secret: []const u8, options: KeyOptions) KeyEr
 /// The PEM may come as the settings hold it: with CRLF, indented, or on one
 /// line. `InvalidKey`: no such block, or one that is broken; a private key
 /// is no key here. `UnsupportedKey`: RSA, P-521, Ed448, a certificate and
-/// the rest of what zefir-jwt does not take. `KeyAlgorithmMismatch`: the
+/// the rest of what `security.jwt` does not take. `KeyAlgorithmMismatch`: the
 /// key is of another algorithm than `algorithm`, or `algorithm` is HMAC.
 pub fn fromPem(algorithm: Algorithm, text: []const u8, options: KeyOptions) KeyError!Key {
     if (isHmac(algorithm)) return error.KeyAlgorithmMismatch;

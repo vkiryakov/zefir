@@ -1,7 +1,7 @@
-# Test keys of zefir-jwt
+# Test keys of `security.jwt`
 
 Every key in this directory is public and exists only for the tests of
-zefir-jwt: never sign or verify anything real with it. `../keys.zig` embeds
+`security.jwt`: never sign or verify anything real with it. `../keys.zig` embeds
 each file and says what it holds.
 
 The files were made in this directory with OpenSSL 3.6 and ssh-keygen, by
@@ -36,7 +36,7 @@ openssl pkcs8 -topk8 -nocrypt -in p384.sec1.pem -outform DER -out p384.pk8.der
 openssl ec -in p384.sec1.pem -pubout -outform DER -out p384.pub.der
 openssl ec -in p384.sec1.pem -pubout -conv_form compressed -outform DER -out p384.pub.compressed.der
 
-# Keys that zefir-jwt refuses with UnsupportedKey: RSA in every form.
+# Keys that security.jwt refuses with UnsupportedKey: RSA in every form.
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rsa.pk8.pem
 openssl pkey -in rsa.pk8.pem -pubout -out rsa.pub.pem
 openssl pkey -in rsa.pk8.pem -outform DER -out rsa.pk8.der

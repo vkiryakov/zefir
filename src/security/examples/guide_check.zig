@@ -1,4 +1,4 @@
-//! Checks of the guide of zefir-jwt against its examples: that the guide
+//! Checks of the guide of zefir-security against its examples: that the guide
 //! shows a file as it is, a run of a program as it printed, after the
 //! program, and no Zig code that is not a part of its examples.
 //! readme_test.zig runs them. Every function compares texts with "\r\n"

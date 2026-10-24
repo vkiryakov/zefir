@@ -1,4 +1,9 @@
-# jwt
+# security
+
+zefir-security is planned to hold the security of zefir services:
+authentication, authorization, MFA/TOTP, WebAuthn, TLS integration, CORS
+and rate limiting. For now it has one part, JWT, as `security.jwt`, and
+this guide is about it.
 
 **Tokens that say who calls, signed by your own services.** When Ann signs
 in to a shop, its orders service checks her once and gives her a *token*: a
@@ -6,7 +11,7 @@ short text that says "this is user-7, a buyer, until 12:15", signed with
 the key of orders. Ann's app sends the token with every request. Every
 route of orders, and every other service of the shop, checks the
 signature, the time and whom the token is for, and knows who calls,
-without a store of sessions and without asking orders. zefir-jwt signs and
+without a store of sessions and without asking orders. `security.jwt` signs and
 checks such tokens: JSON Web Tokens (RFC 7519) in the compact form of JWS
 (RFC 7515), with HS256, HS384, HS512, ES256, ES384 and EdDSA. The keys come
 from the settings of a service and change by their id, `kid`; the claims of
@@ -30,12 +35,12 @@ check tokens are code of your application, and this guide shows both.
 >   need it.
 > - **CORS, CSRF, passwords, refresh tokens, sessions, permissions, TOTP,
 >   WebAuthn, rate limits and TLS of transports.** None of them is a part
->   of zefir-jwt.
+>   of zefir-security.
 > - **OAuth 2.0 and OpenID Connect flows.** No token is fetched from an
 >   authorization server, and no sign-in flow runs.
 > - **Ready-made middleware.** No middleware of zefir-http, authenticator
->   of zefir-rpc or adapter module ships with zefir-jwt: this guide shows
->   both as code of the application.
+>   of zefir-rpc or adapter module ships with zefir-security: this guide
+>   shows both as code of the application.
 > - **JWE and nested tokens.** Tokens are signed, not encrypted, and a
 >   token inside a token is refused.
 > - **JWK and JWKS.** No key is read as a JWK, a service does not publish
@@ -155,16 +160,16 @@ for a weaker check.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`; jwt ships since v0.10.0:
+Add Zefir to your `build.zig.zon`; security ships since v0.11.0:
 
 ```sh
 zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
 
 Then import the modules in `build.zig`. The orders service of this guide
-signs and checks tokens with jwt, declares the rules of its claims with
-validator, reads its settings with confy, logs with log, and serves with
-http; billing takes rpc instead of http:
+signs and checks tokens with `security.jwt`, declares the rules of its
+claims with validator, reads its settings with confy, logs with log, and
+serves with http; billing takes rpc instead of http:
 
 ```zig
 // build.zig of the orders service
@@ -176,7 +181,7 @@ const exe = b.addExecutable(.{
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "jwt", .module = zefir.module("zefir-jwt") },
+            .{ .name = "security", .module = zefir.module("zefir-security") },
             .{ .name = "validator", .module = zefir.module("zefir-validator") },
             .{ .name = "confy", .module = zefir.module("zefir-confy") },
             .{ .name = "log", .module = zefir.module("zefir-log") },
@@ -190,10 +195,10 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 
 > [!TIP]
 > jwt is also part of the umbrella module: with `zefir.module("zefir")`
-> imported as `zefir`, it is `@import("zefir").jwt`. zefir-jwt itself
-> imports only validator, and nothing outside Zefir. It has no network
-> code, no tasks and no global state, but for the clock of tests in
-> `jwt.testing`.
+> imported as `zefir`, it is `@import("zefir").security.jwt`.
+> zefir-security itself imports only validator, and nothing outside Zefir.
+> It has no network code, no tasks and no global state, but for the clock
+> of tests in `jwt.testing`.
 
 ## jwt in a minute
 
@@ -711,7 +716,7 @@ request keeps its own, as `JwtAuth` does.
 The middleware `JwtAuth` checks the token of every request of orders:
 
 ```zig
-// Application code (src/auth.zig of the orders service): zefir-jwt ships none of these.
+// Application code (src/auth.zig of the orders service): zefir-security ships none of these.
 //! The authentication of the orders service, made of ordinary middleware.
 //! `JwtAuth` sits in the server's middleware and checks the token of
 //! `Authorization: Bearer` on every request: a token of orders puts its
@@ -1803,7 +1808,7 @@ and that entry gets no pointer to the clock.
   has no handle meant for tests.
 
 The tests of this guide, [`auth_test.zig`](#http) and
-[`rpc_auth_test.zig`](#rpc), run with `zig build test-jwt` in this
+[`rpc_auth_test.zig`](#rpc), run with `zig build test-security` in this
 repository; a service runs its own with a test step of its `build.zig`.
 
 ## Security

@@ -1,4 +1,4 @@
-//! The JOSE header of a token (RFC 7515 §4.1) and the rules zefir-jwt
+//! The JOSE header of a token (RFC 7515 §4.1) and the rules `security.jwt`
 //! holds it to. The whole object is read first: its syntax, its repeated
 //! keys and the types of the members it knows ("alg", "kid", "typ", "cty",
 //! "crit"); a problem there is `Malformed`. Then the rules run in this
@@ -48,7 +48,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, token_types: []const []
         } else if (std.mem.eql(u8, key, "cty")) {
             cty = try member(&reader, cty, "cty", details);
         } else if (std.mem.eql(u8, key, "crit")) {
-            // Any value: zefir-jwt understands no extension, so its mere
+            // Any value: `security.jwt` understands no extension, so its mere
             // presence refuses the token.
             if (crit) return refuse(details, "crit", error.Malformed);
             crit = true;

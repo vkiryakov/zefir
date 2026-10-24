@@ -2400,7 +2400,7 @@ pub fn requirePermission(comptime permission: []const u8) type {
 
 A service that signs the tokens of its users and verifies them, instead of
 a table, does it with the middleware `JwtAuth` of
-[the zefir-jwt guide](../../jwt/examples/README.md), of the same shape: a
+[the zefir-security guide](../../security/examples/README.md), of the same shape: a
 token it refuses goes on as anonymous too, and `requireUser` answers it
 with 401 and the reason.
 

@@ -1,4 +1,4 @@
-//! The key files of zefir-jwt in DER: SPKI for public keys (RFC 5280
+//! The key files of `security.jwt` in DER: SPKI for public keys (RFC 5280
 //! §4.1.2.7, RFC 5480, RFC 8410), PKCS#8 (RFC 5958) and SEC1 (RFC 5915) for
 //! private ones, each of P-256, P-384 or Ed25519. Every point and scalar is
 //! checked before it becomes a key, and every public part of a private key
@@ -44,7 +44,7 @@ const tag = struct {
     const context_1_primitive = 0x81;
 };
 
-/// The contents of the OIDs zefir-jwt takes. Any other algorithm or curve
+/// The contents of the OIDs `security.jwt` takes. Any other algorithm or curve
 /// is `UnsupportedKey`: rsaEncryption, RSASSA-PSS, secp521r1, Ed448,
 /// X25519, X448 and the rest.
 const oid = struct {
@@ -56,7 +56,7 @@ const oid = struct {
 
 /// The public key of the SPKI `bytes` for `alg`. `KeyAlgorithmMismatch`:
 /// an HS algorithm, or a key of another one. `UnsupportedKey`: an algorithm
-/// or a curve that zefir-jwt does not take. `InvalidKey`: anything else
+/// or a curve that `security.jwt` does not take. `InvalidKey`: anything else
 /// that is not a key, such as a point off its curve or of small order.
 pub fn publicKey(alg: Algorithm, bytes: []const u8) KeyError!Public {
     if (algorithm.isHmac(alg)) return error.KeyAlgorithmMismatch;
@@ -172,7 +172,7 @@ fn namedCurve(body: []const u8) KeyError!Curve {
     return curveNamed(parameters);
 }
 
-/// ECParameters: zefir-jwt takes a curve named by its OID, P-256 or P-384,
+/// ECParameters: `security.jwt` takes a curve named by its OID, P-256 or P-384,
 /// and neither explicit parameters nor implicitCA.
 fn curveNamed(parameters: der.Element) KeyError!Curve {
     if (parameters.tag != tag.oid) return error.UnsupportedKey;

@@ -2,7 +2,7 @@
 //! and against an ES384 token of OpenSSL, since the RFCs have none.
 //! Their payloads are no claims of zefir and most of their headers have no
 //! "typ", so the tests call `jws` and `crypto` directly. The RFCs give
-//! their EC and Ed25519 keys as JWKs, which zefir-jwt does not read: the
+//! their EC and Ed25519 keys as JWKs, which `security.jwt` does not read: the
 //! tests build the DER of each key from the JWK's bytes.
 
 const std = @import("std");
@@ -114,7 +114,7 @@ test "RFC 7520 §4.5: detached content is Malformed" {
 
 test "the JSON serialization is Malformed" {
     // RFC 7515 A.6 and A.7 and RFC 7520 §4.6–4.8 show only the JWS JSON
-    // Serialization, which zefir-jwt does not read: a token is the compact
+    // Serialization, which `security.jwt` does not read: a token is the compact
     // form alone.
     var keys = [_]Key{try hmacKey(Key, rfc7515.a1_key, null)};
     defer keys[0].deinit();
@@ -275,5 +275,6 @@ test "RFC 8037 A.5: the JWS verifies" {
     try expectWrongType(rfc8037.token, &keys, "orders");
 
     // A.3, the thumbprint of a JWK, and A.6 and A.7, ECDH-ES with X25519
-    // and X448, do not apply: zefir-jwt reads no JWK and agrees on no keys.
+    // and X448, do not apply: `security.jwt` reads no JWK and agrees on no
+    // keys.
 }

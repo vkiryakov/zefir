@@ -1,4 +1,4 @@
-//! The errors of zefir-jwt, one per reason, and `Details`, which says
+//! The errors of `security.jwt`, one per reason, and `Details`, which says
 //! what a refusal of `verify` was about.
 
 const std = @import("std");
@@ -9,7 +9,7 @@ pub const KeyError = error{
     /// Not a key in the expected format: the PEM or DER is broken, cut
     /// short or of another kind.
     InvalidKey,
-    /// A type or a curve that zefir-jwt does not take: RSA in any form,
+    /// A type or a curve that `security.jwt` does not take: RSA in any form,
     /// P-521, Ed448, an encrypted PEM, a certificate, an OpenSSH key.
     UnsupportedKey,
     /// Weaker than the algorithm requires: an HMAC secret shorter than

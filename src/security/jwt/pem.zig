@@ -10,7 +10,7 @@ const std = @import("std");
 const der = @import("der.zig");
 const KeyError = @import("errors.zig").KeyError;
 
-/// The kinds of blocks that hold a key of zefir-jwt.
+/// The kinds of blocks that hold a key of `security.jwt`.
 pub const Label = enum {
     /// "PUBLIC KEY": SPKI.
     public_key,
@@ -35,7 +35,7 @@ const names = std.StaticStringMap(Label).initComptime(.{
     .{ "EC PRIVATE KEY", .ec_private_key },
 });
 
-/// The blocks of keys zefir-jwt does not take: encrypted keys,
+/// The blocks of keys `security.jwt` does not take: encrypted keys,
 /// certificates, OpenSSH keys and RSA.
 const unsupported = std.StaticStringMap(void).initComptime(.{
     .{"ENCRYPTED PRIVATE KEY"},

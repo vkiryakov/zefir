@@ -1,4 +1,4 @@
-//! The examples of README.md, the guide of zefir-jwt. build.zig builds and
+//! The examples of README.md, the guide of zefir-security. build.zig builds and
 //! runs the programs and the tests; readme_test.zig checks that README.md
 //! shows every file as it is and every run as it printed.
 
@@ -37,7 +37,7 @@ const orders_key =
 const signing_key: Setting = .{ .name = "APP_AUTH_SIGNING_KEY", .value = orders_key, .shown = "\"$(cat orders.pem)\"" };
 const key_id: Setting = .{ .name = "APP_AUTH_KEY_ID", .value = "2026-10" };
 
-/// The programs: `zig build test-jwt` runs them.
+/// The programs: `zig build test-security` runs them.
 pub const programs = [_]Program{
     .{ .name = "minute", .env = &.{ signing_key, key_id } },
     .{ .name = "orders", .env = &.{ signing_key, key_id, .{ .name = "APP_USERS_ANN", .value = "ann-secret" } } },
@@ -57,7 +57,7 @@ pub const files = [_][]const u8{
     "rpc_auth_test",
 };
 
-/// The tests among `files`: `zig build test-jwt` runs them. The test of
+/// The tests among `files`: `zig build test-security` runs them. The test of
 /// the contract, billing_api, runs with its package.
 pub const tests = [_][]const u8{ "auth_test", "rpc_auth_test" };
 

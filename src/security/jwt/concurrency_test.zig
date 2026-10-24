@@ -1,7 +1,7 @@
 //! One `Signer` and one `Verifier` serve many tasks at once (design
 //! 5.13): they are immutable, and every call keeps its memory to itself;
 //! ECDSA also takes its noise from the `Io` of each call.
-//! `zig build test-jwt -Dtsan=true` runs this under ThreadSanitizer, in CI
+//! `zig build test-security -Dtsan=true` runs this under ThreadSanitizer, in CI
 //! too, on runners with few cores and next to the tests of other modules.
 //! So the test stays light: a few tasks per algorithm, a few tokens per
 //! task, and an arena of its own for each task instead of one allocator

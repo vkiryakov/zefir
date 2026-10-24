@@ -1,4 +1,4 @@
-//! A token that OpenSSL signed with ES384: a check of zefir-jwt's ES384
+//! A token that OpenSSL signed with ES384: a check of `security.jwt`'s ES384
 //! against another implementation, as RFC 7515 A.3 is one of ES256. The
 //! key is keys/p384.pk8.pem. OpenSSL 3.6 signed the first two parts of the
 //! token and wrote the signature in DER, which the token holds as r‖s:
@@ -10,7 +10,7 @@
 //! ```
 //!
 //! OpenSSL draws the nonce at random, and half of its signatures have the
-//! high s that zefir-jwt refuses: this one has the low s.
+//! high s that `security.jwt` refuses: this one has the low s.
 
 /// The header `{"alg":"ES384","typ":"JWT"}` and the payload
 /// `{"iss":"orders","sub":"user-7","aud":"orders","iat":1760000000,"exp":1760000900}`.

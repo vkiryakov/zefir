@@ -1,4 +1,4 @@
-// Application code (src/auth.zig of the orders service): zefir-jwt ships none of these.
+// Application code (src/auth.zig of the orders service): zefir-security ships none of these.
 //! The authentication of the orders service, made of ordinary middleware.
 //! `JwtAuth` sits in the server's middleware and checks the token of
 //! `Authorization: Bearer` on every request: a token of orders puts its

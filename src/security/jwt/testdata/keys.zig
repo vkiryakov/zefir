@@ -14,8 +14,8 @@ pub const File = struct {
     name: []const u8,
     bytes: []const u8,
     part: Part,
-    /// The algorithm of the key; null for a key that zefir-jwt refuses with
-    /// `UnsupportedKey`.
+    /// The algorithm of the key; null for a key that `security.jwt` refuses
+    /// with `UnsupportedKey`.
     algorithm: ?Algorithm,
 
     /// Whether the file is PEM; the others are DER.
@@ -28,7 +28,7 @@ fn embed(comptime name: []const u8, part: Part, algorithm: ?Algorithm) File {
     return .{ .name = name, .bytes = @embedFile("keys/" ++ name), .part = part, .algorithm = algorithm };
 }
 
-/// One key of each algorithm in every form that zefir-jwt reads (design
+/// One key of each algorithm in every form that `security.jwt` reads (design
 /// 5.8). The files of one algorithm hold one and the same key.
 pub const supported = [_]File{
     embed("ed25519.pk8.pem", .private, .EdDSA),
@@ -54,7 +54,7 @@ pub const supported = [_]File{
     embed("p384.pub.compressed.der", .public, .ES384),
 };
 
-/// Keys that zefir-jwt refuses with `UnsupportedKey`, whatever the
+/// Keys that `security.jwt` refuses with `UnsupportedKey`, whatever the
 /// algorithm: RSA in every form, P-521, Ed448, encrypted keys, a
 /// certificate and an OpenSSH key.
 pub const unsupported = [_]File{

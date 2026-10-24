@@ -1,11 +1,11 @@
-//! A reader of DER (X.690) for the key files of zefir-jwt, with every
+//! A reader of DER (X.690) for the key files of `security.jwt`, with every
 //! length checked against what is left of its parent before anything is
 //! sliced: input that lies about its lengths is `InvalidKey`, never a read
 //! past the end.
 
 const std = @import("std");
 
-/// The longest key file, in DER or in PEM, that zefir-jwt reads.
+/// The longest key file, in DER or in PEM, that `security.jwt` reads.
 pub const max_input_bytes = 16 * 1024;
 
 pub const Error = error{InvalidKey};

@@ -1,4 +1,4 @@
-//! The fuzz test of the parsers of zefir-jwt. The first byte of an input
+//! The fuzz test of the parsers of `security.jwt`. The first byte of an input
 //! picks the target and the rest goes to it:
 //!
 //! - a token, to `Verifier.verify` with one HS256 key;
@@ -12,10 +12,10 @@
 //! in a panic, and a call takes its memory from a bounded arena, as `verify`
 //! takes it from the arena of a request. ECDSA and Ed25519 tokens are not a
 //! target: their checks are slow and their inputs have fixed sizes, while
-//! the key loaders do run on EC and Ed25519 keys. `zig build test-jwt` runs
-//! the test on its corpus: the tokens of the RFCs and of the tests, header
-//! and payload JSON, and every file of testdata/keys/. `zig build fuzz-jwt
-//! --fuzz` runs the fuzzer (Linux, CI's fuzz.yml).
+//! the key loaders do run on EC and Ed25519 keys. `zig build test-security`
+//! runs the test on its corpus: the tokens of the RFCs and of the tests,
+//! header and payload JSON, and every file of testdata/keys/. `zig build
+//! fuzz-jwt --fuzz` runs the fuzzer (Linux, CI's fuzz.yml).
 
 const std = @import("std");
 const root = @import("root.zig");
