@@ -1,0 +1,12 @@
+.{
+    .name = .zefir_openapi_tests,
+    .version = "0.0.0",
+    .fingerprint = 0xd4919514e2590d,
+    .minimum_zig_version = "0.17.0",
+    // A package of its own, outside zefir's `.paths`: its checks need
+    // Docker, and users of zefir never fetch it.
+    .dependencies = .{
+        .zefir = .{ .path = "../.." },
+    },
+    .paths = .{""},
+}

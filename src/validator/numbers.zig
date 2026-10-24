@@ -5,6 +5,7 @@
 //! reports them by its own check, with the same code and message.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -321,6 +322,29 @@ fn finiteProblem(comptime rule: *const Rule, comptime T: type, comptime where: [
         .float => null,
         .int => core.ruleErrorText(rule, where, " is always true for " ++ @typeName(T) ++ "; remove it"),
         else => core.typeErrorText(rule, T, where, "a float", core.isFloat, null),
+    };
+}
+
+// ------------------------------------------------------------------ schema
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`; all exact. A bound is written as given: on a
+/// float field the rule compares in the field's type, which may differ in
+/// the last bit.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    return switch (rule.kind) {
+        .min => schema.exact(&.{schema.keyword("minimum", schema.param(rule.params[0]))}),
+        .max => schema.exact(&.{schema.keyword("maximum", schema.param(rule.params[0]))}),
+        .range => schema.exact(&.{ schema.keyword("minimum", schema.param(rule.params[0])), schema.keyword("maximum", schema.param(rule.params[1])) }),
+        // An unsigned field has no value between 0 and 1.
+        .positive => schema.exact(&.{if (@typeInfo(T) == .int and @typeInfo(T).int.signedness == .unsigned) schema.count("minimum", 1) else schema.count("exclusiveMinimum", 0)}),
+        .non_negative => schema.exact(&.{schema.count("minimum", 0)}),
+        .negative => schema.exact(&.{schema.count("exclusiveMaximum", 0)}),
+        .non_positive => schema.exact(&.{schema.count("maximum", 0)}),
+        .divisible_by => schema.exact(&.{schema.keyword("multipleOf", schema.param(rule.params[0]))}),
+        // JSON has no NaN and no infinity.
+        .finite => schema.exact(&.{}),
+        else => unreachable,
     };
 }
 

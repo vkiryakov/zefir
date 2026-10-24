@@ -22,7 +22,7 @@
 //! ```
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const opmsg = @import("opmsg.zig");
 const Hello = @import("Hello.zig");
 const errors = @import("../errors.zig");

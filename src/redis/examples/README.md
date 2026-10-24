@@ -234,7 +234,7 @@ everything happens in the calls of your tasks.
 Add Zefir to your `build.zig.zon`; redis ships since v0.10.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no

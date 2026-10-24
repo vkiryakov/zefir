@@ -13,6 +13,7 @@
 //! `error.OutOfMemory`, when a letter changes.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const strings = @import("strings.zig");
 const Allocator = std.mem.Allocator;
 const Transform = core.Transform;
@@ -66,6 +67,20 @@ pub fn transformWith(comptime f: anytype) Transform {
             }
         }.fits,
     };
+}
+
+/// The schema of a transform, for `v.schemaOf`: a transform checks nothing,
+/// so it has no keywords, and its note says what the server does to the
+/// value before its rules check it.
+pub fn schemaOf(comptime t: Transform) schema.RuleSchema {
+    return .{ .accuracy = .exact, .note = switch (t.kind) {
+        .trim => "Leading and trailing spaces are removed.",
+        .trim_start => "Leading spaces are removed.",
+        .trim_end => "Trailing spaces are removed.",
+        .to_lower => "Converted to lowercase.",
+        .to_upper => "Converted to uppercase.",
+        .transform_with => "The server changes the value before it checks it.",
+    } };
 }
 
 /// The arguments the hints show for `transformWith` used without a call:

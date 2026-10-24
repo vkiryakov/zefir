@@ -132,7 +132,7 @@ flowchart TD
 Add Zefir to your `build.zig.zon`; log ships since v0.3.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
 
 > [!IMPORTANT]

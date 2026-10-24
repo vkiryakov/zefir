@@ -9,7 +9,7 @@ const Io = std.Io;
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 
 pub const Scenario = struct {
     name: []const u8,

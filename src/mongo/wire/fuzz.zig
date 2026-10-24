@@ -8,10 +8,10 @@
 
 const std = @import("std");
 const testing = std.testing;
-const bson = @import("../bson.zig");
-const read = @import("../bson/read.zig");
+const bson = @import("mongo-bson");
+const codec = bson.codec;
 const opmsg = @import("opmsg.zig");
-const vectors = @import("../bson/vectors.zig");
+const vectors = bson.testing.vectors;
 
 fn fuzzReaders(_: void, smith: *testing.Smith) anyerror!void {
     var buffer: [4096]u8 = undefined;
@@ -30,17 +30,17 @@ fn check(bytes: []const u8) !void {
     var r: std.Io.Reader = .fixed(bytes);
     if (opmsg.readReply(&r, testing.allocator, .{ .request_id = answers, .max_message_size = 8192 }, null)) |reply| {
         defer reply.deinit();
-        try read.validate(reply.bytes, read.max_levels);
+        try codec.validateDepth(reply.bytes, codec.max_levels);
     } else |err| try testing.expect(err == error.ProtocolViolation or err == error.EndOfStream);
 
     r = .fixed(bytes);
     if (opmsg.readRequest(&r, testing.allocator, 8192, null)) |request| {
         defer request.deinit();
-        try read.validate(request.body.bytes, read.max_levels);
+        try codec.validateDepth(request.body.bytes, codec.max_levels);
         var sequences = request.sequences();
         while (sequences.next()) |sequence| {
             var docs = sequence.documents();
-            while (docs.next()) |doc| try read.validate(doc.bytes, read.max_levels);
+            while (docs.next()) |doc| try codec.validateDepth(doc.bytes, codec.max_levels);
         }
     } else |err| try testing.expect(err == error.ProtocolViolation or err == error.EndOfStream);
 }

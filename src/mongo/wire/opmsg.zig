@@ -20,8 +20,8 @@
 //! panic; the connection is not to be used after a violation.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
-const read = @import("../bson/read.zig");
+const bson = @import("mongo-bson");
+const codec = bson.codec;
 const errors = @import("../errors.zig");
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
@@ -127,7 +127,7 @@ pub const WriteError = Writer.Error || error{
 /// cannot be.
 pub fn writeRequest(w: *Writer, request: Request) WriteError!void {
     const body = request.body.bytes;
-    if (!read.isDocument(body)) return error.InvalidArgument;
+    if (!codec.isDocument(body)) return error.InvalidArgument;
     if (request.sequence) |sequence| {
         if (std.mem.findScalar(u8, sequence.identifier, 0) != null) return error.InvalidArgument;
     }
@@ -223,7 +223,7 @@ pub fn readReply(r: *Reader, allocator: std.mem.Allocator, expect: Expect, diagn
     if (checksum_len != 0 and try r.takeInt(u32, .little) != crc.final()) {
         return violation(diagnostics, "the checksum of the reply does not match its bytes", .{});
     }
-    read.validate(bytes, read.max_levels) catch return violation(diagnostics, "the document of the reply is not valid BSON, or nests too deep", .{});
+    codec.validateDepth(bytes, codec.max_levels) catch return violation(diagnostics, "the document of the reply is not valid BSON, or nests too deep", .{});
     return .{ .bytes = bytes, .allocator = allocator };
 }
 
@@ -327,7 +327,7 @@ pub fn readRequest(r: *Reader, allocator: std.mem.Allocator, max_message_size: u
 /// Writes `reply`, the answer to the request `response_to`, as a server
 /// does; flush `w` after it.
 pub fn writeReply(w: *Writer, request_id: i32, response_to: i32, reply: bson.RawDocument) WriteError!void {
-    if (!read.isDocument(reply.bytes)) return error.InvalidArgument;
+    if (!codec.isDocument(reply.bytes)) return error.InvalidArgument;
     const total = std.math.cast(i32, header_len + 4 + 1 + reply.bytes.len) orelse return error.InvalidArgument;
     try (Header{ .message_length = total, .request_id = request_id, .response_to = response_to, .op_code = op_code }).write(w);
     try w.writeInt(u32, 0, .little);
@@ -352,7 +352,7 @@ fn checkSections(sections: []const u8, diagnostics: ?*Diagnostics) ReadError!bso
         pos += section.len;
         if (kind == 0) {
             if (body != null) return violation(diagnostics, "the message holds two sections of kind 0", .{});
-            read.validate(section, read.max_levels) catch return violation(diagnostics, "the document of kind 0 is not valid BSON, or nests too deep", .{});
+            codec.validateDepth(section, codec.max_levels) catch return violation(diagnostics, "the document of kind 0 is not valid BSON, or nests too deep", .{});
             body = .{ .bytes = section };
             continue;
         }
@@ -364,7 +364,7 @@ fn checkSections(sections: []const u8, diagnostics: ?*Diagnostics) ReadError!bso
             if (section.len - at < 5) return violation(diagnostics, "document {d} of section '{s}' is cut short", .{ index, identifier });
             const doc_len = std.mem.readInt(i32, section[at..][0..4], .little);
             if (doc_len < 5 or doc_len > section.len - at) return violation(diagnostics, "document {d} of section '{s}' is cut short", .{ index, identifier });
-            read.validate(section[at..][0..@intCast(doc_len)], read.max_levels) catch {
+            codec.validateDepth(section[at..][0..@intCast(doc_len)], codec.max_levels) catch {
                 return violation(diagnostics, "document {d} of section '{s}' is not valid BSON, or nests too deep", .{ index, identifier });
             };
             at += @intCast(doc_len);

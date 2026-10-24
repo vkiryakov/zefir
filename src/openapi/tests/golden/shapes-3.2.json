@@ -1,0 +1,957 @@
+{
+  "openapi": "3.2.1",
+  "info": {
+    "title": "Orders API",
+    "version": "2.0.0",
+    "description": "The orders of a shop."
+  },
+  "servers": [
+    {
+      "url": "/api"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Orders"
+    }
+  ],
+  "paths": {
+    "/v1/orders": {
+      "post": {
+        "operationId": "Orders.create",
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Place an order",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderRequest"
+              },
+              "examples": {
+                "one line": {
+                  "summary": "A line of two",
+                  "value": {
+                    "customer": {
+                      "name": "Ada",
+                      "address": {
+                        "city": "London",
+                        "zip": "N1 9GU"
+                      }
+                    },
+                    "quantity": 2,
+                    "weightKg": 1.5,
+                    "priority": 0,
+                    "express": false,
+                    "size": "medium",
+                    "note": null,
+                    "tags": [],
+                    "lines": [
+                      {
+                        "sku": "A-1",
+                        "count": 2
+                      }
+                    ],
+                    "totalCents": 1250,
+                    "offset": 0,
+                    "ratio": 0.5
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content Too Large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "PayloadTooLarge": {
+                    "value": {
+                      "code": "payload_too_large",
+                      "message": "Content Too Large",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "UnsupportedMediaType": {
+                    "value": {
+                      "code": "unsupported_media_type",
+                      "message": "Unsupported Media Type",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Unprocessable Content",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "Orders.list",
+        "tags": [
+          "Orders"
+        ],
+        "summary": "List orders",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_OrderView"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orders/{id}": {
+      "get": {
+        "operationId": "Orders.get",
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Get an order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The id of the order.",
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "OrderNotFound": {
+                    "value": {
+                      "code": "orders.not_found",
+                      "message": "No such order.",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Unprocessable Content",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orders/{id}/shipments": {
+      "get": {
+        "operationId": "Orders.shipments",
+        "tags": [
+          "Orders"
+        ],
+        "summary": "List the parcels of an order",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The id of the order.",
+            "schema": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Parcel"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "code": "invalid_request",
+                      "message": "Bad Request",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "OrderNotFound": {
+                    "value": {
+                      "code": "orders.not_found",
+                      "message": "No such order.",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "code": "validation_failed",
+                      "message": "Unprocessable Content",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orders/counts": {
+      "get": {
+        "operationId": "Orders.counts",
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Count the orders of each size",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A page of results.",
+                  "required": [
+                    "items",
+                    "total"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "size",
+                          "orders"
+                        ],
+                        "properties": {
+                          "size": {
+                            "$ref": "#/components/schemas/Size"
+                          },
+                          "orders": {
+                            "type": "integer",
+                            "format": "uint32",
+                            "minimum": 0,
+                            "maximum": 4294967295
+                          }
+                        }
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "uint64",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "code": "internal",
+                      "message": "Internal Server Error",
+                      "details": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Access": {
+        "anyOf": [
+          {
+            "type": "string",
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          {
+            "type": "integer"
+          }
+        ]
+      },
+      "Address-Input": {
+        "type": "object",
+        "description": "Where an order goes.",
+        "required": [
+          "city"
+        ],
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "zip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The postal code, where the country has them.",
+            "default": null
+          }
+        },
+        "additionalProperties": false
+      },
+      "Address-Output": {
+        "type": "object",
+        "description": "Where an order goes.",
+        "required": [
+          "city",
+          "zip"
+        ],
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "zip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The postal code, where the country has them."
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "What went wrong.",
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Circle": {
+        "type": "object",
+        "required": [
+          "radiusMm"
+        ],
+        "properties": {
+          "radiusMm": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      },
+      "Customer-Input": {
+        "type": "object",
+        "required": [
+          "name",
+          "address"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "$ref": "#/components/schemas/Address-Input"
+          }
+        },
+        "additionalProperties": false,
+        "examples": [
+          {
+            "name": "Ada",
+            "address": {
+              "city": "London",
+              "zip": null
+            }
+          }
+        ]
+      },
+      "Customer-Output": {
+        "type": "object",
+        "required": [
+          "name",
+          "address"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "$ref": "#/components/schemas/Address-Output"
+          }
+        },
+        "examples": [
+          {
+            "name": "Ada",
+            "address": {
+              "city": "London",
+              "zip": null
+            }
+          }
+        ]
+      },
+      "Line": {
+        "type": "object",
+        "required": [
+          "sku"
+        ],
+        "properties": {
+          "sku": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "default": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "Money": {
+        "type": "string",
+        "description": "An amount, as a decimal string."
+      },
+      "OrderRequest": {
+        "type": "object",
+        "description": "An order of a customer.",
+        "required": [
+          "customer",
+          "quantity",
+          "lines",
+          "totalCents"
+        ],
+        "properties": {
+          "customer": {
+            "$ref": "#/components/schemas/Customer-Input"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "weightKg": {
+            "type": "number",
+            "format": "float",
+            "default": 1.5
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int8",
+            "minimum": -128,
+            "maximum": 127,
+            "default": 0
+          },
+          "express": {
+            "type": "boolean",
+            "default": false
+          },
+          "size": {
+            "$ref": "#/components/schemas/Size",
+            "default": "medium"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "tags": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "string"
+            }
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Line"
+            }
+          },
+          "totalCents": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "default": 0
+          },
+          "ratio": {
+            "type": "number",
+            "format": "double",
+            "default": 0.5
+          }
+        },
+        "additionalProperties": false
+      },
+      "OrderView": {
+        "type": "object",
+        "description": "An order, as the API shows it.",
+        "required": [
+          "id",
+          "customer",
+          "size",
+          "access",
+          "code",
+          "scores",
+          "pair",
+          "shape",
+          "otherShape",
+          "total",
+          "meta",
+          "big",
+          "small",
+          "maybeSize",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "customer": {
+            "$ref": "#/components/schemas/Customer-Output"
+          },
+          "size": {
+            "$ref": "#/components/schemas/Size"
+          },
+          "access": {
+            "$ref": "#/components/schemas/Access"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 3
+          },
+          "scores": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          },
+          "pair": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "integer",
+                "format": "uint8",
+                "minimum": 0,
+                "maximum": 255
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Shape"
+          },
+          "otherShape": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Shape"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total": {
+            "$ref": "#/components/schemas/Money"
+          },
+          "meta": {},
+          "big": {
+            "type": "integer"
+          },
+          "small": {
+            "type": "number",
+            "format": "float"
+          },
+          "maybeSize": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Size"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "The version of this form.",
+            "const": 2,
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
+      },
+      "Page_OrderView": {
+        "type": "object",
+        "description": "A page of results.",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderView"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        }
+      },
+      "Parcel": {
+        "type": "object",
+        "required": [
+          "id",
+          "carrier"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "carrier": {
+            "type": "string"
+          }
+        }
+      },
+      "Shape": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "circle"
+            ],
+            "properties": {
+              "circle": {
+                "$ref": "#/components/schemas/Circle"
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "square"
+            ],
+            "properties": {
+              "square": {
+                "type": "integer",
+                "format": "uint32",
+                "description": "The side, in millimetres.",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "none"
+            ],
+            "properties": {
+              "none": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        ],
+        "description": "The shape of the parcel."
+      },
+      "Size": {
+        "type": "string",
+        "enum": [
+          "small",
+          "medium",
+          "large"
+        ]
+      }
+    }
+  }
+}

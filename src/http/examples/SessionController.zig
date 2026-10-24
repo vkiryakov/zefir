@@ -6,28 +6,51 @@
 const std = @import("std");
 const http = @import("http");
 const v = @import("validator");
+const zefir = @import("zefir");
 const auth = @import("auth.zig");
+const dto = @import("dto.zig");
 
 const SessionController = @This();
 
 token_auth: *auth.TokenAuth,
 /// The streams of a user end when they sign out.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 
 pub const http_routes = http.routes(.{
     .prefix = "/session",
     .methods = .{
-        // A form of one field: a small limit for its body.
-        .login = http.post("", .{ .max_body_bytes = 1024 }),
+        // A form of one field, with a small limit for its body; the answer
+        // is a redirect, 303, not the default 204 of a handler of !void.
+        .login = http.post("", .{ .form = LoginForm, .responses = .{ .see_other = .{} }, .max_body_bytes = 1024 }),
         .logout = http.delete("", .{ .middleware = .{auth.requireUser} }),
     },
 });
+
+pub const openapi: zefir.openapi.ControllerDoc(@This()) = .{
+    .tag = "Session",
+    .description = "Signing a browser in and out, with the cookie session.",
+    .routes = .{
+        .login = .{
+            .summary = "Sign in",
+            .description = "Sets the cookie session to the token of the form and sends the browser to the page, /. A form that a page of another site posts gets 403.",
+            .responses = .{ .see_other = .{ .description = "Signed in: the cookie session is set, and the browser goes on to /." } },
+        },
+        .logout = .{
+            .summary = "Sign out",
+            .description = "Clears the cookie session and ends the streams of live updates of the user.",
+        },
+    },
+};
 
 /// The form of the page, `application/x-www-form-urlencoded`: `token=…`.
 pub const LoginForm = struct {
     token: []const u8,
 
     pub const field_rules = .{ .token = .{ v.trim, v.notBlank, v.maxLength(256) } };
+
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .fields = .{ .token = .{ .description = "The token of the user." } },
+    };
 };
 
 pub fn login(self: *SessionController, ctx: *http.Context) !void {

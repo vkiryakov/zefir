@@ -103,11 +103,24 @@ jobs:
         shell: bash
         working-directory: tests/mongo
         run: zig build check --summary all
+      # The same for tests/odm, the end-to-end tests of zefir-odm on
+      # mongo.OdmDriver, which need mongod in Docker: it stands on both
+      # modules.
+      - if: contains(format(' {0} ', env.MODULES), ' odm ') || contains(format(' {0} ', env.MODULES), ' mongo ')
+        shell: bash
+        working-directory: tests/odm
+        run: zig build check --summary all
       # The same for tests/redis, the end-to-end tests of zefir-redis, which
       # need Redis and Valkey in Docker.
       - if: contains(format(' {0} ', env.MODULES), ' redis ')
         shell: bash
         working-directory: tests/redis
+        run: zig build check --summary all
+      # The same for tests/openapi, whose checks need Docker: only
+      # openapi-tools runs them.
+      - if: contains(format(' {0} ', env.MODULES), ' openapi ')
+        shell: bash
+        working-directory: tests/openapi
         run: zig build check --summary all
       # The same for tests/app, the end-to-end tests of zefir.App, which
       # import the umbrella module: app-e2e runs them, and its shop against
@@ -173,7 +186,7 @@ jobs:
           zig fmt --check build.zig build.zig.zon src tests examples
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
-          --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg
+          --exclude tests/odm/zig-pkg --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
@@ -244,6 +257,40 @@ jobs:
         if: always()
         run: docker compose --profile mongo down
 
+  # The end-to-end tests of odm against mongod in Docker: the conformance
+  # suite on mongo.OdmDriver and the registry on mongo-plain and
+  # mongo-auth, then the programs of its guide, checked against the guide;
+  # ubuntu only, as mongo-e2e. One server version: mongo-e2e
+  # runs the driver on each, and odm does not depend on it. It is not a
+  # required check. It runs when odm or mongo is among the modules to
+  # test, as tests/odm stands on both. The stress tests of tests/odm run on
+  # a developer's machine only.
+  odm-e2e:
+    name: odm-e2e
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' odm ') || contains(format(' {0} ', needs.changes.outputs.modules), ' mongo ')
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    env:
+      MONGO_VERSION: "9.0.4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # The two services of the tests only.
+      - name: Start the mongod servers
+        run: docker compose --profile mongo up --detach --wait mongo-plain mongo-auth
+      - name: Run the end-to-end tests
+        working-directory: tests/odm
+        timeout-minutes: 15
+        run: zig build e2e --summary all
+      # Why a server did not start or a test failed: what mongod said.
+      - name: Show the logs of the mongod servers
+        if: failure()
+        run: docker compose --profile mongo logs --no-color --tail 200 mongo-plain mongo-auth
+      - name: Stop the mongod servers
+        if: always()
+        run: docker compose --profile mongo down
+
   # The end-to-end tests of redis against Redis and Valkey in Docker, on
   # each server the client is tested with, through REDIS_IMAGE; ubuntu
   # only, as nats-e2e. It is not a required check. It runs when redis is
@@ -281,6 +328,29 @@ jobs:
       - name: Stop the Redis servers
         if: always()
         run: docker compose --profile redis down
+
+  # The JSON Schema that the validator and zefir-openapi write, in the
+  # tools of other languages, in Docker (tests/openapi): the regular
+  # expressions of v.schemaOf with ajv in Node (ECMA-262) and with Go's
+  # regexp (RE2), on the vectors of src/validator/testdata/regex_vectors.zig;
+  # the golden documents against the official JSON Schema of OAS 3.1 and
+  # 3.2; and the bodies the golden applications read and write against
+  # their schemas. Docker runs Linux containers on the Linux runners only,
+  # so this job is ubuntu only. It runs when openapi is among the modules to
+  # test, as it is for every change to the validator, which openapi imports.
+  openapi-tools:
+    name: openapi-tools
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' openapi ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Check the regular expressions, the documents and the bodies in JavaScript and in Go
+        working-directory: tests/openapi
+        timeout-minutes: 15
+        run: zig build all --summary all
 
   # The package of examples/rpc-custom-transport: a transport outside zefir,
   # on the public API of rpc only, built the way an application builds it
@@ -346,6 +416,27 @@ jobs:
         working-directory: tests/http
         timeout-minutes: 10
         run: zig build e2e --summary all
+
+  # Schemathesis against the service of the http guide on the network, in
+  # Docker (tests/http): it sends every operation of the service's OpenAPI
+  # document but its stream of events requests that the document allows,
+  # and checks each response against the document. Docker runs Linux
+  # containers on the Linux runners only, so this job is ubuntu only. It is
+  # not a required check. It runs when http is among the modules to test,
+  # as it is for every change to openapi, whose document the guide serves.
+  http-schemathesis:
+    name: http-schemathesis
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' http ')
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - name: Run Schemathesis against the service of the guide
+        working-directory: tests/http
+        timeout-minutes: 15
+        run: zig build schemathesis --summary all
 
   # The end-to-end tests of tests/app: zefir.App with a server of
   # zefir-http on http.native over loopback and one of zefir-rpc on the

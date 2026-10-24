@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const client_results = @import("../results.zig");
 const id = @import("id.zig");
 const WriteResult = client_results.WriteResult;

@@ -15,6 +15,7 @@
 //! where the rule reports the precondition.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -643,6 +644,89 @@ fn passwordMessage(comptime options: StrongPasswordOptions) []const u8 {
         out = out ++ (if (i == 0) " and contain at least " else if (i == parts.len - 1) " and " else ", ") ++ part;
     }
     return out;
+}
+
+// ------------------------------------------------------------------ schema
+
+/// Unicode White_Space as `isWhiteSpace` lists it, the inside of a
+/// character class.
+const white_space_class = "\t\n\x0b\x0c\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}";
+
+/// The half-width class H of `isHalfWidthCodePoint`, the inside of a
+/// character class.
+const half_width_class = " -~\u{ff61}-\u{ffdc}\u{ffe8}-\u{ffee}";
+
+/// A code point outside H: what `fullWidth` looks for.
+const full_width_pattern = "[^" ++ half_width_class ++ "]";
+
+/// A code point in H: what `halfWidth` looks for.
+const half_width_pattern = "[" ++ half_width_class ++ "]";
+
+/// The classes of `strongPassword` and the inside of a character class for
+/// each, in the order of its options: the symbols are U+0020-002F,
+/// U+003A-0040, U+005B-0060, U+007B-007E and U+00A3, as `isPasswordSymbol`
+/// has them.
+const password_classes = [_][]const u8{ "a-z", "A-Z", "0-9", " -/:-@\\[-`{-~\u{a3}" };
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`. JSON Schema counts code points, as the length
+/// rules do; bytes it cannot count, so `minBytes` and `maxBytes` are
+/// approximate. The other rules are patterns, exact on the valid UTF-8 that
+/// a JSON string is.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    _ = T;
+    return switch (rule.kind) {
+        .min_length => schema.exact(&.{schema.count("minLength", rule.params[0].value.int)}),
+        .max_length => schema.exact(&.{schema.count("maxLength", rule.params[0].value.int)}),
+        .length => schema.exact(&.{ schema.count("minLength", rule.params[0].value.int), schema.count("maxLength", rule.params[1].value.int) }),
+        // A code point takes 1 to 4 bytes.
+        .min_bytes => schema.approximate(
+            &.{schema.count("minLength", @divFloor(rule.params[0].value.int + 3, 4))},
+            "at least " ++ core.plural(rule.params[0].value.int, "byte", "bytes") ++ " in UTF-8",
+        ),
+        .max_bytes => schema.approximate(
+            &.{schema.count("maxLength", rule.params[0].value.int)},
+            "at most " ++ core.plural(rule.params[0].value.int, "byte", "bytes") ++ " in UTF-8",
+        ),
+        // A JSON string is valid Unicode.
+        .utf8 => schema.exact(&.{}),
+        .not_blank => schema.exact(&.{schema.pattern("[^" ++ white_space_class ++ "]")}),
+        .ascii => schema.exact(&.{schema.pattern("^[\x00-\x7f]*$")}),
+        .printable_ascii => schema.exact(&.{schema.pattern("^[ -~]*$")}),
+        .alphanumeric => schema.exact(&.{schema.pattern("^[0-9A-Za-z]*$")}),
+        .alpha => schema.exact(&.{schema.pattern("^[A-Za-z]*$")}),
+        .digits => schema.exact(&.{schema.pattern("^[0-9]*$")}),
+        .lowercase => schema.exact(&.{schema.pattern("^[^A-Z]*$")}),
+        .uppercase => schema.exact(&.{schema.pattern("^[^a-z]*$")}),
+        .multibyte => schema.exact(&.{schema.pattern("[^\x00-\x7f]")}),
+        .full_width => schema.exact(&.{schema.pattern(full_width_pattern)}),
+        .half_width => schema.exact(&.{schema.pattern(half_width_pattern)}),
+        .variable_width => schema.exact(&.{schema.allPatterns(&.{ full_width_pattern, half_width_pattern })}),
+        .contains => schema.exact(&.{schema.pattern(schema.literal(rule.params[0].value.string))}),
+        .not_contains => schema.exact(&.{schema.keyword("not", schema.stringPattern(schema.literal(rule.params[0].value.string)))}),
+        .strong_password => passwordSchema(rule),
+        else => unreachable,
+    };
+}
+
+/// `strongPassword`: `minLength` for `min_length` and, for each class with a
+/// minimum, a pattern that finds that many characters of the class. A
+/// minimum above `schema.max_repeat` is written as that many, which RE2 still
+/// reads: the schema is then approximate.
+fn passwordSchema(comptime rule: Rule) schema.RuleSchema {
+    var regexes: []const []const u8 = &.{};
+    var capped = false;
+    for (password_classes, rule.params[1..]) |class, minimum| {
+        const n = minimum.value.int;
+        if (n == 0) continue;
+        if (n > schema.max_repeat) capped = true;
+        const repeat = @min(n, schema.max_repeat);
+        regexes = regexes ++ &[_][]const u8{"^(?:[^" ++ class ++ "]*[" ++ class ++ "])" ++ schema.repetition(repeat, repeat)};
+    }
+    const min_length = schema.count("minLength", rule.params[0].value.int);
+    const keywords: []const schema.RuleSchema.Keyword = if (regexes.len == 0) &.{min_length} else &.{ min_length, schema.allPatterns(regexes) };
+    if (capped) return schema.approximate(keywords, "every minimum of strongPassword, of which a pattern counts at most " ++ schema.integer(schema.max_repeat));
+    return schema.exact(keywords);
 }
 
 /// The arguments the hints show for an uncalled constructor of this file:

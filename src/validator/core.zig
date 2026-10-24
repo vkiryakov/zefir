@@ -3559,22 +3559,36 @@ test "coerces accepts the conversions v.custom documents and nothing else" {
 }
 
 /// `; did you mean "name"?` for a likely typo of a non-comptime field of the
-/// struct `T`, or "". The rule is confy's: the closest field by edit
-/// distance, ignoring ASCII case, when that distance is below 3 and below the
-/// key's length; on a tie the first field in declaration order wins.
+/// struct `T`, or "": the field that `closest` names among them.
 pub fn suggestion(comptime T: type, comptime key: []const u8) []const u8 {
+    @setEvalBranchQuota(eval_quota);
+    var fields: []const []const u8 = &.{};
+    for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_attrs) |name, attrs| {
+        if (!attrs.@"comptime") fields = fields ++ &[_][]const u8{name};
+    }
+    return if (closest(fields, key)) |name| "; did you mean \"" ++ name ++ "\"?" else "";
+}
+
+/// The name among `names` that `key` is most likely a typo of, or null. The
+/// rule is confy's: the closest name by edit distance, ignoring ASCII case,
+/// when that distance is below 3 and below the key's length; on a tie the
+/// first name wins. Runs at compile time.
+pub fn closest(comptime names: []const []const u8, comptime key: []const u8) ?[]const u8 {
+    return comptime closestName(names, key);
+}
+
+fn closestName(comptime names: []const []const u8, comptime key: []const u8) ?[]const u8 {
     @setEvalBranchQuota(eval_quota);
     var best: ?[]const u8 = null;
     var best_distance: usize = 3;
-    for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_attrs) |name, attrs| {
-        if (attrs.@"comptime") continue;
+    for (names) |name| {
         const distance = editDistance(key, name) orelse continue;
         if (distance < best_distance and distance < key.len) {
             best = name;
             best_distance = distance;
         }
     }
-    return if (best) |name| "; did you mean \"" ++ name ++ "\"?" else "";
+    return best;
 }
 
 /// Levenshtein distance ignoring ASCII case; null when a name is longer than
@@ -3615,6 +3629,19 @@ test "suggestion needs a distance below 3 and below the key's length, and never 
 test "suggestion prefers the first field in declaration order on a tie" {
     const S = struct { cat: u32, car: u32 };
     try std.testing.expectEqualStrings("; did you mean \"cat\"?", comptime suggestion(S, "cax"));
+}
+
+test "closest names the nearest name within 2 edits, ignoring ASCII case" {
+    const names: []const []const u8 = &.{ "name", "email", "age" };
+    try std.testing.expectEqualStrings("name", root.closest(names, "nmae").?);
+    try std.testing.expectEqualStrings("name", root.closest(names, "NAME").?);
+    try std.testing.expectEqualStrings("email", root.closest(names, "emial").?);
+    try std.testing.expectEqual(null, root.closest(names, "zzz"));
+    // "age" is 2 edits away, which is not below the key's length.
+    try std.testing.expectEqual(null, root.closest(names, "a"));
+    try std.testing.expectEqualStrings("ab", root.closest(&.{"ab"}, "abc").?);
+    // On a tie the first name wins.
+    try std.testing.expectEqualStrings("cat", root.closest(&.{ "cat", "car" }, "cax").?);
 }
 
 test "editDistance counts edits ignoring ASCII case and gives up over 64 bytes" {

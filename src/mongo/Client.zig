@@ -15,7 +15,7 @@
 //!     return err;
 //! };
 //! defer client.close(io);
-//! var ids: mongo.bson.ObjectId.Generator = .init(io);
+//! var ids: bson.ObjectId.Generator = .init(io);
 //! const db: mongo.Database = .init(&client, "app", &ids);
 //! ```
 //!
@@ -114,7 +114,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const core = @import("core");
 const mongo = @import("root.zig");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Diagnostics = mongo.Diagnostics;
 const OperationContext = mongo.OperationContext;
 const Cursor = @import("Cursor.zig");

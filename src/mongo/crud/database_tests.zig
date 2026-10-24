@@ -7,7 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const core = @import("core");
 const mongo = @import("../root.zig");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Script = mongo.testing.Script;
 const Served = @import("../tests/Served.zig");
 

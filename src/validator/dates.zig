@@ -12,6 +12,7 @@
 //! and run in time linear in the input.
 const std = @import("std");
 const core = @import("core.zig");
+const schema = @import("schema.zig");
 const Rule = core.Rule;
 const Outcome = core.Outcome;
 
@@ -245,6 +246,44 @@ pub fn maxDate(comptime max: []const u8) Rule {
     @setEvalBranchQuota(core.eval_quota);
     if (boundCallProblem(.max_date, max)) |text| @compileError(text);
     return boundRule(.max_date, max);
+}
+
+// ------------------------------------------------------------------ schema
+
+/// A full-date of `isDate`, without anchors: a year 0000-9999 and a day that
+/// exists in its month, 29 February in the leap years of the proleptic
+/// Gregorian calendar (0000 among them).
+const date_pattern = "(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))" ++
+    "|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)";
+
+/// The shape of a date-time of `isRfc3339`, without the limits of its
+/// numbers and of leap seconds.
+const rfc3339_shape_pattern = "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$";
+
+/// The shapes of the forms of `isIso8601`, without the calendar and the
+/// limits of the time.
+const iso8601_shape_pattern = "^[0-9]{4}(?:-[0-9]{2}|-?W[0-9]{2}|(?:-[0-9]{2}-[0-9]{2}|[0-9]{4}|-?[0-9]{3}|-W[0-9]{2}-[0-9]|W[0-9]{3})" ++
+    "(?:[Tt ][0-9]{2}(?::[0-9]{2}(?::[0-9]{2})?|[0-9]{2}(?:[0-9]{2})?)?(?:[.,][0-9]+)?(?:[Zz]|[+-][0-9]{2}(?::?[0-9]{2})?)?)?)?$";
+
+/// The JSON Schema keywords of a rule of this file on the unwrapped field
+/// type `T`, for `v.schemaOf`. `date` and `militaryTime` are exact patterns,
+/// the calendar included; `rfc3339` and `iso8601` get their shapes, since a
+/// leap second depends on the offset; JSON Schema has no keyword that
+/// compares dates, so `minDate` and `maxDate` have a note only.
+pub fn schemaOf(comptime rule: Rule, comptime T: type) schema.RuleSchema {
+    _ = T;
+    return switch (rule.kind) {
+        .date => schema.exact(&.{ schema.format("date"), schema.pattern("^" ++ date_pattern ++ "$") }),
+        .rfc3339 => schema.approximate(&.{ schema.format("date-time"), schema.pattern(rfc3339_shape_pattern) }, "a valid RFC 3339 date-time"),
+        .iso8601 => schema.approximate(&.{schema.pattern(iso8601_shape_pattern)}, "a valid ISO 8601 date or date-time"),
+        .min_date, .max_date => blk: {
+            const bound = rule.params[0].value.string;
+            const form = if (isDate(bound)) "a date" else "an RFC 3339 date-time";
+            break :blk schema.none(form ++ (if (rule.kind == .min_date) " not before " else " not after ") ++ bound);
+        },
+        .military_time => schema.exact(&.{schema.pattern("^(?:[01][0-9]|2[0-3]):?[0-5][0-9]$")}),
+        else => unreachable,
+    };
 }
 
 /// The arguments the hints show for an uncalled constructor of this file:
