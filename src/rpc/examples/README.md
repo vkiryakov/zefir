@@ -1661,7 +1661,7 @@ fn sameToken(given: []const u8, expected: []const u8) bool {
   a request is what the client says; compare it with `identity.tenant_id`.
 
 An authenticator that verifies signed tokens instead of a table of them is
-`JwtAuthenticator` of [the zefir-jwt guide](../../jwt/examples/README.md),
+`JwtAuthenticator` of [the zefir-security guide](../../security/examples/README.md),
 of the same shape.
 
 The whole service, with the authenticator, the store and the middleware on

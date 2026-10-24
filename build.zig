@@ -6,8 +6,8 @@ const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
-const jwt_cases = @import("src/jwt/tests/cases.zig");
-const jwt_guide = @import("src/jwt/examples/cases.zig");
+const jwt_cases = @import("src/security/jwt/tests/cases.zig");
+const security_guide = @import("src/security/examples/cases.zig");
 const openapi_cases = @import("src/openapi/tests/cases.zig");
 const openapi_guide = @import("src/openapi/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
@@ -162,9 +162,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // JSON Web Tokens of zefir services: signing and verification.
-    const jwt = b.addModule("zefir-jwt", .{
-        .root_source_file = b.path("src/jwt/root.zig"),
+    // The security of zefir services; for now its JSON Web Tokens, signing
+    // and verification, as security.jwt.
+    const security = b.addModule("zefir-security", .{
+        .root_source_file = b.path("src/security/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
@@ -187,7 +188,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .redis, .nats, .http, .jwt, .openapi
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .redis, .nats, .http, .security, .openapi
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -206,7 +207,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
-            .{ .name = "jwt", .module = jwt },
+            .{ .name = "security", .module = security },
             .{ .name = "openapi", .module = openapi },
         },
     });
@@ -228,7 +229,7 @@ pub fn build(b: *std.Build) void {
     const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
-    const test_jwt = addModuleTestStep(b, test_step, "jwt");
+    const test_security = addModuleTestStep(b, test_step, "security");
     const test_openapi = addModuleTestStep(b, test_step, "openapi");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
@@ -236,8 +237,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, redis, nats, http, jwt, openapi, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_redis, test_nats, test_http, test_jwt, test_openapi, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, redis, nats, http, security, openapi, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_redis, test_nats, test_http, test_security, test_openapi, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -298,17 +299,18 @@ pub fn build(b: *std.Build) void {
     });
     test_http.dependOn(&b.addRunArtifact(http_check_release).step);
 
-    addJwtCompileChecks(b, test_jwt, jwt, validator, target, optimize);
-    // The examples of the zefir-jwt guide: a service of zefir-http that
-    // signs its users in, and one of zefir-rpc that checks their tokens.
-    addJwtGuide(b, test_jwt, .{
+    addJwtCompileChecks(b, test_security, security, validator, target, optimize);
+    // The examples of the zefir-security guide: a service of zefir-http
+    // that signs its users in, and one of zefir-rpc that checks their
+    // tokens.
+    addSecurityGuide(b, test_security, .{
         .core = core,
         .validator = validator,
         .confy = confy,
         .log = log,
         .http = http,
         .rpc = rpc,
-        .jwt = jwt,
+        .security = security,
     }, target, optimize, tsan);
     // The guide of zefir.App: the tests of its shop, which imports the
     // umbrella module, and a program whose server does not stop.
@@ -332,15 +334,15 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_http.dependOn(&b.addRunArtifact(http_fuzz_tests).step);
 
-    // `zig build fuzz-jwt` runs the fuzz test of zefir-jwt's parsers of
+    // `zig build fuzz-jwt` runs the fuzz test of security.jwt's parsers of
     // tokens, headers, payloads and key files on its corpus, once, like
-    // `zig build test-jwt` does; with `--fuzz` it runs the fuzzer on it
-    // (Linux: CI's fuzz.yml).
-    const fuzz_jwt = b.step("fuzz-jwt", "Run the fuzz test of the zefir-jwt parsers; with --fuzz, the fuzzer (Linux)");
+    // `zig build test-security` does; with `--fuzz` it runs the fuzzer on
+    // it (Linux: CI's fuzz.yml).
+    const fuzz_jwt = b.step("fuzz-jwt", "Run the fuzz test of the security.jwt parsers; with --fuzz, the fuzzer (Linux)");
     const jwt_fuzz_tests = b.addTest(.{
         .name = "fuzz-jwt",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/jwt/fuzz.zig"),
+            .root_source_file = b.path("src/security/jwt/fuzz.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -2432,33 +2434,34 @@ fn addOpenapiCompileChecks(
     }
 }
 
-/// The modules that the examples of the jwt guide import.
-const JwtGuideModules = struct {
+/// The modules that the examples of the security guide import.
+const SecurityGuideModules = struct {
     core: *std.Build.Module,
     validator: *std.Build.Module,
     confy: *std.Build.Module,
     log: *std.Build.Module,
     http: *std.Build.Module,
     rpc: *std.Build.Module,
-    jwt: *std.Build.Module,
+    security: *std.Build.Module,
 };
 
-/// The examples of src/jwt/examples/README.md, the guide of zefir-jwt, as
-/// cases.zig there lists them: the tests of the services, on the backend of
-/// zefir-http and the server of zefir-rpc in memory, and the programs, each
-/// run with its settings in the environment through example_main.zig,
-/// which exits with code 3 on a panic instead of aborting and with code 4
-/// past its time limit; it must exit with 0. readme_test.zig then checks
-/// that README.md shows every file as it is and every run as it printed.
-fn addJwtGuide(
+/// The examples of src/security/examples/README.md, the guide of
+/// zefir-security, as cases.zig there lists them: the tests of the
+/// services, on the backend of zefir-http and the server of zefir-rpc in
+/// memory, and the programs, each run with its settings in the environment
+/// through example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is
+/// and every run as it printed.
+fn addSecurityGuide(
     b: *std.Build,
-    test_jwt: *std.Build.Step,
-    m: JwtGuideModules,
+    test_security: *std.Build.Step,
+    m: SecurityGuideModules,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     tsan: bool,
 ) void {
-    const dir = "src/jwt/examples/";
+    const dir = "src/security/examples/";
     // The package of the contract of billing, which its clients would
     // fetch, with the test of its rules.
     const billing_api = b.createModule(.{
@@ -2471,7 +2474,7 @@ fn addJwtGuide(
             .{ .name = "validator", .module = m.validator },
         },
     });
-    test_jwt.dependOn(&addRun(b, b.addTest(.{ .name = "jwt-guide-billing_api", .root_module = billing_api }), tsan).step);
+    test_security.dependOn(&addRun(b, b.addTest(.{ .name = "security-guide-billing_api", .root_module = billing_api }), tsan).step);
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = m.core },
         .{ .name = "validator", .module = m.validator },
@@ -2479,12 +2482,12 @@ fn addJwtGuide(
         .{ .name = "log", .module = m.log },
         .{ .name = "http", .module = m.http },
         .{ .name = "rpc", .module = m.rpc },
-        .{ .name = "jwt", .module = m.jwt },
+        .{ .name = "security", .module = m.security },
         .{ .name = "billing-api", .module = billing_api },
     };
-    for (jwt_guide.tests) |name| {
+    for (security_guide.tests) |name| {
         const tests = b.addTest(.{
-            .name = b.fmt("jwt-guide-{s}", .{name}),
+            .name = b.fmt("security-guide-{s}", .{name}),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
                 .target = target,
@@ -2493,7 +2496,7 @@ fn addJwtGuide(
                 .imports = imports,
             }),
         });
-        test_jwt.dependOn(&addRun(b, tests, tsan).step);
+        test_security.dependOn(&addRun(b, tests, tsan).step);
     }
 
     const readme = b.createModule(.{
@@ -2502,9 +2505,9 @@ fn addJwtGuide(
         .optimize = optimize,
         .sanitize_thread = tsan,
     });
-    for (jwt_guide.programs) |program| {
+    for (security_guide.programs) |program| {
         const exe = b.addExecutable(.{
-            .name = b.fmt("jwt-guide-{s}", .{program.name}),
+            .name = b.fmt("security-guide-{s}", .{program.name}),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(dir ++ "example_main.zig"),
                 .target = target,
@@ -2524,23 +2527,23 @@ fn addJwtGuide(
         run.expectExitCode(0);
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
-    test_jwt.dependOn(&addRun(b, b.addTest(.{ .name = "jwt-guide-readme", .root_module = readme }), tsan).step);
+    test_security.dependOn(&addRun(b, b.addTest(.{ .name = "security-guide-readme", .root_module = readme }), tsan).step);
 }
 
-/// The compile checks of zefir-jwt, from the lists in
-/// src/jwt/tests/cases.zig: claims types that must fail to compile with
-/// their message, and claims types that must compile. Each file imports
-/// "jwt" and "validator".
+/// The compile checks of security.jwt, from the lists in
+/// src/security/jwt/tests/cases.zig: claims types that must fail to
+/// compile with their message, and claims types that must compile. Each
+/// file imports "security" and "validator".
 fn addJwtCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
-    jwt: *std.Build.Module,
+    security: *std.Build.Module,
     validator: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
 ) void {
     const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "jwt", .module = jwt },
+        .{ .name = "security", .module = security },
         .{ .name = "validator", .module = validator },
     };
     // Each fixture is compiled (never run) and passes only when the

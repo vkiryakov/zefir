@@ -16,7 +16,7 @@ pub const mongo = @import("mongo");
 pub const redis = @import("redis");
 pub const nats = @import("nats");
 pub const http = @import("http");
-pub const jwt = @import("jwt");
+pub const security = @import("security");
 pub const openapi = @import("openapi");
 
 test {
@@ -57,6 +57,7 @@ test "zefir.log writes a confy.Secret as one [REDACTED], wherever it sits" {
 
 test "zefir.log writes a jwt.Key and a jwt.SigningKey as [REDACTED]" {
     const std = @import("std");
+    const jwt = security.jwt;
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const logger: log.Logger = try .init(std.testing.allocator, std.testing.io, .{ .output = .{ .writer = &out.writer } });
