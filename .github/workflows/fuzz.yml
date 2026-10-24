@@ -4,10 +4,11 @@ name: Fuzz
 # parser, the fuzz test of src/http/h1/fuzz.zig, which reads every input in
 # one piece and in pieces of 1 to 64 bytes and expects the same requests,
 # starting from the corpus of src/http/h1/testdata/. Job fuzz-jwt:
-# zefir-jwt's parsers of tokens, headers, payloads and key files, the fuzz
-# test of src/jwt/fuzz.zig, which expects a value or an error and never a
-# panic, starting from the RFC vectors, the JSON of its tests and the key
-# files of src/jwt/testdata/. Zig's fuzzer runs on Linux only.
+# security.jwt's parsers of tokens, headers, payloads and key files, the
+# fuzz test of src/security/jwt/fuzz.zig, which expects a value or an
+# error and never a panic, starting from the RFC vectors, the JSON of its
+# tests and the key files of src/security/jwt/testdata/. Zig's fuzzer runs
+# on Linux only.
 #
 # It runs on a pull request into dev that changes either parser, and by
 # hand: `gh workflow run fuzz.yml --ref <branch> -f runs=100M`; GitHub
@@ -17,8 +18,8 @@ name: Fuzz
 # input, its job fails and uploads the fuzzer's state: the files `in<hex>`
 # of .zig-cache/f/ hold the inputs it was working on, and
 # .zig-cache/tmp/libfuzzer.log what it printed. A failing input becomes a
-# case of src/http/h1/testdata/cases.zig, or a test of src/jwt/, with the
-# fix.
+# case of src/http/h1/testdata/cases.zig, or a test of src/security/jwt/,
+# with the fix.
 
 on:
   pull_request:
@@ -27,8 +28,8 @@ on:
       - src/http/h1/**
       # The parsers of jwt and their corpus, not its guide or compile
       # probes.
-      - src/jwt/*.zig
-      - src/jwt/testdata/**
+      - src/security/jwt/*.zig
+      - src/security/jwt/testdata/**
       - .github/workflows/fuzz.yml
   workflow_dispatch:
     inputs:

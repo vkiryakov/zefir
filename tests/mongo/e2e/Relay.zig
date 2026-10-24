@@ -14,7 +14,7 @@
 const std = @import("std");
 const Io = std.Io;
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Script = mongo.testing.Script;
 const Relay = @This();
 

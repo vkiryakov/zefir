@@ -3,10 +3,10 @@
 
 const std = @import("std");
 const testing = std.testing;
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const opmsg = @import("opmsg.zig");
 const errors = @import("../errors.zig");
-const vectors = @import("../bson/vectors.zig");
+const vectors = bson.testing.vectors;
 
 const Crc = std.hash.crc.@"CRC-32/ISCSI";
 

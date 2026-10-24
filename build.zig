@@ -6,9 +6,13 @@ const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
-const jwt_cases = @import("src/jwt/tests/cases.zig");
-const jwt_guide = @import("src/jwt/examples/cases.zig");
+const jwt_cases = @import("src/security/jwt/tests/cases.zig");
+const security_guide = @import("src/security/examples/cases.zig");
+const openapi_cases = @import("src/openapi/tests/cases.zig");
+const openapi_guide = @import("src/openapi/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
+const odm_cases = @import("src/odm/tests/cases.zig");
+const odm_guide = @import("src/odm/examples/cases.zig");
 const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -94,18 +98,33 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const orm = b.addModule("zefir-orm", .{
-        .root_source_file = b.path("src/orm/root.zig"),
+    // BSON, the format of MongoDB's documents, for zefir-mongo and any
+    // other driver. It imports nothing.
+    const mongo_bson = b.addModule("zefir-mongo-bson", .{
+        .root_source_file = b.path("src/mongo-bson/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+
+    // A typed ODM for MongoDB: models, queries, connections and tenants.
+    // It reaches a database only through its driver contract, so it
+    // imports no driver.
+    const odm = b.addModule("zefir-odm", .{
+        .root_source_file = b.path("src/odm/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "log", .module = log },
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "core", .module = core },
+            .{ .name = "validator", .module = validator },
         },
     });
 
-    // MongoDB for zefir applications: the client, BSON and the
-    // collection API.
+    // MongoDB for zefir applications: the client and the collection API,
+    // on the BSON of mongo-bson, and the reference driver of zefir-odm,
+    // which implements odm's driver contract.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -113,6 +132,8 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = tsan,
         .imports = &.{
             .{ .name = "core", .module = core },
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "odm", .module = odm },
         },
     });
     mongo.addImport("build_options", build_options);
@@ -141,9 +162,10 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // JSON Web Tokens of zefir services: signing and verification.
-    const jwt = b.addModule("zefir-jwt", .{
-        .root_source_file = b.path("src/jwt/root.zig"),
+    // The security of zefir services; for now its JSON Web Tokens, signing
+    // and verification, as security.jwt.
+    const security = b.addModule("zefir-security", .{
+        .root_source_file = b.path("src/security/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
@@ -152,7 +174,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .orm, .mongo, .redis, .nats, .http, .jwt
+    // The OpenAPI document of a zefir-http server, which the compiler builds
+    // from the types the server works with: what http.describe tells of the
+    // server, and the rules of the DTOs as v.schemaOf gives them.
+    const openapi = b.addModule("zefir-openapi", .{
+        .root_source_file = b.path("src/openapi/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "http", .module = http },
+            .{ .name = "validator", .module = validator },
+        },
+    });
+
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .redis, .nats, .http, .security, .openapi
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -165,12 +201,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = validator },
             .{ .name = "rpc", .module = rpc },
             .{ .name = "rpc-nats", .module = rpc_nats },
-            .{ .name = "orm", .module = orm },
+            .{ .name = "mongo-bson", .module = mongo_bson },
+            .{ .name = "odm", .module = odm },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
             .{ .name = "http", .module = http },
-            .{ .name = "jwt", .module = jwt },
+            .{ .name = "security", .module = security },
+            .{ .name = "openapi", .module = openapi },
         },
     });
 
@@ -185,20 +223,22 @@ pub fn build(b: *std.Build) void {
     const test_validator = addModuleTestStep(b, test_step, "validator");
     const test_rpc = addModuleTestStep(b, test_step, "rpc");
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
-    const test_orm = addModuleTestStep(b, test_step, "orm");
+    const test_mongo_bson = addModuleTestStep(b, test_step, "mongo-bson");
+    const test_odm = addModuleTestStep(b, test_step, "odm");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
     const test_http = addModuleTestStep(b, test_step, "http");
-    const test_jwt = addModuleTestStep(b, test_step, "jwt");
+    const test_security = addModuleTestStep(b, test_step, "security");
+    const test_openapi = addModuleTestStep(b, test_step, "openapi");
     const test_zefir = addModuleTestStep(b, test_step, "zefir");
     // Builds the validator's test binaries without running them, so that
     // `-Dtarget` may name another system: CI builds them for x86-linux-musl,
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, orm, mongo, redis, nats, http, jwt, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_orm, test_mongo, test_redis, test_nats, test_http, test_jwt, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, redis, nats, http, security, openapi, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_redis, test_nats, test_http, test_security, test_openapi, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -207,10 +247,16 @@ pub fn build(b: *std.Build) void {
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
     addAppCompileChecks(b, test_core, core, target, optimize);
-    addHttpCompileChecks(b, test_http, http, validator, target, optimize);
+    const openapi_app = addHttpCompileChecks(b, test_http, http, validator, target, optimize);
+    // `zig build openapi` rewrites every OpenAPI document of zefir's tests
+    // and guides from the code: the tests that compare them with their
+    // files, run with ZEFIR_OPENAPI_UPDATE=1.
+    const openapi_step = b.step("openapi", "Rewrite the OpenAPI documents of zefir's tests and guides from the code");
     // The examples of the zefir-http guide: the middleware of an
     // application (authentication, CORS) and their tests. Like an
-    // application, they may read settings with confy and log with log.
+    // application, they may read settings with confy and log with log, and
+    // they declare the texts of their OpenAPI document through the
+    // umbrella module, as `zefir.openapi`.
     const http_examples = b.addTest(.{
         .name = "http-examples",
         .root_module = b.createModule(.{
@@ -224,26 +270,55 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "confy", .module = confy },
                 .{ .name = "log", .module = log },
                 .{ .name = "http", .module = http },
+                .{ .name = "zefir", .module = zefir },
             },
         }),
     });
     test_http.dependOn(&addRun(b, http_examples, tsan).step);
-    addHttpGuide(b, test_http, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http }, target, optimize, tsan);
-    addJwtCompileChecks(b, test_jwt, jwt, validator, target, optimize);
-    // The examples of the zefir-jwt guide: a service of zefir-http that
-    // signs its users in, and one of zefir-rpc that checks their tokens.
-    addJwtGuide(b, test_jwt, .{
+    addHttpGuide(b, test_http, openapi_step, .{ .core = core, .validator = validator, .confy = confy, .log = log, .http = http, .zefir = zefir }, target, optimize, tsan);
+    // Outside Debug the server does not check the declarations of a route
+    // (src/http/check.zig): check_release.zig runs on a ReleaseSafe copy
+    // of the module and of its imports, whatever -Doptimize says.
+    const release_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = b.createModule(.{ .root_source_file = b.path("src/core/root.zig"), .target = target, .optimize = .ReleaseSafe }) },
+        .{ .name = "validator", .module = b.createModule(.{ .root_source_file = b.path("src/validator/root.zig"), .target = target, .optimize = .ReleaseSafe }) },
+    };
+    const http_check_release = b.addTest(.{
+        .name = "http-check-release",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/http/tests/check_release.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .imports = &.{.{ .name = "http", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/root.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .imports = release_imports,
+            }) }},
+        }),
+    });
+    test_http.dependOn(&b.addRunArtifact(http_check_release).step);
+
+    addJwtCompileChecks(b, test_security, security, validator, target, optimize);
+    // The examples of the zefir-security guide: a service of zefir-http
+    // that signs its users in, and one of zefir-rpc that checks their
+    // tokens.
+    addSecurityGuide(b, test_security, .{
         .core = core,
         .validator = validator,
         .confy = confy,
         .log = log,
         .http = http,
         .rpc = rpc,
-        .jwt = jwt,
+        .security = security,
     }, target, optimize, tsan);
     // The guide of zefir.App: the tests of its shop, which imports the
     // umbrella module, and a program whose server does not stop.
     addAppGuide(b, test_zefir, zefir, target, optimize, tsan);
+
+    addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize, openapi_app);
+    addOpenapiGoldens(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
+    addOpenapiGuide(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
 
     // `zig build fuzz-http` runs the fuzz test of zefir-http's HTTP/1.1
     // parser on its corpus, once, like `zig build test-http` does; with
@@ -259,15 +334,15 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_http.dependOn(&b.addRunArtifact(http_fuzz_tests).step);
 
-    // `zig build fuzz-jwt` runs the fuzz test of zefir-jwt's parsers of
+    // `zig build fuzz-jwt` runs the fuzz test of security.jwt's parsers of
     // tokens, headers, payloads and key files on its corpus, once, like
-    // `zig build test-jwt` does; with `--fuzz` it runs the fuzzer on it
-    // (Linux: CI's fuzz.yml).
-    const fuzz_jwt = b.step("fuzz-jwt", "Run the fuzz test of the zefir-jwt parsers; with --fuzz, the fuzzer (Linux)");
+    // `zig build test-security` does; with `--fuzz` it runs the fuzzer on
+    // it (Linux: CI's fuzz.yml).
+    const fuzz_jwt = b.step("fuzz-jwt", "Run the fuzz test of the security.jwt parsers; with --fuzz, the fuzzer (Linux)");
     const jwt_fuzz_tests = b.addTest(.{
         .name = "fuzz-jwt",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/jwt/fuzz.zig"),
+            .root_source_file = b.path("src/security/jwt/fuzz.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -447,14 +522,37 @@ pub fn build(b: *std.Build) void {
     // another std.Io, a cursor used by two tasks at once and
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
-    // exits with code 3 instead of aborting. They get their own Debug copy
-    // of mongo, whatever -Doptimize says.
+    // exits with code 3 instead of aborting. They get their own Debug copies
+    // of mongo and the modules it imports, odm's below among them, whatever
+    // -Doptimize says.
+    const panic_mongo_bson = b.createModule(.{
+        .root_source_file = b.path("src/mongo-bson/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_validator = b.createModule(.{
+        .root_source_file = b.path("src/validator/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    const panic_odm = b.createModule(.{
+        .root_source_file = b.path("src/odm/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "core", .module = panic_core },
+            .{ .name = "validator", .module = panic_validator },
+        },
+    });
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
         .optimize = .Debug,
         .imports = &.{
             .{ .name = "core", .module = panic_core },
+            .{ .name = "mongo-bson", .module = panic_mongo_bson },
+            .{ .name = "odm", .module = panic_odm },
         },
     });
     panic_mongo.addOptions("build_options", version_options);
@@ -472,6 +570,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .Debug,
                 .imports = &.{
                     .{ .name = "mongo", .module = panic_mongo },
+                    .{ .name = "mongo-bson", .module = panic_mongo_bson },
                 },
             }),
         });
@@ -481,6 +580,68 @@ pub fn build(b: *std.Build) void {
         // with 3, so a program that printed the text and returned fails.
         run.expectExitCode(3);
         test_mongo.dependOn(&run.step);
+    }
+
+    // odm panic programs: a registry moved after its first
+    // registerConnection(), a call on another std.Io, Registry.deinit()
+    // with sessions left, a session or a cursor that two tasks call at once,
+    // a collection used after the deinit of its session, and a second
+    // deinit of a session or of a cursor panic in safe builds. Each program
+    // must print the panic message and end in its own panic handler, which
+    // exits with code 3 instead of aborting. They get their own Debug
+    // copies of odm and the modules it imports, made above for the mongo
+    // programs, whatever -Doptimize says.
+    for ([_][2][]const u8{
+        .{ "moved_registry", "panic: zefir-odm: Registry moved after its first registerConnection(): keep it where it was" },
+        .{ "another_io", "panic: zefir-odm: a call on another std.Io than the registry's: pass the io of Registry.init" },
+        .{ "deinit_with_leases", "panic: zefir-odm: Registry.deinit() with sessions or cursors left: deinit them first" },
+        .{ "session_two_tasks", "panic: zefir-odm: a session used by two tasks at once: take a session for each task" },
+        .{ "collection_after_deinit", "panic: zefir-odm: a collection used after the deinit of its session" },
+        .{ "cursor_two_tasks", "panic: zefir-odm: a cursor used by two tasks at once: one task at a time calls next and deinit of a cursor" },
+        .{ "session_deinit_twice", "panic: zefir-odm: Session.deinit() twice: deinit a session once" },
+        .{ "cursor_deinit_twice", "panic: zefir-odm: a cursor used after its deinit: deinit a cursor once, after its last next" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/odm/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "odm", .module = panic_odm },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_odm.dependOn(&run.step);
+    }
+
+    // odm race programs: orders of events in the registry that a test
+    // cannot hold still under the test runner, each in a process of its
+    // own with a log function or a driver that holds it still: a connect
+    // that fails while a removal waits for its turn, and a deinit right
+    // after a second shutdown. Each exits with 0, with 1 when the registry
+    // went wrong, and with 3 on a panic. Debug builds with the Debug copy
+    // of odm made above, whatever -Doptimize says.
+    for ([_][]const u8{ "connect_failed_remove", "shutdown_twice" }) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-race-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/odm/testdata/race/{s}.zig", .{name})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "odm", .module = panic_odm },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectExitCode(0);
+        test_odm.dependOn(&run.step);
     }
 
     // redis panic programs: a client moved after connect(), a call on
@@ -852,23 +1013,24 @@ pub fn build(b: *std.Build) void {
             .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "mongo", .module = mongo },
+                .{ .name = "mongo-bson", .module = mongo_bson },
                 .{ .name = "core", .module = core },
             },
         }),
     });
     test_mongo.dependOn(&addRun(b, mongo_checks, tsan).step);
 
-    // mongo compile errors: types that the BSON codec cannot write or read.
-    // Each test of the file must fail to compile with the message next to
-    // its name, which names the field; the filter compiles one test at a
-    // time. A type declared in the file is named after the file.
-    const mongo_compile_errors = b.createModule(.{
-        .root_source_file = b.path("src/mongo/tests/compile_errors.zig"),
+    // mongo-bson compile errors: types that the BSON codec cannot write or
+    // read. Each test of the file must fail to compile with the message
+    // next to its name, which names the field; the filter compiles one test
+    // at a time. A type declared in the file is named after the file.
+    const mongo_bson_compile_errors = b.createModule(.{
+        .root_source_file = b.path("src/mongo-bson/tests/compile_errors.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
         .imports = &.{
-            .{ .name = "mongo", .module = mongo },
+            .{ .name = "mongo-bson", .module = mongo_bson },
         },
     });
     for ([_][2][]const u8{
@@ -889,19 +1051,39 @@ pub fn build(b: *std.Build) void {
         .{ "integer literal beyond int64", "bson.encode: field 'n' is 9223372036854775808, which does not fit int64" },
         .{ "tuple as a document", "bson.encode: a tuple is an array, not a document: give its values names, such as .{ .a = x }" },
         .{ "number as a document", "bson.encode: a document is a struct with named fields, such as .{ .name = name }, or a bson.RawDocument; got u32" },
-        .{ "deprecated type to encode", "bson.encode: field 'p' is bson.types.DbPointer, a deprecated type: it is read, never written" },
+        .{ "deprecated type to encode", "bson.encode: field 'p' is types.DbPointer, a deprecated type: it is read, never written" },
         .{ "tuple to decode", "bson.decode: field 'pair' is struct { i32, i32 }, a tuple: decode needs the names of fields; use a struct, or a slice for an array" },
         .{ "comptime field to decode", "bson.decode: field 'version' is a comptime field: decode fills only fields known at run time" },
         .{ "mutable slice to decode", "bson.decode: field 'name' is []u8: decode gives const slices; use []const u8" },
+        .{ "keys with a field that is not there", "bson.encodeKeyed: keys: 'nmae' is not a field of compile_errors.User" },
+        .{ "keys with an empty key", "bson.encodeKeyed: keys: the key of 'name' is empty" },
+        .{ "keys with a key that holds a NUL byte", "bson.encodeKeyed: keys: the key of 'name' holds a NUL byte" },
+        .{ "keys with a key that is not UTF-8", "bson.encodeKeyed: keys: the key of 'name' is not UTF-8" },
+        .{ "keys that give two fields one key", "bson.encodeKeyed: keys: 'a' and 'b' both have the key \"b\"" },
+        .{ "keys that list a field twice", "bson.encodeKeyed: keys: 'name' is listed twice" },
+        .{ "keys of decodeKeyed that leave a required field unread", "bson.decodeKeyed: keys: 'name' is not read, but it is not optional and has no default" },
     }, 0..) |case, i| {
         const compile = b.addTest(.{
-            .name = b.fmt("mongo-compile-error-{d}", .{i}),
-            .root_module = mongo_compile_errors,
+            .name = b.fmt("mongo-bson-compile-error-{d}", .{i}),
+            .root_module = mongo_bson_compile_errors,
             .filters = &.{case[0]},
         });
         compile.expect_errors = .{ .contains = case[1] };
-        test_mongo.dependOn(&compile.step);
+        test_mongo_bson.dependOn(&compile.step);
     }
+    addOdmCompileChecks(b, test_odm, &.{
+        .{ .name = "mongo-bson", .module = mongo_bson },
+        .{ .name = "core", .module = core },
+        .{ .name = "validator", .module = validator },
+    }, target, optimize);
+    addOdmGuide(b, test_odm, .{
+        .core = core,
+        .log = log,
+        .confy = confy,
+        .validator = validator,
+        .mongo_bson = mongo_bson,
+        .odm = odm,
+    }, target, optimize, tsan);
 
     // mongo compile errors of the collection API: documents of types that
     // its operations cannot take. Each message names the operation, the
@@ -947,7 +1129,7 @@ pub fn build(b: *std.Build) void {
         compile.expect_errors = .{ .contains = case[1] };
         test_mongo.dependOn(&compile.step);
     }
-    addMongoGuide(b, test_mongo, .{ .core = core, .mongo = mongo }, target, optimize, tsan);
+    addMongoGuide(b, test_mongo, .{ .core = core, .mongo_bson = mongo_bson, .mongo = mongo }, target, optimize, tsan);
 
     // redis compile errors: reply types that no reply reads into,
     // arguments that cannot be written, WATCH where it cannot run,
@@ -1265,6 +1447,7 @@ fn addRpcGuide(
 /// The modules that the examples of the mongo guide import here.
 const MongoGuideModules = struct {
     core: *std.Build.Module,
+    mongo_bson: *std.Build.Module,
     mongo: *std.Build.Module,
 };
 
@@ -1287,6 +1470,7 @@ fn addMongoGuide(
     const dir = "src/mongo/examples/";
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = m.core },
+        .{ .name = "mongo-bson", .module = m.mongo_bson },
         .{ .name = "mongo", .module = m.mongo },
     };
     for (mongo_guide.tests) |name| {
@@ -1331,6 +1515,98 @@ fn addMongoGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_mongo.dependOn(&addRun(b, b.addTest(.{ .name = "mongo-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the odm guide import here. zefir-mongo
+/// is not among them: what `test-odm` builds never imports it, so that the
+/// graph of the CI scripts stays without cycles.
+const OdmGuideModules = struct {
+    core: *std.Build.Module,
+    log: *std.Build.Module,
+    confy: *std.Build.Module,
+    validator: *std.Build.Module,
+    mongo_bson: *std.Build.Module,
+    odm: *std.Build.Module,
+};
+
+/// The examples of src/odm/examples/README.md, the guide of zefir-odm, as
+/// cases.zig there lists them: the tests on odm.testing.FakeDriver, and
+/// the programs that need no server, each through example_main.zig, which
+/// exits with code 3 on a panic instead of aborting and with code 4 past
+/// its time limit; it must exit with 0. readme_test.zig then checks that
+/// README.md shows every file as it is and every run of those programs as
+/// it printed. The programs that need mongod import zio and zefir-mongo:
+/// only tests/odm builds and runs them.
+fn addOdmGuide(
+    b: *std.Build,
+    test_odm: *std.Build.Step,
+    m: OdmGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/odm/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "validator", .module = m.validator },
+        .{ .name = "mongo-bson", .module = m.mongo_bson },
+        .{ .name = "odm", .module = m.odm },
+    };
+    for (odm_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("odm-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_odm.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            // The compile checks of odm, with the errors that README.md
+            // shows: a file of another directory of src/, which a module
+            // reaches only as a module.
+            .{ .name = "odm-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/odm/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    for (odm_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("odm-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_odm.dependOn(&addRun(b, b.addTest(.{ .name = "odm-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The modules that the examples of the redis guide import here.
@@ -1559,6 +1835,20 @@ fn addValidatorTests(
         test_step.dependOn(&b.addRunArtifact(vector_tests).step);
         compile_step.dependOn(&vector_tests.step);
     }
+    // The program that writes the regex vectors of v.schemaOf: tests/openapi
+    // runs it and checks its records in other regex engines (zig build
+    // regex there, in Docker); here it is only built.
+    const regex_vectors = b.addExecutable(.{
+        .name = "regex_vectors",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator/testdata/regex_vectors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "validator", .module = validator }},
+        }),
+    });
+    test_step.dependOn(&regex_vectors.step);
+
     // A JSON file in vectors/ that `vector_files` does not list would never
     // run. The build system does not see a file added to a directory
     // argument, so this check runs on every build.
@@ -1626,6 +1916,7 @@ const HttpGuideModules = struct {
     confy: *std.Build.Module,
     log: *std.Build.Module,
     http: *std.Build.Module,
+    zefir: *std.Build.Module,
 };
 
 /// The examples of src/http/examples/README.md, the guide of zefir-http,
@@ -1635,10 +1926,16 @@ const HttpGuideModules = struct {
 /// aborting and with code 4 past its time limit; it must exit with 0.
 /// readme_test.zig then checks that README.md shows every file as it is
 /// and every run as it printed. The service, main.zig, imports zio: only
-/// tests/http builds and runs it.
+/// tests/http builds and runs it. The tests of the app find its page and
+/// its OpenAPI document by their absolute paths, `paths`, and run where
+/// every test runs (see addOpenapiGoldens); openapi.json is an input of
+/// their run, so a change of the file alone runs them again. `zig build
+/// openapi`, `update_step`, runs them with ZEFIR_OPENAPI_UPDATE=1, every
+/// time, which rewrites openapi.json.
 fn addHttpGuide(
     b: *std.Build,
     test_http: *std.Build.Step,
+    update_step: *std.Build.Step,
     m: HttpGuideModules,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
@@ -1651,7 +1948,11 @@ fn addHttpGuide(
         .{ .name = "confy", .module = m.confy },
         .{ .name = "log", .module = m.log },
         .{ .name = "http", .module = m.http },
+        .{ .name = "zefir", .module = m.zefir },
     };
+    const paths = b.addOptions();
+    paths.addOption([]const u8, "public_dir", b.root.joinString(b.allocator, dir ++ "public") catch @panic("OOM"));
+    paths.addOption([]const u8, "openapi_json", b.root.joinString(b.allocator, dir ++ "openapi.json") catch @panic("OOM"));
     const todos_test = b.addTest(.{
         .name = "http-todos-examples",
         .root_module = b.createModule(.{
@@ -1662,7 +1963,14 @@ fn addHttpGuide(
             .imports = imports,
         }),
     });
-    test_http.dependOn(&addRun(b, todos_test, tsan).step);
+    todos_test.root_module.addOptions("paths", paths);
+    const run_tests = addRun(b, todos_test, tsan);
+    run_tests.addFileInput(b.path(dir ++ "openapi.json"));
+    test_http.dependOn(&run_tests.step);
+    const update = addRun(b, todos_test, tsan);
+    update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
+    update_step.dependOn(&update.step);
 
     const readme = b.createModule(.{
         .root_source_file = b.path(dir ++ "readme_test.zig"),
@@ -1695,6 +2003,36 @@ fn addHttpGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_http.dependOn(&addRun(b, b.addTest(.{ .name = "http-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// odm compile errors: each case of src/odm/tests/cases.zig compiles the
+/// test of src/odm/tests/compile_errors.zig of its name, in a module of
+/// its own rooted at src/odm/compile_checks.zig, so that a case may call
+/// the internal functions of odm too. It passes only when the build fails
+/// with the error of the case: `error: ` in front makes it the whole
+/// message, as in addHttpCompileChecks. `imports` are those of odm.
+fn addOdmCompileChecks(
+    b: *std.Build,
+    test_odm: *std.Build.Step,
+    imports: []const std.Build.Module.Import,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    const checks = b.createModule(.{
+        .root_source_file = b.path("src/odm/compile_checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    for (odm_cases.compile_errors, 0..) |case, i| {
+        const compile = b.addTest(.{
+            .name = b.fmt("odm-compile-error-{d}", .{i}),
+            .root_module = checks,
+            .filters = &.{case.name},
+        });
+        compile.expect_errors = .{ .contains = b.fmt("error: {s}", .{case.expect}) };
+        test_odm.dependOn(&compile.step);
+    }
 }
 
 /// The examples of src/core/examples/app/README.md, the guide of zefir.App,
@@ -1841,7 +2179,9 @@ fn addAppCompileChecks(
 /// The compile checks of zefir-http, from the lists in
 /// src/http/tests/cases.zig: client code that must fail to compile with
 /// its message, and client code that must compile. Each file imports
-/// "http" and "validator".
+/// "http" and "validator". Gives the application of gen_big_app with the
+/// declarations of zefir.openapi and its document, which test-openapi
+/// compiles.
 fn addHttpCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
@@ -1849,7 +2189,7 @@ fn addHttpCompileChecks(
     validator: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
-) void {
+) std.Build.LazyPath {
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "http", .module = http },
         .{ .name = "validator", .module = validator },
@@ -1859,6 +2199,8 @@ fn addHttpCompileChecks(
     // `.contains` matches the end of an error line, so `error: ` in front
     // makes `expect` the whole message, from its start.
     for (http_cases.compile_errors) |fixture| {
+        // Outside Debug the server reads no declarations for its check.
+        if (fixture.debug and optimize != .debug) continue;
         const t = b.addTest(.{
             .name = std.fs.path.stem(fixture.file),
             .root_module = b.createModule(.{
@@ -1886,10 +2228,12 @@ fn addHttpCompileChecks(
     }
     // A large application, which gen_big_app writes into the build cache:
     // ten controllers of thirty routes, middleware on every level and forty
-    // errors of its own; and one route that returns 200 errors of long
-    // names. Each must compile without an eval branch quota of its own. The
-    // generator is built for the host, so it also runs when -Dtarget names
-    // another system.
+    // errors of its own; one route that returns 200 errors of long names;
+    // and the large application with `pub const openapi` on its controllers
+    // and on some middleware, whose routes the Debug check compares. Each
+    // must compile without an eval branch quota of its own. The generator is
+    // built for the host, so it also runs when -Dtarget names another
+    // system. Its fourth file is the application of the document.
     const gen_big_app = b.addExecutable(.{
         .name = "gen_big_app",
         .root_module = b.createModule(.{
@@ -1899,7 +2243,7 @@ fn addHttpCompileChecks(
         }),
     });
     const run_gen = b.addRunArtifact(gen_big_app);
-    for ([_][]const u8{ "big_app", "long_names_app" }) |name| {
+    for ([_][]const u8{ "big_app", "long_names_app", "doc_app" }) |name| {
         const app = b.addTest(.{
             .name = name,
             .root_module = b.createModule(.{
@@ -1911,35 +2255,213 @@ fn addHttpCompileChecks(
         });
         test_step.dependOn(&app.step);
     }
+    return run_gen.addOutputFileArg("openapi_app.zig");
 }
 
-/// The modules that the examples of the jwt guide import.
-const JwtGuideModules = struct {
+/// The golden documents of zefir-openapi: golden_test.zig compares the
+/// documents of the applications of src/openapi/tests/apps with their
+/// files in src/openapi/tests/golden, in 3.1 and 3.2, and sends each
+/// application's requests; determinism_a.zig and determinism_b.zig make the
+/// compiler meet the errors of one application in two orders, and number
+/// the anonymous types of another in two ways, and compare their documents
+/// with the same files. They find the files by the absolute
+/// path of golden/, `golden_options.dir`, and run where every test runs:
+/// with -Dtsan on macOS a test binary finds its TSan runtime by a path
+/// relative to that directory, so a test run elsewhere does not start.
+/// The files are inputs of each run, so a change of one alone runs the
+/// tests again. `zig build openapi`, `update_step`, runs golden_test with
+/// ZEFIR_OPENAPI_UPDATE=1, every time: it rewrites the files from the code.
+fn addOpenapiGoldens(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    update_step: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const golden = b.addOptions();
+    golden.addOption([]const u8, "dir", b.root.joinString(b.allocator, "src/openapi/tests/golden") catch @panic("OOM"));
+    // The applications of golden_test.zig, each with a file per version;
+    // the determinism tests compare those of todos and shapes.
+    const golden_apps = [_][]const u8{ "todos", "shapes", "rules", "secure" };
+    for ([_][]const u8{ "golden_test", "determinism_a", "determinism_b" }) |name| {
+        const t = b.addTest(.{
+            .name = b.fmt("openapi-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/openapi/tests/{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "zefir", .module = zefir }},
+            }),
+        });
+        t.root_module.addOptions("golden_options", golden);
+        const run = addRun(b, t, tsan);
+        for (golden_apps) |app| {
+            for ([_][]const u8{ "3.1", "3.2" }) |version| {
+                run.addFileInput(b.path(b.fmt("src/openapi/tests/golden/{s}-{s}.json", .{ app, version })));
+            }
+        }
+        test_step.dependOn(&run.step);
+        if (!std.mem.eql(u8, name, "golden_test")) continue;
+        const update = addRun(b, t, tsan);
+        update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+        update.has_side_effects = true;
+        update_step.dependOn(&update.step);
+    }
+}
+
+/// The guide of zefir-openapi, src/openapi/examples/README.md, as cases.zig
+/// there lists its files. service_test.zig compares the document of the
+/// small application with openapi.json there: it finds the file by its
+/// absolute path, `paths.openapi_json`, and runs where every test runs, as
+/// the golden tests do (see addOpenapiGoldens); the file is an input of its
+/// run, so a change of the file alone runs it again. `zig build openapi`,
+/// `update_step`, runs it with ZEFIR_OPENAPI_UPDATE=1, every time, which
+/// rewrites the file. readme_test.zig checks README.md against the files of
+/// the application, the service of the http guide and its document, the
+/// golden documents and the probes. The application's main.zig imports zio:
+/// only tests/http builds it.
+fn addOpenapiGuide(
+    b: *std.Build,
+    test_openapi: *std.Build.Step,
+    update_step: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/openapi/examples/";
+    const paths = b.addOptions();
+    paths.addOption([]const u8, "openapi_json", b.root.joinString(b.allocator, dir ++ "openapi.json") catch @panic("OOM"));
+    const service_test = b.addTest(.{
+        .name = "openapi-guide-service_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "service_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{.{ .name = "zefir", .module = zefir }},
+        }),
+    });
+    service_test.root_module.addOptions("paths", paths);
+    const run_tests = addRun(b, service_test, tsan);
+    run_tests.addFileInput(b.path(dir ++ "openapi.json"));
+    test_openapi.dependOn(&run_tests.step);
+    const update = addRun(b, service_test, tsan);
+    update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
+    update_step.dependOn(&update.step);
+
+    const http_dir = "src/http/examples/";
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "guide-check", .module = b.createModule(.{
+                .root_source_file = b.path(http_dir ++ "guide_check.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "openapi-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/openapi/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "http-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    for (openapi_guide.http_files) |name| {
+        readme.addAnonymousImport(b.fmt("http-{s}", .{name}), .{ .root_source_file = b.path(b.fmt(http_dir ++ "{s}.zig", .{name})) });
+    }
+    readme.addAnonymousImport("http-openapi.json", .{ .root_source_file = b.path(http_dir ++ "openapi.json") });
+    for (openapi_guide.golden) |name| {
+        readme.addAnonymousImport(b.fmt("golden-{s}", .{name}), .{ .root_source_file = b.path(b.fmt("src/openapi/tests/golden/{s}.json", .{name})) });
+    }
+    test_openapi.dependOn(&addRun(b, b.addTest(.{ .name = "openapi-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The compile checks of zefir-openapi, from the list in
+/// src/openapi/tests/cases.zig: application code that must fail to
+/// compile with its message. Each file imports the umbrella module "zefir"
+/// and writes its declarations through it, as an application does:
+/// `pub const openapi: zefir.openapi.Doc(@This()) = .{ ... }`. And
+/// `openapi_app`, an application of sixty routes that gen_big_app writes,
+/// whose document must compile without an eval branch quota of its own.
+fn addOpenapiCompileChecks(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    zefir: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    openapi_app: std.Build.LazyPath,
+) void {
+    const app = b.addTest(.{
+        .name = "openapi_app",
+        .root_module = b.createModule(.{
+            .root_source_file = openapi_app,
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zefir", .module = zefir }},
+        }),
+    });
+    test_step.dependOn(&app.step);
+    // Each fixture is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, from its
+    // start (`error: ` in front) to the end of its line.
+    for (openapi_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zefir", .module = zefir }},
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_step.dependOn(&t.step);
+    }
+}
+
+/// The modules that the examples of the security guide import.
+const SecurityGuideModules = struct {
     core: *std.Build.Module,
     validator: *std.Build.Module,
     confy: *std.Build.Module,
     log: *std.Build.Module,
     http: *std.Build.Module,
     rpc: *std.Build.Module,
-    jwt: *std.Build.Module,
+    security: *std.Build.Module,
 };
 
-/// The examples of src/jwt/examples/README.md, the guide of zefir-jwt, as
-/// cases.zig there lists them: the tests of the services, on the backend of
-/// zefir-http and the server of zefir-rpc in memory, and the programs, each
-/// run with its settings in the environment through example_main.zig,
-/// which exits with code 3 on a panic instead of aborting and with code 4
-/// past its time limit; it must exit with 0. readme_test.zig then checks
-/// that README.md shows every file as it is and every run as it printed.
-fn addJwtGuide(
+/// The examples of src/security/examples/README.md, the guide of
+/// zefir-security, as cases.zig there lists them: the tests of the
+/// services, on the backend of zefir-http and the server of zefir-rpc in
+/// memory, and the programs, each run with its settings in the environment
+/// through example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is
+/// and every run as it printed.
+fn addSecurityGuide(
     b: *std.Build,
-    test_jwt: *std.Build.Step,
-    m: JwtGuideModules,
+    test_security: *std.Build.Step,
+    m: SecurityGuideModules,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     tsan: bool,
 ) void {
-    const dir = "src/jwt/examples/";
+    const dir = "src/security/examples/";
     // The package of the contract of billing, which its clients would
     // fetch, with the test of its rules.
     const billing_api = b.createModule(.{
@@ -1952,7 +2474,7 @@ fn addJwtGuide(
             .{ .name = "validator", .module = m.validator },
         },
     });
-    test_jwt.dependOn(&addRun(b, b.addTest(.{ .name = "jwt-guide-billing_api", .root_module = billing_api }), tsan).step);
+    test_security.dependOn(&addRun(b, b.addTest(.{ .name = "security-guide-billing_api", .root_module = billing_api }), tsan).step);
     const imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = m.core },
         .{ .name = "validator", .module = m.validator },
@@ -1960,12 +2482,12 @@ fn addJwtGuide(
         .{ .name = "log", .module = m.log },
         .{ .name = "http", .module = m.http },
         .{ .name = "rpc", .module = m.rpc },
-        .{ .name = "jwt", .module = m.jwt },
+        .{ .name = "security", .module = m.security },
         .{ .name = "billing-api", .module = billing_api },
     };
-    for (jwt_guide.tests) |name| {
+    for (security_guide.tests) |name| {
         const tests = b.addTest(.{
-            .name = b.fmt("jwt-guide-{s}", .{name}),
+            .name = b.fmt("security-guide-{s}", .{name}),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
                 .target = target,
@@ -1974,7 +2496,7 @@ fn addJwtGuide(
                 .imports = imports,
             }),
         });
-        test_jwt.dependOn(&addRun(b, tests, tsan).step);
+        test_security.dependOn(&addRun(b, tests, tsan).step);
     }
 
     const readme = b.createModule(.{
@@ -1983,9 +2505,9 @@ fn addJwtGuide(
         .optimize = optimize,
         .sanitize_thread = tsan,
     });
-    for (jwt_guide.programs) |program| {
+    for (security_guide.programs) |program| {
         const exe = b.addExecutable(.{
-            .name = b.fmt("jwt-guide-{s}", .{program.name}),
+            .name = b.fmt("security-guide-{s}", .{program.name}),
             .root_module = b.createModule(.{
                 .root_source_file = b.path(dir ++ "example_main.zig"),
                 .target = target,
@@ -2005,23 +2527,23 @@ fn addJwtGuide(
         run.expectExitCode(0);
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
-    test_jwt.dependOn(&addRun(b, b.addTest(.{ .name = "jwt-guide-readme", .root_module = readme }), tsan).step);
+    test_security.dependOn(&addRun(b, b.addTest(.{ .name = "security-guide-readme", .root_module = readme }), tsan).step);
 }
 
-/// The compile checks of zefir-jwt, from the lists in
-/// src/jwt/tests/cases.zig: claims types that must fail to compile with
-/// their message, and claims types that must compile. Each file imports
-/// "jwt" and "validator".
+/// The compile checks of security.jwt, from the lists in
+/// src/security/jwt/tests/cases.zig: claims types that must fail to
+/// compile with their message, and claims types that must compile. Each
+/// file imports "security" and "validator".
 fn addJwtCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
-    jwt: *std.Build.Module,
+    security: *std.Build.Module,
     validator: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
 ) void {
     const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "jwt", .module = jwt },
+        .{ .name = "security", .module = security },
         .{ .name = "validator", .module = validator },
     };
     // Each fixture is compiled (never run) and passes only when the

@@ -100,7 +100,7 @@ they print against this guide:
 Add Zefir to your `build.zig.zon`; rpc-nats ships since v0.6.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
 
 A service runs on [zio](https://github.com/lalinsky/zio). zio has no release

@@ -80,7 +80,7 @@ pub const Request = struct {
 pub const Response = struct {
     status: u16,
     headers: []const [2][]const u8,
-    /// Empty for HEAD, 204 and 304.
+    /// Empty for HEAD, 204, 205 and 304.
     body: []const u8,
     /// The body as the server handed it over, a piece per write: a body
     /// held whole is one, a streamed one comes a buffer at a time, and a

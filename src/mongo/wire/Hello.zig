@@ -6,7 +6,7 @@
 //! `mongo.testing` describes itself unless told otherwise.
 
 const std = @import("std");
-const bson = @import("../bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("../errors.zig");
 const Diagnostics = errors.Diagnostics;
 const Hello = @This();

@@ -4,6 +4,7 @@
 const std = @import("std");
 const zefir = @import("zefir");
 const mongo = zefir.mongo;
+const bson = zefir.mongo_bson;
 const nats = zefir.nats;
 const rpc_nats = zefir.rpc_nats;
 const Config = @import("Config.zig");
@@ -12,7 +13,7 @@ pub const InfraModule = struct {
     pub const module: zefir.app.Module = .{
         // The generator of _id: one for the application; its init takes
         // only io.
-        .providers = &.{mongo.bson.ObjectId.Generator},
+        .providers = &.{bson.ObjectId.Generator},
         .factories = &.{ Mongo, Nats },
         // What the modules that import InfraModule may take. The clients of
         // Mongo and NATS stay private: the rest of the code sees the
@@ -31,10 +32,10 @@ pub const InfraModule = struct {
                 .password = if (config.mongo.password) |password| password.expose() else null,
             });
         }
-        pub fn shopDb(client: *mongo.Client, ids: *mongo.bson.ObjectId.Generator) ShopDb {
+        pub fn shopDb(client: *mongo.Client, ids: *bson.ObjectId.Generator) ShopDb {
             return .{ .db = .init(client, "shop", ids) };
         }
-        pub fn analyticsDb(client: *mongo.Client, ids: *mongo.bson.ObjectId.Generator) AnalyticsDb {
+        pub fn analyticsDb(client: *mongo.Client, ids: *bson.ObjectId.Generator) AnalyticsDb {
             return .{ .db = .init(client, "analytics", ids) };
         }
     };

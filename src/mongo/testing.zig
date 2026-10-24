@@ -10,8 +10,6 @@
 //!   on the collection API and of applications run on the real client,
 //!   with real deadlines and cancelation. Or it lets a test play the
 //!   server's side of one connection with a raw `Peer`.
-//! - `vectors` — the BSON test vectors of zefir: a document of each BSON
-//!   type with what it reads back as, and bytes no reader may accept.
 //! - `sleepAtLeast` — a sleep that never ends before its time, which a
 //!   sleep of std's `Io` on Windows may do: for delays and deadlines in
 //!   tests.
@@ -20,7 +18,6 @@ const std = @import("std");
 
 pub const Script = @import("testing/Script.zig");
 pub const FakeServer = @import("testing/FakeServer.zig");
-pub const vectors = @import("bson/vectors.zig");
 pub const sleepAtLeast = @import("testing/sleep.zig").sleepAtLeast;
 
 test {

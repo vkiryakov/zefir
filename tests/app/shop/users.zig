@@ -6,6 +6,7 @@ const zefir = @import("zefir");
 const http = zefir.http;
 const log = zefir.log;
 const mongo = zefir.mongo;
+const bson = zefir.mongo_bson;
 const infra = @import("infra.zig");
 
 pub const UsersModule = struct {
@@ -31,7 +32,7 @@ pub const UserRepository = struct {
     pub fn find(repo: *UserRepository, io: std.Io, op: mongo.OperationContext, arena: std.mem.Allocator, id: u64) !?User {
         const key = std.math.cast(i64, id) orelse return null;
         const doc = try repo.db.db.collection("users").findOne(io, op, .{ ._id = key }, .{ .allocator = arena }) orelse return null;
-        const user = try mongo.bson.decode(Document, arena, doc.raw(), .{});
+        const user = try bson.decode(Document, arena, doc.raw(), .{});
         return .{ .id = id, .name = user.name };
     }
 };

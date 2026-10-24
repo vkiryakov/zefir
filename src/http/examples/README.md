@@ -13,9 +13,10 @@ the `field_rules` of zefir-validator: outside names, transforms such as
 by the same rules. Middleware are your own code, on three levels and in the
 order you write them, and one error handler turns every error into a
 response. Static files, streamed responses and server-sent events are built
-in. The server parses HTTP/1.1 itself, strictly, and runs on
-[zio](https://github.com/lalinsky/zio); for tests, the same server runs in
-memory.
+in, and [zefir-openapi](../../openapi/examples/README.md) builds the OpenAPI
+document of the API from the same types. The server parses HTTP/1.1
+itself, strictly, and runs on [zio](https://github.com/lalinsky/zio); for
+tests, the same server runs in memory.
 
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
@@ -25,7 +26,6 @@ memory.
 >   you build.
 > - **File uploads.** A body of `multipart/form-data` is not taken apart;
 >   `ctx.request.bodyReader()` reads a body as a stream.
-> - **OpenAPI.** No document is generated from the routes yet.
 > - **`http.Patch(T)`.** PATCH routes work, and their body fills `?T`
 >   fields, where a missing field and `null` look the same: a field can be
 >   changed, but not cleared to `null`.
@@ -178,6 +178,9 @@ GET /api/v1/todos
   canceled when its client leaves; a stop lets the requests at work finish.
 - **Tests without a network.** `http.testing.Backend` serves the same
   server from memory.
+- **An OpenAPI document of the API.** The compiler builds it from the routes,
+  the DTOs and the errors of the server, with zefir-openapi, and a test
+  keeps its file up to date.
 
 ## Contents
 
@@ -193,6 +196,7 @@ GET /api/v1/todos
 - [Authentication and CORS](#authentication-and-cors)
 - [Server-sent events](#server-sent-events)
 - [Static files](#static-files)
+- [The OpenAPI document](#the-openapi-document)
 - [Tests](#tests)
 - [Limits and timeouts](#limits-and-timeouts)
 - [Benchmark](#benchmark)
@@ -227,7 +231,7 @@ flowchart LR
     end
     todos --> repo["TodoRepository"]
     todos --> billing["Billing"]
-    todos --> live["http.sse.Manager"]
+    todos --> live["http.sse.Manager(LiveEvent)"]
 ```
 
 The files of the service, each shown whole in the chapter where it is
@@ -235,7 +239,8 @@ explained:
 
 | File | What is in it |
 | --- | --- |
-| `main.zig` | the settings, the log, the runtime, the objects and the server |
+| `main.zig` | the settings, the log, the runtime and the network |
+| `Service.zig` | the objects of the service, its server and its OpenAPI document |
 | `TodosV1Controller.zig` | `/api/v1/todos`: the routes and their handlers |
 | `SessionController.zig` | `/api/session`: signing a browser in and out |
 | `HealthController.zig` | `/api/health`, for a load balancer |
@@ -248,9 +253,10 @@ explained:
 | `errors.zig` | the error handler |
 | `public/index.html` | the web page |
 | `todos_test.zig` | tests without a network |
+| `openapi.json` | the OpenAPI document of the API, which the tests keep up to date |
 
-In a project of your own they live in `src/`, and `public/` next to
-`build.zig`.
+In a project of your own they live in `src/`, and `public/` and
+`openapi.json` next to `build.zig`.
 
 ## How a request travels
 
@@ -317,7 +323,7 @@ flowchart TD
 Add Zefir to your `build.zig.zon`; http ships since v0.8.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
 
 A service runs on zio. zio has no release for Zig 0.17 yet, so pin the
@@ -329,7 +335,8 @@ zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7
 
 Then import the modules in `build.zig`. The service reads its settings with
 confy, logs with log, takes contexts from core, and its DTOs use the rules
-of validator. Its tests need no zio:
+of validator; the texts of its OpenAPI document come through the umbrella
+module, as `zefir.openapi`. Its tests need no zio:
 
 ```zig
 // build.zig of the todo service
@@ -341,6 +348,7 @@ const imports: []const std.Build.Module.Import = &.{
     .{ .name = "validator", .module = zefir.module("zefir-validator") },
     .{ .name = "confy", .module = zefir.module("zefir-confy") },
     .{ .name = "log", .module = zefir.module("zefir-log") },
+    .{ .name = "zefir", .module = zefir.module("zefir") },
 };
 
 const exe = b.addExecutable(.{
@@ -364,7 +372,22 @@ const tests = b.addTest(.{
         .imports = imports,
     }),
 });
-b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+// The tests find the page and openapi.json by the paths the build gives.
+const paths = b.addOptions();
+paths.addOptionPathUntracked("public_dir", b.path("public"));
+paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
+tests.root_module.addOptions("paths", paths);
+const run_tests = b.addRunArtifact(tests);
+// openapi.json is an input of the run: Zig runs the tests again when the
+// file changes, not only when the code does.
+run_tests.addFileInput(b.path("openapi.json"));
+b.step("test", "Run the tests").dependOn(&run_tests.step);
+// zig build openapi: the same tests, which then write openapi.json. It has
+// side effects, so it runs every time, never from the cache.
+const update = b.addRunArtifact(tests);
+update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+update.has_side_effects = true;
+b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
 ```
 
 > [!TIP]
@@ -375,8 +398,7 @@ b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
 ## Getting started
 
 The service begins in `main.zig`. It reads its settings, starts the log and
-the runtime, builds the objects of the service, and runs the server until
-Ctrl+C:
+the runtime, starts the service on the network, and runs it until Ctrl+C:
 
 ```zig
 //! The todo service of the guide, on the network: its settings come from
@@ -392,8 +414,9 @@ Ctrl+C:
 //!   APP_CORS_ORIGIN      the origin of a page on another site that may
 //!                        call the API; http://localhost:5173 by default
 //!
-//! In tests/http, `zig build examples` runs it and sends it the requests
-//! of the guide.
+//! The objects of the service, its server and its OpenAPI document are
+//! built in Service.zig, for `main` and the tests alike. In tests/http,
+//! `zig build examples` runs it and sends it the requests of the guide.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -401,14 +424,7 @@ const http = @import("http");
 const log = @import("log");
 const zio = @import("zio");
 const auth = @import("auth.zig");
-const Cors = @import("cors.zig").Cors;
-const errors = @import("errors.zig");
-const mw = @import("middleware.zig");
-const Billing = @import("Billing.zig");
-const HealthController = @import("HealthController.zig");
-const SessionController = @import("SessionController.zig");
-const TodoRepository = @import("TodoRepository.zig");
-const TodosV1Controller = @import("TodosV1Controller.zig");
+const Service = @import("Service.zig");
 
 /// zefir-http logs through std.log; this sends its records to the logger.
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
@@ -445,57 +461,29 @@ pub fn main(init: std.process.Init) !void {
     const io = rt.io();
     const gpa = init.gpa;
 
-    // What the handlers use. It outlives the server: its deinit comes after
-    // the server's, which runs first, in the reverse order of the defers.
-    var repo: TodoRepository = .init(gpa);
-    defer repo.deinit();
-    var billing: Billing = .{};
-    var live: http.sse.Manager = .init(gpa, .{});
-    defer live.deinit(io);
-
-    // The objects of the middleware; the server borrows them.
+    // The users and their tokens, and the origin of CORS, from the
+    // settings; the service borrows them.
     const users = [_]auth.TokenAuth.User{
         .{ .token = config.auth.ann_token, .id = "ann", .permissions = &.{ "todos", "todos:delete" } },
         .{ .token = config.auth.bob_token, .id = "bob", .permissions = &.{"todos"} },
     };
-    var token_auth: auth.TokenAuth = .{ .users = &users };
     const origins = [_][]const u8{config.cors_origin};
-    var cors: Cors = .{ .origins = &origins };
-    var access_log: mw.AccessLog = .{ .logger = logger.scoped("access") };
-    var plans: mw.PlanLookup = .{ .billing = &billing, .repo = &repo };
-    var app_errors: errors.AppErrors = .{};
-
-    var todos_v1: TodosV1Controller = .{ .repo = &repo, .live = &live, .plans = &plans };
-    var sessions: SessionController = .{ .token_auth = &token_auth, .live = &live };
-    var health: HealthController = .{};
 
     // The network: connections, the strict HTTP/1.1 parser, keep-alive.
     var native: http.native.Backend = try .init(gpa, .{ .port = config.port });
     defer native.deinit();
-    var server = try http.Server.init(gpa, .{
-        .controllers = .{ &todos_v1, &sessions, &health },
-        // Every request runs these, in this order, before its route is chosen.
-        .middleware = .{ mw.requestId, &access_log, http.onResponse(mw.securityHeaders), &cors, &token_auth },
-        .error_handler = &app_errors,
-    }, .{
-        .listen = .{ .backend = native.backend() },
-        // Before the routes of the controllers: /api/v1/todos, /api/health.
-        .prefix = "/api",
-        // The page and its files; a path without a file gets index.html, so
-        // that the page's own router reads the path.
-        .static = &.{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
-    });
-    defer server.deinit(io);
-
-    try server.start(io);
+    var service: Service = .{ .users = &users, .origins = &origins, .public_dir = config.public_dir, .logger = logger };
+    try service.start(gpa, io, native.backend());
+    // It runs before the defers above: the server stops before its backend.
+    defer service.deinit(gpa, io);
     app.info("Serving", .{ .port = native.port() });
 
     // Ctrl+C or SIGTERM begins a graceful stop; `wait` returns once it is over.
-    var on_interrupt = try io.concurrent(stopOnSignal, .{ io, &server, app, .interrupt });
+    var on_interrupt = try io.concurrent(stopOnSignal, .{ io, &service.server, app, .interrupt });
     defer on_interrupt.cancel(io) catch {};
-    var on_terminate = try io.concurrent(stopOnSignal, .{ io, &server, app, .terminate });
+    var on_terminate = try io.concurrent(stopOnSignal, .{ io, &service.server, app, .terminate });
     defer on_terminate.cancel(io) catch {};
-    try server.wait(io);
+    try service.server.wait(io);
     app.info("Stopped", .{});
 }
 
@@ -520,15 +508,139 @@ What each part does:
   `std.log` under the scope `http`, to the same log.
 - **The runtime**: zio with an executor per CPU core. Every request runs in
   a task of its own on it, and so does everything the request waits for.
-- **The objects of the service**: the repository, the stand-in for billing,
-  the manager of server-sent events, the objects of the middleware and the
-  controllers, each with pointers to what it uses. The server borrows them,
-  so they live as long as it does: Zig runs the `defer`s in reverse, and the
-  server's `deinit` runs before theirs.
 - **`http.native.Backend`** is the network: it listens on the port, reads
-  the requests of each connection, and writes the responses. The service
+  the requests of each connection, and writes the responses. `main`
   makes its own, to log the port the system gives for `APP_PORT=0`;
   `.listen = .{ .port = config.port }` would have the server make it.
+- **`Service.start`** builds the service on that backend, below. The tests
+  call it too, on the backend in memory, so they test the very server that
+  `main` runs.
+- **A task waits for Ctrl+C or SIGTERM** and asks the server to stop;
+  `service.server.wait` returns once the stop is over. See
+  [Stopping gracefully](#stopping-gracefully).
+
+The service itself, its objects and its server, is built in one place,
+`Service.zig`:
+
+```zig
+//! The server of the todo service, built in one place for `main` and for
+//! the tests: the objects of the service, the server, and its OpenAPI
+//! document, whose routes the compiler builds from the type of the same
+//! parts, so that they cannot differ from the server's, and whose prefix
+//! comes from the same const. What differs between `main` and a test
+//! comes in the fields without a default: the users and their tokens, the
+//! origins of CORS, the directory of the page, and the logger.
+
+const std = @import("std");
+const http = @import("http");
+const log = @import("log");
+const zefir = @import("zefir");
+const auth = @import("auth.zig");
+const Cors = @import("cors.zig").Cors;
+const dto = @import("dto.zig");
+const errors = @import("errors.zig");
+const mw = @import("middleware.zig");
+const Billing = @import("Billing.zig");
+const HealthController = @import("HealthController.zig");
+const SessionController = @import("SessionController.zig");
+const TodoRepository = @import("TodoRepository.zig");
+const TodosV1Controller = @import("TodosV1Controller.zig");
+
+const Service = @This();
+
+/// The users and their tokens, from the settings; borrowed.
+users: []const auth.TokenAuth.User,
+/// The origins whose pages may call the API; borrowed.
+origins: []const []const u8,
+/// The directory of the page and its files.
+public_dir: []const u8,
+/// The access log writes its records here.
+logger: log.Logger,
+
+// What `start` builds and the server borrows: it lives in the service, so
+// the service stays where it is until `deinit`.
+repo: TodoRepository = undefined,
+billing: Billing = .{},
+live: http.sse.Manager(dto.LiveEvent) = undefined,
+token_auth: auth.TokenAuth = undefined,
+cors: Cors = undefined,
+access_log: mw.AccessLog = undefined,
+plans: mw.PlanLookup = undefined,
+app_errors: errors.AppErrors = .{},
+todos_v1: TodosV1Controller = undefined,
+sessions: SessionController = undefined,
+health: HealthController = .{},
+/// GET /api/openapi.json, the document, and GET /api/docs, a page of it.
+docs: zefir.openapi.Docs(.{}) = undefined,
+server: http.Server = undefined,
+
+pub fn start(s: *Service, gpa: std.mem.Allocator, io: std.Io, backend: http.Backend) !void {
+    // What the handlers use. It outlives the server: `deinit` stops the
+    // server first.
+    s.repo = .init(gpa);
+    errdefer s.repo.deinit();
+    s.live = .init(gpa, .{});
+    errdefer s.live.deinit(io);
+    // The objects of the middleware and the controllers, each with
+    // pointers to what it uses.
+    s.token_auth = .{ .users = s.users };
+    s.cors = .{ .origins = s.origins };
+    s.access_log = .{ .logger = s.logger.scoped("access") };
+    s.plans = .{ .billing = &s.billing, .repo = &s.repo };
+    s.todos_v1 = .{ .repo = &s.repo, .live = &s.live, .plans = &s.plans };
+    s.sessions = .{ .token_auth = &s.token_auth, .live = &s.live };
+
+    const parts = .{
+        .controllers = .{ &s.todos_v1, &s.sessions, &s.health, &s.docs },
+        // Every request runs these, in this order, before its route is chosen.
+        .middleware = .{ mw.requestId, &s.access_log, http.onResponse(mw.securityHeaders), &s.cors, &s.token_auth },
+        .error_handler = &s.app_errors,
+    };
+    // Before the routes of the controllers: /api/v1/todos, /api/health.
+    const prefix = "/api";
+    // The compiler builds the document from the type of the parts: each
+    // route with its input, its responses and its errors, and the security
+    // of its middleware. `init` writes its JSON, once.
+    s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
+        .info = .{
+            .title = "Todos API",
+            .version = "1.0.0",
+            .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
+        },
+        // The server's prefix, in the servers of the document.
+        .prefix = prefix,
+        // The health check of the load balancer is no part of the API.
+        .exclude = &.{HealthController},
+    }));
+    errdefer s.docs.deinit(gpa);
+    s.server = try .init(gpa, parts, .{
+        .listen = .{ .backend = backend },
+        .prefix = prefix,
+        // The page and its files; a path without a file gets index.html, so
+        // that the page's own router reads the path.
+        .static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
+    });
+    errdefer s.server.deinit(io);
+    try s.server.start(io);
+}
+
+/// Stops the server first: what it borrowed goes after it.
+pub fn deinit(s: *Service, gpa: std.mem.Allocator, io: std.Io) void {
+    s.server.deinit(io);
+    s.docs.deinit(gpa);
+    s.live.deinit(io);
+    s.repo.deinit();
+}
+```
+
+- **The fields without a default** are what `main` and a test give: the
+  users and their tokens, the origins of CORS, the directory of the page,
+  and the logger. The rest `start` builds.
+- **The objects of the service**: the repository, the stand-in for billing,
+  the manager of server-sent events, the objects of the middleware and the
+  controllers, each with pointers to what it uses. They are fields of the
+  service, and the server borrows them, so the service stays where it is
+  until `deinit`, which stops the server before it frees them.
 - **`http.Server.init`** takes two arguments. The first holds the parts the
   compiler checks: the controllers, the server's middleware and the error
   handler. It checks them all here: the routes of every controller, the
@@ -536,10 +648,13 @@ What each part does:
   error a route can return. The second, `http.Server.Options`, holds the
   settings: where the requests come from, the prefix and the static
   files.
+- **`zefir.openapi.document`** builds the OpenAPI document of the API from
+  the type of the same parts, and `docs`, a controller of zefir-openapi,
+  serves it with a page of it: see [The OpenAPI document](#the-openapi-document).
+  The settings are values, which no type holds, so the document gets the
+  prefix of the server too.
 - **`server.start`** opens the static files' directory and starts taking
-  requests. A task waits for Ctrl+C or SIGTERM and asks the server to stop;
-  `server.wait` returns once the stop is over. See
-  [Stopping gracefully](#stopping-gracefully).
+  requests.
 
 Run it with the tokens of the two users:
 
@@ -603,16 +718,17 @@ Ann's own, and Bob does not see them.
 
 A controller is a struct with a method for each route, and the routes are
 declared in it. Its dependencies are fields, pointers to objects that
-`main` builds:
+`Service.start` builds:
 
 ```zig
 //! The REST controller of todos, version 1: /api/v1/todos. It declares its
-//! routes; the compiler checks them where `main` passes the controller to
-//! `http.Server.init`. Every route needs a signed-in user, and each user
-//! sees only their own todos.
+//! routes; the compiler checks them where `Service.start` passes the
+//! controller to `http.Server.init`. Every route needs a signed-in user,
+//! and each user sees only their own todos.
 
 const std = @import("std");
 const http = @import("http");
+const zefir = @import("zefir");
 const auth = @import("auth.zig");
 const dto = @import("dto.zig");
 const mw = @import("middleware.zig");
@@ -621,12 +737,24 @@ const TodoRepository = @import("TodoRepository.zig");
 
 const TodosV1Controller = @This();
 
-// The dependencies are fields: `main` builds them and the controller.
+// The dependencies are fields: `Service.start` builds them and the
+// controller.
 repo: *TodoRepository,
 /// The SSE streams of live updates, a key per user.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 /// A middleware object of this controller: `.plans` in the routes below.
 plans: *mw.PlanLookup,
+
+// A route with a name: its handler reads all it declares with
+// ctx.input(Create).
+const Create = http.post("", .{
+    .body = dto.CreateTodoRequest,
+    .headers = dto.CreateTodoHeaders,
+    // 201 for a new todo, 200 for a retry with the same Idempotency-Key.
+    .responses = .{ .created = .{}, .ok = .{} },
+    .middleware = .{.plans},
+    .max_body_bytes = 16 * 1024,
+});
 
 pub const http_routes = http.routes(.{
     .prefix = "/v1/todos",
@@ -634,16 +762,46 @@ pub const http_routes = http.routes(.{
     // requireUser, then the permission every route here needs.
     .middleware = .{ mw.protected, auth.requirePermission("todos") },
     .methods = .{
-        .list = http.get("", .{}),
-        .get = http.get("/{id}", .{}),
-        .create = http.post("", .{ .middleware = .{.plans}, .max_body_bytes = 16 * 1024 }),
-        .update = http.patch("/{id}", .{}),
-        .delete = http.delete("/{id}", .{ .middleware = .{auth.requirePermission("todos:delete")} }),
-        // A literal segment wins over {id}: /export.csv is not a todo.
-        .exportCsv = http.get("/export.csv", .{ .timeout = std.Io.Duration.fromSeconds(300) }),
-        .events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+        .list = http.get("", .{ .query = dto.ListTodosQuery }),
+        .get = http.get("/{id}", .{ .path = dto.TodoIdPath }),
+        .create = Create,
+        .update = http.patch("/{id}", .{ .path = dto.TodoIdPath, .body = dto.UpdateTodoRequest }),
+        .delete = http.delete("/{id}", .{ .path = dto.TodoIdPath, .middleware = .{auth.requirePermission("todos:delete")} }),
+        // A literal segment wins over {id}: /export.csv is not a todo. The
+        // handler writes the body itself, so the route says what it is.
+        .exportCsv = http.get("/export.csv", .{
+            .responses = .{ .ok = .{ .content_type = "text/csv" } },
+            .timeout = std.Io.Duration.fromSeconds(300),
+        }),
+        .events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
     },
 });
+
+// The texts of the OpenAPI document: the tag of the controller, and an
+// entry for each method of .methods, with a summary at least.
+pub const openapi: zefir.openapi.ControllerDoc(@This()) = .{
+    .tag = "Todos",
+    .description = "The todos of the signed-in user.",
+    .routes = .{
+        .list = .{ .summary = "List todos", .description = "A page of the todos that pass the filter of the query." },
+        .get = .{ .summary = "Get a todo" },
+        .create = .{
+            .summary = "Create a todo",
+            .description = "A retry with the same Idempotency-Key returns the todo it made.",
+            .responses = .{ .ok = .{ .description = "The todo that the first request with this key made." } },
+        },
+        .update = .{ .summary = "Change a todo" },
+        .delete = .{ .summary = "Delete a todo" },
+        .exportCsv = .{
+            .summary = "Export todos as CSV",
+            .responses = .{ .ok = .{ .description = "All todos, a row each." } },
+        },
+        .events = .{
+            .summary = "Live updates",
+            .description = "Server-sent events: each change of the user's todos, as it happens. A browser's EventSource sends the cookie session.",
+        },
+    },
+};
 
 pub fn list(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoListResponse) {
     // Parsed, transformed and checked: a query that does not fit is a 422.
@@ -666,11 +824,11 @@ pub fn get(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoResp
 }
 
 pub fn create(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoResponse) {
-    const body = try ctx.json(dto.CreateTodoRequest);
-    const headers = try ctx.headers(dto.CreateTodoHeaders);
+    // Exactly what Create declares: in.headers, then in.body.
+    const in = try ctx.input(Create);
     const user = try owner(ctx);
     // The same Idempotency-Key again, a retry: the todo it made, as it is.
-    if (headers.idempotency_key) |key| {
+    if (in.headers.idempotency_key) |key| {
         if (try self.repo.findByKey(ctx.operation(), ctx.io(), ctx.allocator(), user, key)) |todo| return .{ .value = .from(todo) };
     }
     // Put there by PlanLookup, which runs on this route only.
@@ -679,13 +837,13 @@ pub fn create(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoR
     if (usage.todos >= plan.max_todos) return error.TodoLimitReached;
     const todo = try self.repo.insert(ctx.operation(), ctx.io(), ctx.allocator(), .{
         .owner = user,
-        .title = body.title,
-        .priority = body.priority,
-        .due_date = body.due_date,
-        .tags = body.tags,
-        .idempotency_key = headers.idempotency_key,
+        .title = in.body.title,
+        .priority = in.body.priority,
+        .due_date = in.body.due_date,
+        .tags = in.body.tags,
+        .idempotency_key = in.headers.idempotency_key,
     });
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.created", .data = dto.TodoResponse.from(todo) });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.created" = .from(todo) } });
     return .{ .value = .from(todo), .status = 201 };
 }
 
@@ -699,7 +857,7 @@ pub fn update(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoR
         .priority = body.priority,
         .due_date = body.due_date,
     });
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.updated", .data = dto.TodoResponse.from(todo) });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.updated" = .from(todo) } });
     return .{ .value = .from(todo) };
 }
 
@@ -707,7 +865,7 @@ pub fn delete(self: *TodosV1Controller, ctx: *http.Context) !void {
     const path = try ctx.path(dto.TodoIdPath);
     const user = try owner(ctx);
     try self.repo.delete(ctx.operation(), ctx.io(), user, path.id);
-    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = "todo.deleted", .data = path });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.deleted" = path } });
     // Nothing written into the response: 204 No Content.
 }
 
@@ -1019,13 +1177,26 @@ fn free(allocator: std.mem.Allocator, todo: Todo) void {
 - **A literal wins over a parameter**, and a parameter over `{*rest}`: so
   `/export.csv` is no `{id}`. Two routes of one method on one path stop the
   build, with a message that names both.
-- **The options of a route**: `.middleware` (see
-  [Middleware](#middleware)), `.max_body_bytes` instead of the server's
-  1 MiB, and `.timeout` instead of its deadline of 30 seconds, here 300 for
-  the export. The options are compile-time values of any type, so a
-  duration is written in full: `std.Io.Duration.fromSeconds(300)`. Where a
-  type is known, as in `http.Server.Options`, the options of
+- **The options of a route** say what the server needs to know of it:
+  - what it reads: `.path`, `.query`, `.headers` and `.cookies`, and its
+    body, `.body` for JSON or `.form` for a form, each the type of a DTO
+    (see [Input](#input));
+  - `.responses`, its statuses, when it answers with something else than
+    the default 200 or 204 (see [Responses](#responses));
+  - `.middleware` (see [Middleware](#middleware)), `.max_body_bytes` instead
+    of the server's 1 MiB, and `.timeout` instead of its deadline of 30
+    seconds, here 300 for the export;
+  - of `http.sse.get`, which has no body and no `.responses`: `.events`,
+    `.heartbeat` and `.on_close` (see
+    [Server-sent events](#server-sent-events)).
+
+  The options are compile-time values of any type, so a duration is
+  written in full: `std.Io.Duration.fromSeconds(300)`. Where a type is
+  known, as in `http.Server.Options`, the options of
   `http.native.Backend.init` or a cookie, `.fromSeconds(300)` is enough.
+- **A route is a type.** `http.get(…)` and the others return one, so a
+  route can have a name, as `Create` above, and its handler reads what it
+  declares with `ctx.input(Create)` (see [Input](#input)).
 
 What a handler returns:
 
@@ -1155,10 +1326,13 @@ field, its outside name, its transforms and its rules, in this order.
 //! The DTOs of /api/v1/todos: what a request brings in and what a response
 //! sends out. The `field_rules` of a field hold, in this order, its outside
 //! name (`v.rename`), its transforms and its rules; zefir-http reads the
-//! input by them and writes the output by them.
+//! input by them and writes the output by them. The texts of the OpenAPI
+//! document sit next to them, in `pub const openapi`; the constraints of
+//! the document come from the `field_rules`.
 
 const std = @import("std");
 const v = @import("validator");
+const zefir = @import("zefir");
 const TodoRepository = @import("TodoRepository.zig");
 
 /// In JSON and in a query: "low", "normal" or "high".
@@ -1171,6 +1345,12 @@ pub const TodoIdPath = struct {
     id: u64,
 
     pub const field_rules = .{ .id = v.positive };
+
+    // Each field of a DTO of a path, a query or the headers is a parameter
+    // of the document, with these texts.
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .fields = .{ .id = .{ .description = "The id of the todo.", .example = 1 } },
+    };
 };
 
 /// The query of GET /v1/todos, such as
@@ -1193,6 +1373,16 @@ pub const ListTodosQuery = struct {
         // A transform runs on the value of an optional field when it is there.
         .q = .{ v.trim, v.toLower, v.maxLength(100) },
     };
+
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .fields = .{
+            .done = .{ .description = "Only the todos that are done, or only those that are not; without it, both." },
+            .page = .{ .description = "The page, from 1." },
+            .per_page = .{ .description = "How many todos a page holds." },
+            .tags = .{ .description = "Only the todos that have every one of these tags: ?tags=home&tags=shop, or ?tags=home,shop." },
+            .q = .{ .description = "Only the todos whose title holds these words, in any case.", .example = "milk" },
+        },
+    };
 };
 
 /// Each item of `value` split at its commas, without empty parts.
@@ -1213,6 +1403,13 @@ pub const CreateTodoHeaders = struct {
     idempotency_key: ?[]const u8 = null,
 
     pub const field_rules = .{ .idempotency_key = .{ v.trim, v.notBlank, v.maxLength(64) } };
+
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .fields = .{ .idempotency_key = .{
+            .description = "Send the same key again to get the todo made the first time, not a second one.",
+            .example = "3f2b9c1e-7d4a-4f0e-9a61-2c8d5b7e1f30",
+        } },
+    };
 };
 
 /// The body of POST /v1/todos. A field it does not name is refused:
@@ -1230,6 +1427,19 @@ pub const CreateTodoRequest = struct {
         .due_date = .{ v.rename("dueDate"), v.trim, v.date },
         .tags = v.each(.{ v.trim, v.toLower, v.notBlank, v.maxLength(30) }),
     };
+
+    // An example is a value of the type, so the compiler checks it, and
+    // its rules too: an example that breaks them does not build.
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .description = "A new todo of the signed-in user.",
+        .example = .{ .title = "Buy milk", .due_date = "2026-10-30", .tags = &.{"home"} },
+        .fields = .{
+            .title = .{ .description = "What to do." },
+            .priority = .{ .description = "How urgent it is." },
+            .due_date = .{ .description = "The day it is due." },
+            .tags = .{ .description = "Labels of the todo, to find it by." },
+        },
+    };
 };
 
 /// The body of PATCH /v1/todos/{id}: a field that is not sent stays as it
@@ -1244,6 +1454,17 @@ pub const UpdateTodoRequest = struct {
     pub const field_rules = .{
         .title = .{ v.trim, v.notBlank, v.maxLength(200) },
         .due_date = .{ v.rename("dueDate"), v.trim, v.date },
+    };
+
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .description = "What to change in a todo: a field that is not sent, or is null, stays as it is.",
+        .example = .{ .done = true },
+        .fields = .{
+            .title = .{ .description = "What to do." },
+            .done = .{ .description = "Whether it is done." },
+            .priority = .{ .description = "How urgent it is." },
+            .due_date = .{ .description = "The day it is due." },
+        },
     };
 };
 
@@ -1262,6 +1483,18 @@ pub const TodoResponse = struct {
     // The outside names hold for the output too.
     pub const field_rules = .{ .due_date = v.rename("dueDate") };
 
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .description = "A todo, as the API shows it.",
+        .fields = .{
+            .id = .{ .description = "The id of the todo." },
+            .title = .{ .description = "What to do." },
+            .done = .{ .description = "Whether it is done." },
+            .priority = .{ .description = "How urgent it is." },
+            .due_date = .{ .description = "The day it is due; null for none." },
+            .tags = .{ .description = "Labels of the todo, in lower case." },
+        },
+    };
+
     pub fn from(todo: TodoRepository.Todo) TodoResponse {
         return .{ .id = todo.id, .title = todo.title, .done = todo.done, .priority = todo.priority, .due_date = todo.due_date, .tags = todo.tags };
     }
@@ -1276,12 +1509,33 @@ pub const TodoListResponse = struct {
 
     pub const field_rules = .{ .per_page = v.rename("perPage") };
 
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .description = "A page of the todos of the signed-in user, in the order they were made.",
+        .fields = .{
+            .items = .{ .description = "The todos of the page." },
+            .page = .{ .description = "The page, from 1." },
+            .per_page = .{ .description = "How many todos a page holds." },
+            .total = .{ .description = "How many todos pass the filter, on all the pages." },
+        },
+    };
+
     /// `arena` is the request's: what it gives is freed with the request.
     pub fn from(arena: std.mem.Allocator, page: TodoRepository.Page, query: ListTodosQuery) error{OutOfMemory}!TodoListResponse {
         const items = try arena.alloc(TodoResponse, page.items.len);
         for (items, page.items) |*item, todo| item.* = .from(todo);
         return .{ .items = items, .page = query.page, .per_page = query.per_page, .total = page.total };
     }
+};
+
+// ---------- Events ----------
+
+/// The events of the stream of live updates, /v1/todos/events: the name of
+/// a variant is the name of its event, and its value is the data, written
+/// as JSON as a response is.
+pub const LiveEvent = union(enum) {
+    @"todo.created": TodoResponse,
+    @"todo.updated": TodoResponse,
+    @"todo.deleted": TodoIdPath,
 };
 ```
 
@@ -1432,6 +1686,57 @@ Content-Length: 93
   `ctx.allocator()`, until the request has ended. The repository copies
   what it keeps.
 
+**The input of a route, declared.** Each route of the todos says what it
+reads, in its options, by the same DTOs:
+
+```zig
+.list = http.get("", .{ .query = dto.ListTodosQuery }),
+.get = http.get("/{id}", .{ .path = dto.TodoIdPath }),
+```
+
+- **A DTO is checked for its source where the route declares it**, as the
+  calls check it: a nested struct in a query, `v.rename` in a DTO of
+  headers, a type of field that JSON cannot hold stop the build there.
+- **The path and its DTO are checked both ways.** Each `{x}` of the whole
+  path, the controller's prefix and the route's path, is a field of the DTO
+  of `.path` whose outside name is `x`: `{id}` is the field `id`, and
+  `{projectId}` a field with `v.rename("projectId")`. Each field without a
+  default that is not `?T` is a `{x}` of the path. A path parameter without
+  its field, or a field without its parameter, does not build, and the
+  message names the route, the path and the DTO.
+- **`.body` and `.form` together** do not build: a body is JSON or a form.
+
+A route with a name reads all it declares in one call, `ctx.input`.
+`create` declares its headers and its body:
+
+```zig
+const Create = http.post("", .{
+    .body = dto.CreateTodoRequest,
+    .headers = dto.CreateTodoHeaders,
+```
+
+and reads them so, as fields of one struct:
+
+```zig
+// Exactly what Create declares: in.headers, then in.body.
+const in = try ctx.input(Create);
+const user = try owner(ctx);
+// The same Idempotency-Key again, a retry: the todo it made, as it is.
+if (in.headers.idempotency_key) |key| {
+```
+
+- **The struct has a field for each source the route declares**: `path`,
+  `query`, `headers`, `cookies`, and `body` or `form`. A source it does not
+  declare is not there to read.
+- **It reads them in that order**, the body last, and returns the first
+  error, as `try` on each call one after the other would. Its error set is
+  the union of theirs, so the strict error check of the server sees the
+  same errors.
+- **The calls of their own stay**: `ctx.query(T)` and the others work as
+  before, as `list` and `update` use them. On a route of a controller with
+  `pub const openapi`, a Debug build checks that `T` is what the route
+  declares for that source (see [The OpenAPI document](#the-openapi-document)).
+
 ## Responses
 
 The responses a handler writes itself go through `ctx.response`:
@@ -1510,6 +1815,53 @@ Both errors are mistakes of the program, 500.
 `ctx.response.setCookie` and `redirect` are shown in
 [Authentication and CORS](#authentication-and-cors): signing in sets a cookie
 and sends the browser back to the page.
+
+**The statuses of a route.** A handler of `http.Json(T)` answers 200 by
+default, and one of `!void` that writes nothing 204. A handler sets another
+status when it returns, as `create` does for a new todo:
+
+```zig
+return .{ .value = .from(todo), .status = 201 };
+```
+
+The compiler does not see that number, so a route that answers otherwise
+lists its statuses in `.responses`, by the names of `std.http.Status`.
+`create` answers 201 for a new todo and 200 for a retry, the export writes
+CSV itself, and signing in is a redirect:
+
+```zig
+// 201 for a new todo, 200 for a retry with the same Idempotency-Key.
+.responses = .{ .created = .{}, .ok = .{} },
+```
+
+```zig
+.responses = .{ .ok = .{ .content_type = "text/csv" } },
+```
+
+```zig
+.login = http.post("", .{ .form = LoginForm, .responses = .{ .see_other = .{} }, .max_body_bytes = 1024 }),
+```
+
+| An entry | The response |
+| --- | --- |
+| `.ok = .{}` on a route of `http.Json(T)` | 200 with the value, a `T` |
+| `.created = .{}` and the other 2xx of such a route, but 204 and 205 | that status, with a `T` too |
+| `.no_content = .{}`, `.reset_content = .{}` or `.not_modified = .{}`, on any route | 204, 205 or 304, without a body: the value of an `http.Json(T)` does not go out |
+| `.see_other = .{}`, or any status of a route of `!void` | that status without a body |
+| `.ok = .{ .content_type = "text/csv" }` | a body the handler writes, of that type |
+| `.ok = .{ .json = U }` | JSON of `U`, which the handler writes with `ctx.response.json` |
+
+- **The list is all of them.** It takes the place of the default: a route
+  with `.responses = .{ .created = .{} }` has no 200.
+- **The answers to errors are not in it**: `mapError` gives their statuses
+  and bodies (see [Errors](#errors)).
+- **A wrong entry does not build**: a key that is not a name of
+  `std.http.Status`; `.content_type` or `.json` on a 2xx of a route of
+  `http.Json(T)`, whose body is always `T`; and either on 204, 205 or 304,
+  which never have a body.
+- **A Debug build checks** each response of a route of a controller with
+  `pub const openapi` against its list: see
+  [The OpenAPI document](#the-openapi-document).
 
 ## Errors
 
@@ -1811,8 +2163,9 @@ response, a status or a body, and nothing after it runs. An error of `run`
 goes to the error handler. An element of a list of middleware is one of:
 
 - a function: a `run` alone, such as `mw.requestId`;
-- a type with any of the phases as `pub fn`, and a `pub const name` for the
-  log and the messages of the build, such as `auth.requirePermission("todos")`;
+- a type with any of the phases as `pub fn`, such as `auth.requireUser`, and
+  a `pub const name` for the log and the messages of the build, if its own
+  name will not do, such as `auth.requirePermission("todos")`;
 - `http.onResponse(f)` and `http.onFinish(f)`, which make a phase of a
   function;
 - an object of the application with any of the phases: in the server's
@@ -1913,10 +2266,16 @@ knows its users by tokens, which come from its settings as `confy.Secret`:
 //!
 //! A real service verifies a signed token (a JWT) or asks a store of
 //! sessions instead of a table; the shape of the middleware stays the same.
+//!
+//! Each of them describes what it checks for the OpenAPI document, in a
+//! `pub const openapi: zefir.openapi.MiddlewareDoc`: `TokenAuth` how a
+//! client says who it is, `requireUser` that a route behind it needs that,
+//! and `requirePermission` the permission it needs.
 
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
+const zefir = @import("zefir");
 
 /// The signed-in user of a request, as `TokenAuth` puts it into
 /// `ctx.locals`.
@@ -1939,6 +2298,15 @@ pub const TokenAuth = struct {
     /// The tokens and their users; borrowed, they live as long as the
     /// server.
     users: []const User,
+
+    // The two ways a client says who it is: the security schemes of the
+    // document, which the routes behind requireUser require.
+    pub const openapi: zefir.openapi.MiddlewareDoc = .{
+        .security_schemes = &.{
+            .{ .name = "bearer", .description = "The token of a user: Authorization: Bearer <token>.", .kind = .{ .http = .{ .scheme = "bearer" } } },
+            .{ .name = "session", .description = "The token of a user in the cookie session, which POST /api/session sets.", .kind = .{ .api_key = .{ .in = .cookie, .param = "session" } } },
+        },
+    };
 
     pub const User = struct {
         /// From the settings, such as `APP_AUTH_ANN_TOKEN`; never logged.
@@ -1988,11 +2356,18 @@ fn sameToken(given: []const u8, expected: []const u8) bool {
 
 /// 401 without a signed-in user: `error.Unauthenticated`, which the
 /// framework answers with 401. The application's error handler adds
-/// `WWW-Authenticate`, as RFC 9110 asks of every 401.
-pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
-    _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
-    return .next;
-}
+/// `WWW-Authenticate`, as RFC 9110 asks of every 401. A type with `run`,
+/// not a function, since only a type can declare `pub const openapi`.
+pub const requireUser = struct {
+    // A route behind it requires one of the schemes that the middleware
+    // before it declare: bearer or session.
+    pub const openapi: zefir.openapi.MiddlewareDoc = .{ .security = .any };
+
+    pub fn run(ctx: *http.Context) !http.MiddlewareResult {
+        _ = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
+        return .next;
+    }
+};
 
 /// 403 without the permission: a type made at compile time for each
 /// permission, with a name of its own, so that the log and the messages of
@@ -2000,6 +2375,9 @@ pub fn requireUser(ctx: *http.Context) !http.MiddlewareResult {
 pub fn requirePermission(comptime permission: []const u8) type {
     return struct {
         pub const name = "requirePermission(" ++ permission ++ ")";
+        // The permission is a role of the security requirement of every
+        // route behind it.
+        pub const openapi: zefir.openapi.MiddlewareDoc = .{ .roles = &.{permission} };
 
         pub fn run(ctx: *http.Context) !http.MiddlewareResult {
             const user = ctx.locals.get(CurrentUser) orelse return error.Unauthenticated;
@@ -2022,7 +2400,7 @@ pub fn requirePermission(comptime permission: []const u8) type {
 
 A service that signs the tokens of its users and verifies them, instead of
 a table, does it with the middleware `JwtAuth` of
-[the zefir-jwt guide](../../jwt/examples/README.md), of the same shape: a
+[the zefir-security guide](../../security/examples/README.md), of the same shape: a
 token it refuses goes on as anonymous too, and `requireUser` answers it
 with 401 and the reason.
 
@@ -2073,28 +2451,51 @@ A browser signs in with a form, and keeps its token in a cookie:
 const std = @import("std");
 const http = @import("http");
 const v = @import("validator");
+const zefir = @import("zefir");
 const auth = @import("auth.zig");
+const dto = @import("dto.zig");
 
 const SessionController = @This();
 
 token_auth: *auth.TokenAuth,
 /// The streams of a user end when they sign out.
-live: *http.sse.Manager,
+live: *http.sse.Manager(dto.LiveEvent),
 
 pub const http_routes = http.routes(.{
     .prefix = "/session",
     .methods = .{
-        // A form of one field: a small limit for its body.
-        .login = http.post("", .{ .max_body_bytes = 1024 }),
+        // A form of one field, with a small limit for its body; the answer
+        // is a redirect, 303, not the default 204 of a handler of !void.
+        .login = http.post("", .{ .form = LoginForm, .responses = .{ .see_other = .{} }, .max_body_bytes = 1024 }),
         .logout = http.delete("", .{ .middleware = .{auth.requireUser} }),
     },
 });
+
+pub const openapi: zefir.openapi.ControllerDoc(@This()) = .{
+    .tag = "Session",
+    .description = "Signing a browser in and out, with the cookie session.",
+    .routes = .{
+        .login = .{
+            .summary = "Sign in",
+            .description = "Sets the cookie session to the token of the form and sends the browser to the page, /. A form that a page of another site posts gets 403.",
+            .responses = .{ .see_other = .{ .description = "Signed in: the cookie session is set, and the browser goes on to /." } },
+        },
+        .logout = .{
+            .summary = "Sign out",
+            .description = "Clears the cookie session and ends the streams of live updates of the user.",
+        },
+    },
+};
 
 /// The form of the page, `application/x-www-form-urlencoded`: `token=…`.
 pub const LoginForm = struct {
     token: []const u8,
 
     pub const field_rules = .{ .token = .{ v.trim, v.notBlank, v.maxLength(256) } };
+
+    pub const openapi: zefir.openapi.Doc(@This()) = .{
+        .fields = .{ .token = .{ .description = "The token of the user." } },
+    };
 };
 
 pub fn login(self: *SessionController, ctx: *http.Context) !void {
@@ -2337,17 +2738,25 @@ connection drops. The service sends every change of a user's todos to the
 streams of that user:
 
 ```zig
-.events = http.sse.get("/events", .{ .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
+.events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
 ```
 
+- **`.events`** names the events of the stream: `dto.LiveEvent`, a
+  `union(enum)` with a variant per event. The name of a variant is the name
+  of its event, and its value is the data. The manager of the streams takes
+  the same union, `http.sse.Manager(dto.LiveEvent)`, so the compiler checks
+  every event the service publishes: an event the union does not have, or
+  data of another type, does not build.
 - **The handler of the route**, `events`, runs as an ordinary request: its
   middleware run, and an error here is an ordinary 4xx or 5xx answer, so a
   stream without a user gets 401. `subscribe` sends the head of the stream
   and returns at once; the stream lives on, until the client leaves.
-- **`publish`**, in `create`, `update` and `delete`, puts an event into the
-  queue of every stream of the user, and returns without waiting: the data
-  of an event is written as JSON, through the transforms and with the outside
-  names of its type, as `http.Json(T)` writes a response.
+- **`publish`**, in `create`, `update` and `delete`, puts an event, such as
+  `.{ .event = .{ .@"todo.created" = .from(todo) } }`, into the queue of
+  every stream of the user, and returns without waiting: the data of an
+  event is written as JSON, through the transforms and with the outside
+  names of its type, as `http.Json(T)` writes a response; a variant of
+  `void` has the data `{}`.
 - **`.on_close`** names the method that runs once, when the stream has
   ended: the client left, `close(key)`, the queue overflowed, or the server
   stopped.
@@ -2421,8 +2830,8 @@ Content-Length: 104
 - **`EventSource` cannot send `Authorization`**, so the stream of a browser
   comes with the cookie `session`. A token in the URL would end up in the
   logs of every proxy.
-- **The manager outlives the server.** `main` declares `live` before the
-  server, so that the server's `deinit`, which ends the streams, runs first.
+- **The manager outlives the server.** `Service.deinit` stops the server,
+  which ends the streams, before it frees `live`.
   A stop of the server closes the streams: each sends what was published to
   it before, within `.shutdown_grace`, then ends, and its client reconnects,
   to another instance.
@@ -2432,7 +2841,7 @@ Content-Length: 104
 The page of the service and its files come from the directory `public/`:
 
 ```zig
-.static = &.{http.static("/", .{ .root = config.public_dir, .spa_fallback = "index.html" })},
+.static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
 ```
 
 ```html
@@ -2576,34 +2985,163 @@ Content-Length: 100
   deadline: a large file to a slow client takes its time, and the backend's
   write timeout cuts a client that stops reading.
 
+## The OpenAPI document
+
+An OpenAPI document describes an API to those who call it without its
+code: generators of clients, pages of documentation, Postman, tests of
+contracts. [zefir-openapi](../../openapi/examples/README.md) builds the
+document of this service when it compiles, from the same types the server
+runs on: the routes and what they declare, the DTOs and their
+`field_rules`, the errors of each route as `mapError` answers them, and the
+middleware of each route. So the document cannot list a route that is not
+there, or leave out an error that a route returns. Its guide tells all of
+it; this is what the service does.
+
+`Service.start` builds the document from the type of the parts of the
+server, and `docs`, a controller of zefir-openapi, serves it. The prefix of
+the server is one of its settings, a value that no type holds, so the
+document gets it too, for its `servers`:
+
+```zig
+s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
+    .info = .{
+        .title = "Todos API",
+        .version = "1.0.0",
+        .description = "The todos of each user: made, changed, deleted, exported as CSV and followed live.",
+    },
+    // The server's prefix, in the servers of the document.
+    .prefix = prefix,
+    // The health check of the load balancer is no part of the API.
+    .exclude = &.{HealthController},
+}));
+```
+
+What the compiler cannot see, the texts of the document, each type
+declares next to its code, in a typed `pub const openapi`. The DTO of the
+path of a todo, in `dto.zig`:
+
+```zig
+pub const openapi: zefir.openapi.Doc(@This()) = .{
+    .fields = .{ .id = .{ .description = "The id of the todo.", .example = 1 } },
+};
+```
+
+- **A DTO**, in a `zefir.openapi.Doc(@This())`: its description, an
+  example, and a text for each field. Its constraints, `maxLength`,
+  `minimum` and the others, come from its `field_rules`.
+- **A controller**, in a `zefir.openapi.ControllerDoc(@This())`: the tag of
+  its routes, and an entry for each method of its `.methods`, with a
+  `.summary` at least, as `TodosV1Controller` and `SessionController`
+  above. A route without its entry does not build.
+- **A middleware**, in a `zefir.openapi.MiddlewareDoc`: `TokenAuth` the two
+  ways a client says who it is, `requireUser` that a route behind it needs
+  one of them, `requirePermission` the permission it needs (see
+  [Authentication and CORS](#authentication-and-cors)). A middleware that
+  declares one is a type: a function cannot carry a declaration.
+
+The document is `/api/openapi.json`, as `application/json` with an `ETag`
+and `Cache-Control: no-cache`, and a client that sends that `ETag` back in
+`If-None-Match` gets 304 without a body:
+
+```text
+$ curl -I localhost:8080/api/openapi.json
+HTTP/1.1 200 OK
+content-type: application/json
+x-request-id: 9e0c8a5d2b7f41c6a3d8e5f1b2c7a940
+etag: "c352f36245194471"
+cache-control: no-cache
+x-content-type-options: nosniff
+vary: Origin
+Date: Sat, 17 Oct 2026 20:02:45 GMT
+Content-Length: 54633
+```
+
+`/api/docs` is a page of it, which a browser opens: a reference of the API
+in which each route can be tried out. The browser loads Scalar, the code of
+the page, from jsDelivr, a release pinned by its hash.
+
+**The file in the repository.** `openapi.json`, next to `build.zig`, holds
+the same bytes. The last test of `todos_test.zig` compares the document
+with it. `zig build openapi` runs the tests of `todos_test.zig` with
+`ZEFIR_OPENAPI_UPDATE=1`, and then that test writes the file from the code
+instead. A change of the API that the file does not show fails
+`zig build test` with the first line that differs, its number and both
+texts. Say the summary of `get` becomes "Get one todo":
+
+```text
+$ zig build test
+error: 'todos_test.test.the OpenAPI document is openapi.json, which the service serves with a page of it' failed:
+       openapi.json:533: the file and the document differ
+         file:             "summary": "Get a todo",
+         document:         "summary": "Get one todo",
+       error: openapi.json is out of date; run `zig build openapi`
+```
+
+So a change of the API shows in the review of a pull request, in
+`openapi.json`, and the file changes only when the API does.
+
+**The Debug check.** The controllers of the service declare
+`pub const openapi`, so in a Debug build, which `zig build test` and
+`zig build run` make, the server compares what each of their routes does
+with what it declares: each input call, each response, from the handler, a
+middleware or the error handler, and `subscribe`. The input calls of the
+error handler are not compared: what it reads to choose its answer is no
+input of the route. The statuses that `mapError` gives the errors of a
+route are the answers of the error handler: a handler or a middleware
+that answers one of them itself, with a body of its own, declares it in
+`.responses`, or in the `.responses` of the middleware's `openapi`. A
+mismatch is not what the client gets: the server answers 500 and logs
+what differs. Say `create` returned `.status = 202`, which `.responses`
+does not list:
+
+```text
+zefir.http: POST /api/v1/todos (TodosV1Controller.create) answered 202, which it does not declare in .responses
+```
+
+The stream of events takes no `.responses`: it answers with its stream,
+with 204 when `events` returns without `subscribe`, and with what
+`mapError` gives its errors. Say a middleware of the application, one
+that limits the streams of a user, answered 429 itself there, without the
+429 in its `openapi`:
+
+```text
+zefir.http: GET /api/v1/todos/events (TodosV1Controller.events) answered 429, which it does not declare: an SSE route answers with its stream, 204 and what mapError gives its errors; declare it in the .responses of the openapi of the middleware that answers, or keep the handler and the error handler to those
+```
+
+The tests reach every route, so each declaration is checked, and the
+document says what the server does. The answers the server writes itself,
+404 and 405 of the router, 503 of overload and 504 of a deadline, are no
+answers of a route and are not checked. In ReleaseSafe and ReleaseFast
+none of this is compiled.
+
 ## Tests
 
 `http.testing.Backend` serves the same server, the same controllers and
 middleware, from memory: no sockets, and a test sees every response whole.
-The tests of the service build it as `main` does, read its settings with
-confy from an environment of their own, and keep the records of its access
-log:
+The tests of the service start it with `Service.start`, as `main` does, read
+its settings with confy from an environment of their own, and keep the
+records of its access log:
 
 ```zig
 //! Tests of the example app without a network: `http.testing.Backend`
 //! serves the same server, the same controllers and the same middleware
-//! from memory. The app is built as `main` builds it, its settings read
-//! with confy from an environment of the test's own, and its access log
-//! written where the test can read it.
+//! from memory, as `Service.start` builds them for `main`. The settings are
+//! read with confy from an environment of the test's own, and the access
+//! log is written where the test can read it. The tests reach every route,
+//! and in a Debug build the server checks each request and each response
+//! against what its route declares; the last test compares the OpenAPI
+//! document with openapi.json.
 
 const std = @import("std");
 const confy = @import("confy");
 const http = @import("http");
 const log = @import("log");
+const zefir = @import("zefir");
 const auth = @import("auth.zig");
-const Cors = @import("cors.zig").Cors;
-const errors = @import("errors.zig");
-const mw = @import("middleware.zig");
-const Billing = @import("Billing.zig");
-const HealthController = @import("HealthController.zig");
-const SessionController = @import("SessionController.zig");
-const TodoRepository = @import("TodoRepository.zig");
-const TodosV1Controller = @import("TodosV1Controller.zig");
+const Service = @import("Service.zig");
+/// Where the files of the app are, as the build gives them: the directory
+/// of the page and openapi.json.
+const paths = @import("paths");
 
 const testing = std.testing;
 
@@ -2615,29 +3153,17 @@ const Config = struct {
     },
 };
 
-/// The app as `main` builds it, on the backend in memory and without the
-/// static files, whose directory the module's own tests cover.
+/// The app as `main` builds it, on the backend in memory.
 const App = struct {
     arena: std.heap.ArenaAllocator,
     config: Config = undefined,
     /// What the access log wrote, a record per line.
     records: std.Io.Writer.Allocating,
     logger: log.Logger = undefined,
-    repo: TodoRepository,
-    billing: Billing = .{},
-    live: http.sse.Manager,
     users: [2]auth.TokenAuth.User = undefined,
-    token_auth: auth.TokenAuth = undefined,
     origins: [1][]const u8 = .{"http://localhost:5173"},
-    cors: Cors = undefined,
-    access_log: mw.AccessLog = undefined,
-    plans: mw.PlanLookup = undefined,
-    app_errors: errors.AppErrors = .{},
-    todos_v1: TodosV1Controller = undefined,
-    sessions: SessionController = undefined,
-    health: HealthController = .{},
     backend: http.testing.Backend,
-    server: http.Server = undefined,
+    service: Service = undefined,
 
     /// Starts the app; `app` stays where it is until `stop`.
     fn start(app: *App) !void {
@@ -2645,8 +3171,6 @@ const App = struct {
         app.* = .{
             .arena = .init(gpa),
             .records = .init(gpa),
-            .repo = .init(gpa),
-            .live = .init(gpa, .{}),
             .backend = .init(gpa),
         };
         errdefer app.free();
@@ -2668,37 +3192,19 @@ const App = struct {
             .{ .token = app.config.auth.ann_token, .id = "ann", .permissions = &.{ "todos", "todos:delete" } },
             .{ .token = app.config.auth.bob_token, .id = "bob", .permissions = &.{"todos"} },
         };
-        app.token_auth = .{ .users = &app.users };
-        app.cors = .{ .origins = &app.origins };
-        app.access_log = .{ .logger = app.logger.scoped("access") };
-        app.plans = .{ .billing = &app.billing, .repo = &app.repo };
-        app.todos_v1 = .{ .repo = &app.repo, .live = &app.live, .plans = &app.plans };
-        app.sessions = .{ .token_auth = &app.token_auth, .live = &app.live };
-        app.server = try .init(gpa, .{
-            .controllers = .{ &app.todos_v1, &app.sessions, &app.health },
-            .middleware = .{ mw.requestId, &app.access_log, http.onResponse(mw.securityHeaders), &app.cors, &app.token_auth },
-            .error_handler = &app.app_errors,
-        }, .{
-            .listen = .{ .backend = app.backend.backend() },
-            .prefix = "/api",
-        });
-        app.server.start(testing.io) catch |err| {
-            app.server.deinit(testing.io);
-            return err;
-        };
+        app.service = .{ .users = &app.users, .origins = &app.origins, .public_dir = paths.public_dir, .logger = app.logger };
+        try app.service.start(gpa, testing.io, app.backend.backend());
     }
 
-    /// Stops the server first: what it borrowed goes after it.
+    /// Stops the service first: what it borrowed goes after it.
     fn stop(app: *App) void {
-        app.server.deinit(testing.io);
+        app.service.deinit(testing.allocator, testing.io);
         app.logger.deinit();
         app.free();
     }
 
     fn free(app: *App) void {
         app.backend.deinit();
-        app.live.deinit(testing.io);
-        app.repo.deinit();
         app.records.deinit();
         app.arena.deinit();
     }
@@ -2925,6 +3431,30 @@ test "the access log writes a record for every request, the refused ones too" {
     try testing.expect(std.mem.find(u8, lines.next().?, "[access] Request method=GET path=/api/health status=200 user=- err=- request=test-1") != null);
     try testing.expect(std.mem.find(u8, lines.next().?, "[access] Request method=GET path=/api/v1/todos status=401 user=- err=Unauthenticated request=test-1") != null);
 }
+
+test "the OpenAPI document is openapi.json, which the service serves with a page of it" {
+    var app: App = undefined;
+    try app.start();
+    defer app.stop();
+
+    // With ZEFIR_OPENAPI_UPDATE=1 in the environment, `zig build openapi`
+    // writes the file instead.
+    try zefir.openapi.testing.expectFile(testing.io, app.service.docs.document, paths.openapi_json);
+
+    var document = try app.request(.GET, "/api/openapi.json", &.{}, "");
+    defer document.deinit();
+    try testing.expectEqual(200, document.status);
+    try testing.expectEqualStrings("application/json", document.header("content-type").?);
+    try testing.expectEqualStrings("no-cache", document.header("cache-control").?);
+    // A client that has it already gets 304, without a body.
+    var again = try app.request(.GET, "/api/openapi.json", &.{.{ "if-none-match", document.header("etag").? }}, "");
+    defer again.deinit();
+    try testing.expectEqual(304, again.status);
+    var page = try app.request(.GET, "/api/docs", &.{}, "");
+    defer page.deinit();
+    try testing.expectEqual(200, page.status);
+    try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type").?);
+}
 ```
 
 - **`backend.request(io, .{ … })`** hands a request to the server and
@@ -2941,6 +3471,15 @@ test "the access log writes a record for every request, the refused ones too" {
   the strict error check of a service are checked when something builds its
   `http.Server`: keep a test that does, and `zig build test` checks them
   even before the service runs.
+- **The tests check the declarations of the routes too.** The controllers
+  of the service declare `pub const openapi`, so in a Debug build, the
+  build of the tests, the server compares each request a handler reads and
+  each response it answers with what its route declares, and a mismatch is
+  a 500 with a line in the log: see [The OpenAPI document](#the-openapi-document).
+  The tests reach every route, so each declaration is checked.
+- **The files of the app** come by their paths from the build, `paths`:
+  the directory of the page, which `.static` needs, and `openapi.json`,
+  which the last test compares with the document.
 
 The tests of `TokenAuth` and `Cors` on their own are in
 [middleware_test.zig](middleware_test.zig).
@@ -3271,9 +3810,10 @@ $ APP_AUTH_ANN_TOKEN=ann-secret APP_AUTH_BOB_TOKEN=bob-secret zig build run
 2026-10-17T20:02:45.032Z INFO  [access] Request method=HEAD path=/ status=200 user=- err=- request=4a2a2c782ef295446038f0aefb1b4fb0 duration_ms=0
 2026-10-17T20:02:45.033Z INFO  [access] Request method=HEAD path=/todos/today status=200 user=- err=- request=4f8770e1c8c1b0e0cf3f88debceeab4a duration_ms=0
 2026-10-17T20:02:45.033Z INFO  [access] Request method=GET path=/.env status=404 user=- err=RouteNotFound request=6bcb4d2c288468ad324e01449d4fa1bd duration_ms=0
+2026-10-17T20:02:45.034Z INFO  [access] Request method=HEAD path=/api/openapi.json status=200 user=- err=- request=9e0c8a5d2b7f41c6a3d8e5f1b2c7a940 duration_ms=0
 ^C
-2026-10-17T20:02:45.033Z INFO  [app] Stopping signal=interrupt
-2026-10-17T20:02:45.033Z INFO  [app] Stopped
+2026-10-17T20:02:45.035Z INFO  [app] Stopping signal=interrupt
+2026-10-17T20:02:45.035Z INFO  [app] Stopped
 ```
 
 Every request of the guide left a record of `AccessLog`, with its status,

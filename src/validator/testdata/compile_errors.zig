@@ -351,4 +351,7 @@ pub const list = [_]Fixture{
     .{ .file = "src/validator/testdata/compile_errors/pointer_to_transforms.zig", .expect = "validator: pointer_to_transforms.Bad.x: pointers are not walked; *const pointer_to_transforms.Profile reaches pointer_to_transforms.Profile, which declares field_rules or validateSelf that would be skipped", .row = "variant of G-13" },
     .{ .file = "src/validator/testdata/compile_errors/transform_function_in_tuple.zig", .expect = "validator: transform_function_in_tuple.Bad.field_rules.x: item 1 of the tuple is fn (mem.Allocator, []const u8) error{BadPhone}![]const u8; wrap a transform function in v.transformWith(f)", .row = "variant of G-7" },
     .{ .file = "src/validator/testdata/compile_errors/transform_function_in_each.zig", .expect = "validator: each(...): expected a transform or a rule, or a tuple of them, got fn (mem.Allocator, []const u8) []const u8; wrap a transform function in v.transformWith(f)", .row = "variant of each-1" },
+    // schemaOf: an element of field_rules that is a name, or not an element.
+    .{ .file = "src/validator/testdata/compile_errors/schema_of_rename.zig", .expect = "validator: schemaOf([]const u8): rename(\"userName\") is a name, not a rule; v.nameOf gives the outside name of a field", .row = "schemaOf-1" },
+    .{ .file = "src/validator/testdata/compile_errors/schema_of_not_rule.zig", .expect = "validator: schemaOf([]const u8): expected a rule or a transform, got *const [8:0]u8", .row = "schemaOf-2" },
 };

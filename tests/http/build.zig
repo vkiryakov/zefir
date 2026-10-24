@@ -4,11 +4,17 @@
 //!
 //!   zig build e2e        run the end-to-end tests: servers on http.native
 //!                        over loopback, on zio with one executor and with
-//!                        four; then the examples
+//!                        four; then the examples; and build the small
+//!                        application of the guide of zefir-openapi
 //!   zig build examples   run the service of the guide, send it the guide's
 //!                        curl commands, and check that the guide shows
 //!                        each with its response, and the service's log
 //!                        (Linux and macOS)
+//!   zig build schemathesis
+//!                        run the service of the guide, and Schemathesis in
+//!                        Docker against its OpenAPI document: every
+//!                        response must be one the document allows (Linux
+//!                        and macOS)
 //!   zig build probes     run the probes, on zio with one executor and with
 //!                        four: read and write timeouts, the socket watcher
 //!                        of a request, and the cost of the tasks of a
@@ -102,6 +108,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "validator", .module = zefir.module("zefir-validator") },
                     .{ .name = "confy", .module = zefir.module("zefir-confy") },
                     .{ .name = "log", .module = zefir.module("zefir-log") },
+                    .{ .name = "zefir", .module = zefir.module("zefir") },
                     .{ .name = "zio", .module = zio.module("zio") },
                 },
             }) }},
@@ -131,6 +138,8 @@ pub fn build(b: *std.Build) void {
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     guide.root_module.addAnonymousImport("guide", .{ .root_source_file = zefir.path(examples_dir ++ "README.md") });
+    // The guide of zefir-openapi shows some of the commands too.
+    guide.root_module.addAnonymousImport("openapi-guide", .{ .root_source_file = zefir.path("src/openapi/examples/README.md") });
     // In `e2e` after the tests; `examples` runs it alone.
     for ([_]*std.Build.Step{ e2e_step, b.step("examples", "Run the service of the guide with its curl session and check the guide") }, 0..) |step, i| {
         const run_guide = b.addRunArtifact(guide);
@@ -139,6 +148,50 @@ pub fn build(b: *std.Build) void {
         if (i == 0) run_guide.step.dependOn(&run_e2e.step);
         step.dependOn(&run_guide.step);
     }
+
+    // Schemathesis in Docker against the service of the guide and its
+    // OpenAPI document (Linux and macOS; CI's http-schemathesis, on Linux),
+    // with its configuration, schemathesis.toml, by its absolute path,
+    // which Docker mounts in the container.
+    const schemathesis_options = b.addOptions();
+    schemathesis_options.addOption([]const u8, "config", b.root.joinString(b.allocator, "schemathesis.toml") catch @panic("OOM"));
+    const schemathesis = b.addTest(.{
+        .name = "schemathesis",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("schemathesis_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "guide_options", .module = guide_options.createModule() },
+                .{ .name = "schemathesis_options", .module = schemathesis_options.createModule() },
+            },
+        }),
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+    });
+    const run_schemathesis = b.addRunArtifact(schemathesis);
+    run_schemathesis.stdio = .inherit;
+    run_schemathesis.has_side_effects = true;
+    b.step("schemathesis", "Run Schemathesis in Docker against the service of the guide and its OpenAPI document").dependOn(&run_schemathesis.step);
+
+    // The small application of the guide of zefir-openapi,
+    // src/openapi/examples/main.zig, which imports zio: built, not run.
+    // `zig build test-openapi` checks its document against its file.
+    const openapi_app = b.addExecutable(.{
+        .name = "openapi-todos",
+        .root_module = b.createModule(.{
+            .root_source_file = zefir.path("src/openapi/examples/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zefir", .module = zefir.module("zefir") },
+                .{ .name = "zio", .module = zio.module("zio") },
+            },
+        }),
+    });
+    // Code generation too, not only analysis: the binary is asked for.
+    _ = openapi_app.getEmittedBin();
+    e2e_step.dependOn(&openapi_app.step);
 
     // The benchmark: `bench` runs it, built with ReleaseFast unless
     // -Dbench-optimize says otherwise, with zefir and zio built in that
@@ -192,6 +245,8 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&e2e.step);
     check_step.dependOn(&guide.step);
     check_step.dependOn(&service.step);
+    check_step.dependOn(&schemathesis.step);
+    check_step.dependOn(&openapi_app.step);
     const checked_bench = addBench(b, target, optimize);
     // Code generation too, not only analysis: the binaries are asked for.
     for ([_]*std.Build.Step.Compile{ checked_bench, garden_echo, garden_payloads }) |exe| {

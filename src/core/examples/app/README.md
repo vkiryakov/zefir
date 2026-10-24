@@ -73,7 +73,7 @@ defer app.deinit();
 Add Zefir to your `build.zig.zon`; App ships since v0.10.0:
 
 ```sh
-zig fetch --save git+https://github.com/vkiryakov/zefir#v0.10.0
+zig fetch --save git+https://github.com/vkiryakov/zefir#v0.11.0
 ```
 
 The shop runs on zio. zio has no release for Zig 0.17 yet, so pin the

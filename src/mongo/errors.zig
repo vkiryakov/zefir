@@ -29,7 +29,7 @@
 //! ```
 
 const std = @import("std");
-const bson = @import("bson.zig");
+const bson = @import("mongo-bson");
 
 /// What can go wrong in a call. Each name says whether the server may have
 /// run the operation; `outcome` tells it in code.

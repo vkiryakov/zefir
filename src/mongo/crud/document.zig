@@ -23,8 +23,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const bson = @import("../bson.zig");
-const check = @import("../bson/check.zig");
+const bson = @import("mongo-bson");
+const check = bson.codec.check;
 
 /// How the collection API takes an argument of a type.
 pub const Kind = enum {

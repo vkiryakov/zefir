@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const mongo = @import("mongo");
-const bson = mongo.bson;
+const bson = @import("mongo-bson");
 const Users = @This();
 
 collection: mongo.Collection,

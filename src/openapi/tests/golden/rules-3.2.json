@@ -1,0 +1,748 @@
+{
+  "openapi": "3.2.1",
+  "info": {
+    "title": "Profiles API",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/api"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Profiles"
+    }
+  ],
+  "paths": {
+    "/v1/profiles": {
+      "post": {
+        "operationId": "Profiles.create",
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Make a profile",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Bad Request",
+                      "status": 400,
+                      "code": "invalid_request",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Content Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "PayloadTooLarge": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Content Too Large",
+                      "status": 413,
+                      "code": "payload_too_large",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "UnsupportedMediaType": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Unsupported Media Type",
+                      "status": 415,
+                      "code": "unsupported_media_type",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Unprocessable Content",
+                      "status": 422,
+                      "code": "validation_failed",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Internal Server Error",
+                      "status": 500,
+                      "code": "internal",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "Profiles.list",
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "List profiles",
+        "parameters": [
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "admin",
+                "user"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 1
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "const": "name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProfileView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Bad Request",
+                      "status": 400,
+                      "code": "invalid_request",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Unprocessable Content",
+                      "status": 422,
+                      "code": "validation_failed",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Internal Server Error",
+                      "status": 500,
+                      "code": "internal",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/profiles/{handle}": {
+      "get": {
+        "operationId": "Profiles.get",
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Get a profile",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "description": "Converted to lowercase.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9A-Za-z]*$",
+              "minLength": 3,
+              "maxLength": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Bad Request",
+                      "status": 400,
+                      "code": "invalid_request",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "ValidationFailed": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Unprocessable Content",
+                      "status": 422,
+                      "code": "validation_failed",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "internal": {
+                    "value": {
+                      "type": "about:blank",
+                      "title": "Internal Server Error",
+                      "status": 500,
+                      "code": "internal",
+                      "errors": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code",
+          "errors"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Violation"
+            }
+          }
+        }
+      },
+      "ProfileRequest": {
+        "type": "object",
+        "description": "A profile to make. The server also checks how these fields fit together.",
+        "required": [
+          "age",
+          "name",
+          "handle",
+          "password",
+          "email",
+          "id",
+          "born"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role",
+            "enum": [
+              "admin",
+              "user"
+            ],
+            "default": "user"
+          },
+          "nickname": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "not": {
+              "enum": [
+                "root",
+                "admin"
+              ]
+            },
+            "default": null
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "DE",
+              "FR",
+              "GB",
+              null
+            ],
+            "default": null
+          },
+          "agreed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "yes",
+              null
+            ],
+            "default": null
+          },
+          "motto": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "not": {
+              "type": "string",
+              "pattern": "http"
+            },
+            "default": null
+          },
+          "age": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 18,
+            "maximum": 130
+          },
+          "score": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": -100,
+            "maximum": 100,
+            "default": 0
+          },
+          "rating": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "default": 0
+          },
+          "step": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "multipleOf": 5,
+            "default": 5
+          },
+          "name": {
+            "type": "string",
+            "description": "The name others see. Leading and trailing spaces are removed.",
+            "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+            "maxLength": 50,
+            "examples": [
+              "Ada"
+            ]
+          },
+          "handle": {
+            "type": "string",
+            "description": "Converted to lowercase.",
+            "pattern": "^[0-9A-Za-z]*$",
+            "minLength": 3,
+            "maxLength": 20
+          },
+          "bio": {
+            "type": "string",
+            "description": "Checked by the server: at most 500 bytes in UTF-8.",
+            "maxLength": 500,
+            "default": ""
+          },
+          "wide": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name in full-width letters.",
+            "pattern": "[^ -~\uff61-\uffdc\uffe8-\uffee]",
+            "default": null
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8,
+            "allOf": [
+              {
+                "pattern": "^(?:[^a-z]*[a-z]){1}"
+              },
+              {
+                "pattern": "^(?:[^A-Z]*[A-Z]){1}"
+              },
+              {
+                "pattern": "^(?:[^0-9]*[0-9]){1}"
+              },
+              {
+                "pattern": "^(?:[^ -/:-@\\[-`{-~\u00a3]*[ -/:-@\\[-`{-~\u00a3]){1}"
+              }
+            ]
+          },
+          "email": {
+            "type": "string",
+            "description": "Leading and trailing spaces are removed. Checked by the server: a valid email address.",
+            "format": "email",
+            "maxLength": 254,
+            "pattern": "^[0-9A-Za-z!#$%&'*+/=?^_`{|}~-]+(?:\\.[0-9A-Za-z!#$%&'*+/=?^_`{|}~-]+)*@(?:[0-9A-Za-z](?:[0-9A-Za-z-]{0,61}[0-9A-Za-z])?\\.)+(?:[A-Za-z]{2,63}|[Xx][Nn][0-9A-Za-z-]{1,60}[0-9A-Za-z])$"
+          },
+          "website": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Checked by the server: a valid HTTP or HTTPS URL.",
+            "format": "uri",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+            "default": null
+          },
+          "home": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Checked by the server: a valid IPv4 or IPv6 address.",
+            "anyOf": [
+              {
+                "format": "ipv4",
+                "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
+              },
+              {
+                "format": "ipv6",
+                "pattern": "^[0-9A-Fa-f:.]{2,45}$"
+              }
+            ],
+            "default": null
+          },
+          "remember": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "true",
+              "false",
+              "1",
+              "0",
+              null
+            ],
+            "default": null
+          },
+          "avatar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "contentEncoding": "base64",
+            "pattern": "^(?:[0-9A-Za-z+/]{4})*(?:[0-9A-Za-z+/][AQgw]==|[0-9A-Za-z+/]{2}[AEIMQUYcgkosw048]=)?$",
+            "default": null
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#(?:[0-9A-Fa-f]{3,4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$",
+            "default": "#000000"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+          },
+          "iban": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Checked by the server: a valid IBAN, with its MOD 97-10 check digits.",
+            "pattern": "^[A-Z]{2}(?:0[2-9]|[1-8][0-9]|9[0-8])[0-9A-Z]{11,30}$",
+            "default": null
+          },
+          "born": {
+            "type": "string",
+            "format": "date",
+            "pattern": "^(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)$"
+          },
+          "memberSince": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Checked by the server: a date not before 2020-01-01.",
+            "default": null
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 5,
+            "uniqueItems": true,
+            "default": [],
+            "items": {
+              "type": "string",
+              "description": "Leading and trailing spaces are removed. Converted to lowercase.",
+              "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+              "maxLength": 20
+            }
+          },
+          "languages": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "string",
+              "enum": [
+                "en",
+                "de",
+                "ru"
+              ]
+            }
+          },
+          "lucky": {
+            "type": "integer",
+            "format": "uint32",
+            "description": "A number of luck. Checked by the server: must be odd.",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "default": 7
+          }
+        },
+        "additionalProperties": false
+      },
+      "ProfileView": {
+        "type": "object",
+        "required": [
+          "id",
+          "handle",
+          "email",
+          "tags"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+          },
+          "handle": {
+            "type": "string",
+            "pattern": "^[0-9A-Za-z]*$",
+            "minLength": 3,
+            "maxLength": 20
+          },
+          "email": {
+            "type": "string",
+            "description": "Checked by the server: a valid email address.",
+            "format": "email",
+            "maxLength": 254,
+            "pattern": "^[0-9A-Za-z!#$%&'*+/=?^_`{|}~-]+(?:\\.[0-9A-Za-z!#$%&'*+/=?^_`{|}~-]+)*@(?:[0-9A-Za-z](?:[0-9A-Za-z-]{0,61}[0-9A-Za-z])?\\.)+(?:[A-Za-z]{2,63}|[Xx][Nn][0-9A-Za-z-]{1,60}[0-9A-Za-z])$"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 20
+            }
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "admin",
+          "user",
+          "guest"
+        ]
+      },
+      "Violation": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "field": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

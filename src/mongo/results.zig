@@ -2,7 +2,7 @@
 //! the Bulk API spec merges them.
 
 const std = @import("std");
-const bson = @import("bson.zig");
+const bson = @import("mongo-bson");
 const Allocator = std.mem.Allocator;
 
 /// What a write did. `writeErrors` and `writeConcernError` are soft here:

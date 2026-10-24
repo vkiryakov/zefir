@@ -43,7 +43,7 @@
 
 const std = @import("std");
 const Io = std.Io;
-const bson = @import("bson.zig");
+const bson = @import("mongo-bson");
 const errors = @import("errors.zig");
 const requests = @import("requests.zig");
 const engine = @import("engine/cursor.zig");
