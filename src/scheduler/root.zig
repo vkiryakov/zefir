@@ -43,10 +43,15 @@
 //! the rest.
 
 const std = @import("std");
+const calendar = @import("schedule/calendar.zig");
 
 pub const Diagnostics = @import("Diagnostics.zig");
+pub const Instant = @import("Instant.zig");
+pub const HourFormat = calendar.HourFormat;
+pub const Weekday = calendar.Weekday;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests/diagnostics_tests.zig");
+    _ = @import("tests/instant_tests.zig");
 }
