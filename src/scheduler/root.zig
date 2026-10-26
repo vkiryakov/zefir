@@ -44,12 +44,28 @@
 
 const std = @import("std");
 const calendar = @import("schedule/calendar.zig");
+const record = @import("record.zig");
 
 pub const Diagnostics = @import("Diagnostics.zig");
 pub const Instant = @import("Instant.zig");
 pub const Schedule = @import("schedule/Schedule.zig");
 pub const HourFormat = calendar.HourFormat;
 pub const Weekday = calendar.Weekday;
+
+pub const Ref = record.Ref;
+pub const CallOptions = record.CallOptions;
+pub const ListFilter = record.ListFilter;
+pub const HistoryFilter = record.HistoryFilter;
+pub const Page = record.Page;
+pub const RecordPage = record.RecordPage;
+pub const RunPage = record.RunPage;
+pub const State = record.State;
+pub const RunOutcome = record.RunOutcome;
+pub const Life = record.Life;
+pub const Retention = record.Retention;
+pub const Record = record.Record;
+pub const LastRun = record.LastRun;
+pub const Run = record.Run;
 
 /// When to run a job.
 pub const When = union(enum) {
@@ -68,4 +84,5 @@ test {
     _ = @import("tests/instant_tests.zig");
     _ = @import("tests/schedule_tests.zig");
     _ = @import("tests/cron_tests.zig");
+    _ = @import("tests/record_tests.zig");
 }
