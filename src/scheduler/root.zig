@@ -67,4 +67,5 @@ test {
     _ = @import("tests/diagnostics_tests.zig");
     _ = @import("tests/instant_tests.zig");
     _ = @import("tests/schedule_tests.zig");
+    _ = @import("tests/cron_tests.zig");
 }

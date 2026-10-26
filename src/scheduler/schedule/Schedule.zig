@@ -20,6 +20,7 @@ const Diagnostics = @import("../Diagnostics.zig");
 const Instant = @import("../Instant.zig");
 const calendar = @import("calendar.zig");
 const args = @import("args.zig");
+const crontab = @import("cron.zig");
 const HourFormat = calendar.HourFormat;
 const Weekday = calendar.Weekday;
 const Schedule = @This();
@@ -39,6 +40,7 @@ const Internal = union(enum) {
     weekly: struct { day: Weekday, second_of_day: u17 },
     /// The day of the month, 1–28, and the second of the day.
     monthly: struct { day: u5, second_of_day: u17 },
+    cron: crontab.Cron,
     invalid: Invalid,
 };
 
@@ -119,10 +121,31 @@ pub inline fn monthlyOn(day: anytype, hour: anytype, minute: anytype, second: an
     });
 }
 
+/// A cron expression in UTC: 5 fields (minute, hour, day of the month,
+/// month, day of the week) or 6 with the second first. A field is `*`,
+/// `a`, `a-b`, `a,b,…`, `*/n` or `a-b/n`; the names JAN–DEC and SUN–SAT go
+/// in any case, and Sunday is 0 and 7. The macros are @yearly, @annually,
+/// @monthly, @weekly, @daily, @midnight and @hourly. When neither the day
+/// of the month nor the day of the week is exactly `*`, a day that matches
+/// either one comes; when one is `*`, the other decides, and `*/2` is no
+/// `*`. Not in v1: `?`, `L`, `W`, `#`, `H`, a year, `a/n`, @reboot and
+/// @every. The schedule borrows `expression` until the call that takes it
+/// returns.
+pub inline fn cron(expression: []const u8) Schedule {
+    return checked(cronOf, .{expression});
+}
+
+fn cronOf(expression: []const u8) Schedule {
+    return switch (crontab.parse(expression)) {
+        .cron => |parsed| .{ .internal = .{ .cron = parsed } },
+        .problem => |problem| .{ .internal = .{ .invalid = .{ .cron = .{ .expression = expression, .problem = problem } } } },
+    };
+}
+
 /// The first moment of the schedule strictly after `after`. Moments run
-/// from the epoch to the end of 9999: null when none is left in them, and
-/// always for `fixedDelay`, whose time the store counts, and for an
-/// invalid schedule.
+/// from the epoch to the end of 9999, and cron looks at most 9 years
+/// ahead: null when no moment is left in them, and always for
+/// `fixedDelay`, whose time the store counts, and for an invalid schedule.
 pub fn next(s: Schedule, after: Instant) ?Instant {
     // A moment before the epoch counts from it.
     const from = @max(after.unix_ms, -1);
@@ -147,6 +170,7 @@ pub fn next(s: Schedule, after: Instant) ?Instant {
             const month: u4 = if (date.month == 12) 1 else date.month + 1;
             break :ms calendar.daysFromCivil(year, month, monthly.day) * ms_per_day + @as(i64, monthly.second_of_day) * 1000;
         },
+        .cron => |parsed| parsed.next(from) orelse return null,
     };
     return if (ms > last_ms) null else .fromUnixMs(ms);
 }
@@ -187,6 +211,7 @@ pub fn format(s: Schedule, w: *Io.Writer) Io.Writer.Error!void {
             try w.print("monthly {d} ", .{monthly.day});
             try writeClock(w, monthly.second_of_day);
         },
+        .cron => |parsed| try parsed.format(w),
         .invalid => try w.writeAll("invalid"),
     }
 }
@@ -198,10 +223,17 @@ fn writeClock(w: *Io.Writer, second_of_day: u17) Io.Writer.Error!void {
     try w.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ second_of_day / 3600, second_of_day / 60 % 60, second_of_day % 60 });
 }
 
-/// Reads a canonical text, as `format` writes it, back into a schedule. A
-/// text that is none is `error.InvalidArgument`, with `plan "<text>": `
-/// and the reason in `d`.
+/// Reads a canonical text, as `format` writes it, back into a schedule; a
+/// cron schedule borrows its expression from `text`. A text that is none
+/// is `error.InvalidArgument`, with `plan "<text>": ` and the reason in
+/// `d`.
 pub fn parse(text: []const u8, d: ?*Diagnostics) error{InvalidArgument}!Schedule {
+    if (std.mem.startsWith(u8, text, "cron ")) {
+        return switch (crontab.parse(text["cron ".len..])) {
+            .cron => |parsed| .{ .internal = .{ .cron = parsed } },
+            .problem => |problem| refuse(d, text, "{f}", .{problem}),
+        };
+    }
     var words: [4][]const u8 = undefined;
     var count: usize = 0;
     var it = std.mem.splitScalar(u8, text, ' ');
@@ -344,6 +376,7 @@ const Invalid = union(enum) {
     every: struct { unit: Unit, n: i64 },
     delay: Duration,
     time: struct { call: args.Call, time: args.Time },
+    cron: struct { expression: []const u8, problem: crontab.Problem },
 
     /// The call and why it makes no schedule: the text of `check`, and of
     /// the compile error after "scheduler: ".
@@ -359,6 +392,7 @@ const Invalid = union(enum) {
                 if (delay.nanoseconds > max_step * std.time.ns_per_s) return w.writeAll("a delay is at most 100 years");
                 return w.writeAll("a delay is a whole number of milliseconds, 1 or more");
             },
+            .cron => |refused| try w.print("cron \"{f}\": {f}", .{ args.Quoted{ .text = refused.expression }, refused.problem }),
             .time => |at| {
                 try at.call.write(w, at.time);
                 try w.writeAll(": ");
