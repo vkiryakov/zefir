@@ -122,9 +122,23 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Jobs that an application puts on a time and that several instances
+    // of a service run: schedules, the client, the worker. It reaches a
+    // store only through its store contract, so it imports no database.
+    const scheduler = b.addModule("zefir-scheduler", .{
+        .root_source_file = b.path("src/scheduler/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
+    });
+
     // MongoDB for zefir applications: the client and the collection API,
-    // on the BSON of mongo-bson, and the reference driver of zefir-odm,
-    // which implements odm's driver contract.
+    // on the BSON of mongo-bson, the reference driver of zefir-odm, which
+    // implements odm's driver contract, and the store of zefir-scheduler,
+    // which implements its store contract.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -134,6 +148,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core },
             .{ .name = "mongo-bson", .module = mongo_bson },
             .{ .name = "odm", .module = odm },
+            .{ .name = "scheduler", .module = scheduler },
         },
     });
     mongo.addImport("build_options", build_options);
@@ -188,7 +203,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .redis, .nats, .http, .security, .openapi
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .scheduler, .mongo, .redis, .nats, .http, .security, .openapi
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -203,6 +218,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "mongo-bson", .module = mongo_bson },
             .{ .name = "odm", .module = odm },
+            .{ .name = "scheduler", .module = scheduler },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
@@ -225,6 +241,7 @@ pub fn build(b: *std.Build) void {
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_mongo_bson = addModuleTestStep(b, test_step, "mongo-bson");
     const test_odm = addModuleTestStep(b, test_step, "odm");
+    const test_scheduler = addModuleTestStep(b, test_step, "scheduler");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
@@ -237,8 +254,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, redis, nats, http, security, openapi, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_redis, test_nats, test_http, test_security, test_openapi, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, scheduler, mongo, redis, nats, http, security, openapi, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_scheduler, test_mongo, test_redis, test_nats, test_http, test_security, test_openapi, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
