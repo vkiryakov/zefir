@@ -99,4 +99,5 @@ test {
     _ = @import("tests/record_tests.zig");
     _ = @import("tests/store_tests.zig");
     _ = @import("tests/memory_store_tests.zig");
+    _ = @import("tests/memory_load_tests.zig");
 }

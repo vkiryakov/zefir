@@ -567,6 +567,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = panic_validator },
         },
     });
+    const panic_scheduler = b.createModule(.{
+        .root_source_file = b.path("src/scheduler/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -664,6 +672,33 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(exe);
         run.expectExitCode(0);
         test_odm.dependOn(&run.step);
+    }
+
+    // scheduler panic programs: a call of a MemoryStore on another std.Io
+    // panics in safe builds. Each program must print the panic message and
+    // end in its own panic handler, which exits with code 3 instead of
+    // aborting. They get the Debug copy of scheduler made above, next to
+    // those of odm and mongo, whatever -Doptimize says.
+    for ([_][2][]const u8{
+        .{ "memory_another_io", "panic: zefir-scheduler: a call on another std.Io than the store's: pass the io of MemoryStore.init" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("scheduler-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/scheduler/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "scheduler", .module = panic_scheduler },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_scheduler.dependOn(&run.step);
     }
 
     // redis panic programs: a client moved after connect(), a call on
