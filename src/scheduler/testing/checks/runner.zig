@@ -19,8 +19,11 @@ const records = @import("records.zig");
 const Check = conformance.Check;
 const Setup = conformance.Setup;
 const Record = model.Record;
+const Ref = model.Ref;
 
 const Runner = @This();
+
+const log = std.log.scoped(.scheduler);
 
 io: Io,
 /// Counts what the check holds: the harness gets it in `setUp`.
@@ -135,6 +138,27 @@ pub fn now(r: *const Runner) Instant {
     return r.store().now(r.io);
 }
 
+/// Sleeps `duration` on the awake clock; a cancel of the check's task, past
+/// its time limit, fails the check.
+pub fn sleep(r: *Runner, duration: Io.Duration) Error!void {
+    const until = Io.Clock.awake.now(r.io).addDuration(duration);
+    while (true) {
+        const left = Io.Clock.awake.now(r.io).durationTo(until);
+        // A sleep of std's Io on Windows may end a tick of its timer early.
+        if (left.nanoseconds <= 0) return;
+        r.io.sleep(left, .awake) catch return r.fail("the check's task was canceled while it waited", .{});
+    }
+}
+
+/// Until the store's clock, as its `now` says, is past `at`.
+pub fn waitPast(r: *Runner, at: Instant) Error!void {
+    while (true) {
+        const left = at.unix_ms -| r.now().unix_ms;
+        if (left < 0) return;
+        try r.sleep(.fromMilliseconds(@min(left + 1, 100)));
+    }
+}
+
 pub fn newLife(r: *Runner) model.Life {
     var life: model.Life = undefined;
     r.rng.random().bytes(&life);
@@ -170,22 +194,230 @@ pub fn remove(r: *Runner, job: []const u8, key: []const u8) Error!bool {
     return r.need(r.store().remove(r.io, r.ctx(), &.{ .job = job, .key = key }, r.call()), "remove");
 }
 
+/// The change `set` of `current`, on its revision and state.
+pub fn update(r: *Runner, current: Record, set: Store.Patch) Error!Store.UpdateResult {
+    const request: Store.UpdateRequest = .{ .ref = refOf(current), .expect = .{ .revision = current.revision, .state = current.state }, .set = set, .tag = r.newTag() };
+    return r.need(r.store().update(r.io, r.ctx(), &request, r.call()), "update");
+}
+
+/// `update` that must apply, a revision one more; the record after it.
+pub fn updated(r: *Runner, current: Record, set: Store.Patch) Error!Record {
+    switch (try r.update(current, set)) {
+        .updated => |revision| try r.expect(revision == current.revision + 1, "update of revision {d} answered revision {d}", .{ current.revision, revision }),
+        .conflict => |now_| return r.fail("update of {s}/{s} on its revision and state answered conflict, with revision {d} and state {t}", .{ current.job, current.key, now_.revision, now_.state }),
+        .not_found => return r.fail("update of {s}/{s} answered not_found", .{ current.job, current.key }),
+    }
+    return r.fetch(current.job, current.key);
+}
+
+/// A claim with a tag of its own; each record it gives must be running, of
+/// `owner` and of the record model.
+pub fn claim(r: *Runner, owner: []const u8, any_key: []const []const u8, keyed_only: []const []const u8, max: u32, lease: Io.Duration) Error!Store.ClaimResult {
+    const request: Store.ClaimRequest = .{ .owner = owner, .any_key = any_key, .keyed_only = keyed_only, .max = max, .lease = lease, .tag = r.newTag() };
+    const result = try r.need(r.store().claim(r.io, r.ctx(), &request, r.call()), "claim");
+    try r.expect(result.claimed.len <= max, "a claim of at most {d} gave {d} records", .{ max, result.claimed.len });
+    for (result.claimed) |c| {
+        try r.expectShape(c.record, "claim");
+        try r.expect(c.record.state == .running and std.mem.eql(u8, c.record.owner orelse "", owner), "claim gave {s}/{s}, {t} with owner {?s}, not running with its owner", .{ c.record.job, c.record.key, c.record.state, c.record.owner });
+    }
+    return result;
+}
+
+/// A record of `job` and `key`, due now, claimed by `owner` for `lease`;
+/// no other record of `job` may be due. The record of the claim.
+pub fn running(r: *Runner, job: []const u8, key: []const u8, owner: []const u8, lease: Io.Duration) Error!Record {
+    const created = try r.create(job, key, .{ .after = .zero });
+    try r.expect(created == .created, "create of {s}/{s} answered {t}, not created", .{ job, key, created });
+    const result = try r.claim(owner, &.{job}, &.{}, 1, lease);
+    try r.expect(result.claimed.len == 1, "a claim of the due record {s}/{s} took {d} records", .{ job, key, result.claimed.len });
+    const rec = result.claimed[0].record;
+    try r.expect(std.mem.eql(u8, rec.key, key), "a claim of the due record {s}/{s} took {s}/{s}", .{ job, key, rec.job, rec.key });
+    return rec;
+}
+
+/// The finish of the claim of `claimed` by `owner`, with its life, fence
+/// and revision, a tag of its own, `next`, a last run that succeeded and no
+/// rows.
+pub fn finishOf(r: *Runner, claimed: Record, owner: []const u8, next: Store.Next) Store.FinishRequest {
+    return .{
+        .ref = refOf(claimed),
+        .life = claimed.life,
+        .owner = owner,
+        .fence = claimed.fence,
+        .revision = claimed.revision,
+        .tag = r.newTag(),
+        .next = next,
+        .last = lastOf(claimed, .succeeded, null),
+    };
+}
+
+pub fn finish(r: *Runner, request: Store.FinishRequest) Error!Store.FinishResult {
+    return r.need(r.store().finish(r.io, r.ctx(), &request, r.call()), "finish");
+}
+
+/// `finish` that must answer done.
+pub fn finished(r: *Runner, request: Store.FinishRequest) Error!void {
+    const result = try r.finish(request);
+    try r.expect(result == .done, "finish of {s}/{s} answered {t}, not done", .{ request.ref.job, request.ref.key, result });
+}
+
+pub fn refOf(rec: Record) Ref {
+    return .{ .job = rec.job, .key = rec.key };
+}
+
+/// What a record shows of the run of the claim of `claimed`.
+pub fn lastOf(claimed: Record, outcome: model.RunOutcome, error_name: ?[]const u8) model.LastRun {
+    const started = claimed.claimed_at orelse Instant.fromUnixMs(0);
+    return .{ .outcome = outcome, .error_name = error_name, .attempt = claimed.attempt, .started_at = started, .finished_at = started };
+}
+
+/// The row of the history of the claim of `claimed`.
+pub fn rowOf(claimed: Record, outcome: model.RunOutcome, error_name: ?[]const u8, instance: []const u8) model.Run {
+    const started = claimed.claimed_at orelse Instant.fromUnixMs(0);
+    return .{
+        .job = claimed.job,
+        .key = claimed.key,
+        .tenant = claimed.tenant,
+        .life = claimed.life,
+        .fence = claimed.fence,
+        .attempt = claimed.attempt,
+        .scheduled_at = claimed.scheduled_at,
+        .started_at = started,
+        .finished_at = started,
+        .outcome = outcome,
+        .error_name = error_name,
+        .instance = instance,
+        .expires_at = null,
+    };
+}
+
+/// Fails unless `got` is `after` past the store's now during a call that
+/// came between its `t0` and `t1`, within the slack.
+pub fn expectNear(r: *Runner, got: ?Instant, t0: Instant, t1: Instant, after: Io.Duration, comptime what: []const u8) Error!void {
+    const at = got orelse return r.fail(what ++ " is null", .{});
+    const low = t0.add(after).add(.fromNanoseconds(-r.slack().nanoseconds));
+    const high = t1.add(after).add(r.slack());
+    try r.expect(at.unix_ms >= low.unix_ms and at.unix_ms <= high.unix_ms, what ++ " is {f}, not within {f} … {f}", .{ at, low, high });
+}
+
+/// The first field, but those in `except`, in which `a` and `b` differ;
+/// null when they are the same, byte for byte.
+pub fn difference(a: Record, b: Record, comptime except: []const []const u8) ?[]const u8 {
+    inline for (@typeInfo(Record).@"struct".field_names) |field| {
+        const skipped = comptime for (except) |name| {
+            if (std.mem.eql(u8, name, field)) break true;
+        } else false;
+        if (!skipped and !same(@field(a, field), @field(b, field))) return field;
+    }
+    return null;
+}
+
+fn same(a: anytype, b: @TypeOf(a)) bool {
+    switch (@typeInfo(@TypeOf(a))) {
+        .optional => {
+            const x = a orelse return b == null;
+            const y = b orelse return false;
+            return same(x, y);
+        },
+        .pointer => return std.mem.eql(u8, a, b),
+        .array => return std.mem.eql(u8, &a, &b),
+        .@"struct" => |info| {
+            inline for (info.field_names) |field| {
+                if (!same(@field(a, field), @field(b, field))) return false;
+            }
+            return true;
+        },
+        else => return a == b,
+    }
+}
+
+/// Fails if `now_` differs from `before` in a field but those of `except`.
+pub fn expectSame(r: *Runner, before: Record, now_: Record, comptime except: []const []const u8, comptime what: []const u8) Error!void {
+    if (difference(before, now_, except)) |field| return r.fail(what ++ " changed {s} of {s}/{s}", .{ field, before.job, before.key });
+}
+
+/// Every record of `filter`, `limit` a page: each (job, key) once, each of
+/// the record model and of the filter, the records of a job together and in
+/// the order of their keys. The order of the jobs is the store's.
+pub fn listAll(r: *Runner, filter: model.ListFilter, limit: u32) Error![]const Record {
+    var all: std.ArrayList(Record) = .empty;
+    var after: ?[]const u8 = null;
+    for (0..100_000) |_| {
+        const page = try r.need(r.store().list(r.io, r.ctx(), &.{ .filter = filter, .page = .{ .after = after, .limit = limit } }, r.call()), "list");
+        try r.expect(page.records.len <= limit, "list gave a page of {d} records, past its limit of {d}", .{ page.records.len, limit });
+        for (page.records) |rec| {
+            try r.expectShape(rec, "list");
+            try r.expect(listed(filter, rec), "list gave {s}/{s}, {t}, of tenant {?s}, which its filter does not take", .{ rec.job, rec.key, rec.state, rec.tenant });
+            if (all.items.len > 0) {
+                const before = all.items[all.items.len - 1];
+                if (std.mem.eql(u8, before.job, rec.job)) {
+                    try r.expect(std.mem.order(u8, before.key, rec.key) == .lt, "list gave {s}/{s} after {s}/{s}: keys not in order, or twice", .{ rec.job, rec.key, before.job, before.key });
+                } else for (all.items) |seen| {
+                    try r.expect(!std.mem.eql(u8, seen.job, rec.job), "list gave records of {s} apart, around those of {s}", .{ rec.job, before.job });
+                }
+            }
+            try all.append(r.scratch, rec);
+        }
+        after = page.next orelse return all.items;
+    }
+    return r.fail("list gave a next page 100000 times", .{});
+}
+
+fn listed(filter: model.ListFilter, rec: Record) bool {
+    if (filter.job) |job| if (!std.mem.eql(u8, job, rec.job)) return false;
+    if (filter.state) |state| if (state != rec.state) return false;
+    if (filter.tenant) |tenant| if (!std.mem.eql(u8, tenant, rec.tenant orelse return false)) return false;
+    return true;
+}
+
+/// Every row of `filter`, `limit` a page: each of the filter, the only one
+/// of its (life, fence), the newest first.
+pub fn historyAll(r: *Runner, filter: model.HistoryFilter, limit: u32) Error![]const model.Run {
+    const Claim = struct { life: model.Life, fence: u64 };
+    var seen: std.AutoHashMapUnmanaged(Claim, void) = .empty;
+    var all: std.ArrayList(model.Run) = .empty;
+    var after: ?[]const u8 = null;
+    for (0..100_000) |_| {
+        const page = try r.need(r.store().history(r.io, r.ctx(), &.{ .filter = filter, .page = .{ .after = after, .limit = limit } }, r.call()), "history");
+        try r.expect(page.runs.len <= limit, "history gave a page of {d} rows, past its limit of {d}", .{ page.runs.len, limit });
+        for (page.runs) |run| {
+            try r.expect(inHistory(filter, run), "history gave a row of {s}/{s}, {t}, of tenant {?s}, which its filter does not take", .{ run.job, run.key, run.outcome, run.tenant });
+            const entry = try seen.getOrPut(r.scratch, .{ .life = run.life, .fence = run.fence });
+            try r.expect(!entry.found_existing, "history gave two rows of one claim, fence {d} of {s}/{s}", .{ run.fence, run.job, run.key });
+            if (all.items.len > 0) {
+                const newer = all.items[all.items.len - 1].finished_at;
+                try r.expect(run.finished_at.unix_ms <= newer.unix_ms, "history gave a row finished at {f} after one finished at {f}: not the newest first", .{ run.finished_at, newer });
+            }
+            try all.append(r.scratch, run);
+        }
+        after = page.next orelse return all.items;
+    }
+    return r.fail("history gave a next page 100000 times", .{});
+}
+
+fn inHistory(filter: model.HistoryFilter, run: model.Run) bool {
+    if (filter.job) |job| if (!std.mem.eql(u8, job, run.job)) return false;
+    if (filter.key) |key| if (!std.mem.eql(u8, key, run.key)) return false;
+    if (filter.outcome) |outcome| if (outcome != run.outcome) return false;
+    if (filter.tenant) |tenant| if (!std.mem.eql(u8, tenant, run.tenant orelse return false)) return false;
+    return true;
+}
+
 /// The first rule of the record model that `rec` breaks, or null: a
 /// running record and only it has an owner, `claimed_at` and
 /// `lease_until`; a pending or paused one and only it has a `run_at`; a
 /// finished one and only it has a `finished_at`, and an `expires_at` if
 /// any; a record never claimed (fence 0) waits.
 pub fn shape(rec: Record) ?[]const u8 {
-    const claim = [_]bool{ rec.owner != null, rec.claimed_at != null, rec.lease_until != null };
-    const running = rec.state == .running;
-    for (claim) |has| {
-        if (has != running) return "a running record without an owner, claimed_at or lease_until, or another one with one";
+    const of_claim = [_]bool{ rec.owner != null, rec.claimed_at != null, rec.lease_until != null };
+    for (of_claim) |has| {
+        if (has != (rec.state == .running)) return "a running record without an owner, claimed_at or lease_until, or another one with one";
     }
     const waits = rec.state == .pending or rec.state == .paused;
     if (waits != (rec.run_at != null)) return "a run_at on a record that does not wait, or none on one that does";
-    const finished = rec.state == .succeeded or rec.state == .failed;
-    if (finished != (rec.finished_at != null)) return "a finished_at on a record that is not finished, or none on one that is";
-    if (!finished and rec.expires_at != null) return "an expires_at on a record that is not finished";
+    const done = rec.state == .succeeded or rec.state == .failed;
+    if (done != (rec.finished_at != null)) return "a finished_at on a record that is not finished, or none on one that is";
+    if (!done and rec.expires_at != null) return "an expires_at on a record that is not finished";
     if (rec.fence == 0 and !waits) return "a record of fence 0, never claimed, that does not wait";
     return null;
 }
@@ -342,6 +574,113 @@ const Counting = struct {
     }
 };
 
+/// The allocator of one call, for S19: it knows the blocks it gave, and
+/// counts what the store does with it once the call has returned. Its
+/// memory is an arena over the check's allocator, freed by `deinit`.
+pub const Fence = struct {
+    arena: std.heap.ArenaAllocator,
+    closed: std.atomic.Value(bool) = .init(false),
+    late: std.atomic.Value(u32) = .init(0),
+    blocks: [256][]u8 = undefined,
+    held: usize = 0,
+
+    pub fn init(parent: Allocator) Fence {
+        return .{ .arena = .init(parent) };
+    }
+
+    pub fn deinit(f: *Fence) void {
+        f.arena.deinit();
+    }
+
+    pub fn allocator(f: *Fence) Allocator {
+        return .{ .ptr = f, .vtable = &fence_vtable };
+    }
+
+    /// The call returned: any use from now on is late. Its blocks are
+    /// overwritten, so a store that kept a slice of its result reads 0xAA.
+    pub fn close(f: *Fence) void {
+        for (f.blocks[0..f.held]) |block| @memset(block, 0xAA);
+        f.closed.store(true, .release);
+    }
+
+    /// How many times the store used the allocator after the call.
+    pub fn lateUses(f: *const Fence) u32 {
+        return f.late.load(.acquire);
+    }
+
+    /// Whether `bytes` lie in a block that the call took and did not free;
+    /// an empty slice may lie anywhere.
+    pub fn owns(f: *const Fence, bytes: []const u8) bool {
+        if (bytes.len == 0) return true;
+        const start = @intFromPtr(bytes.ptr);
+        for (f.blocks[0..f.held]) |block| {
+            const from = @intFromPtr(block.ptr);
+            if (start >= from and start + bytes.len <= from + block.len) return true;
+        }
+        return false;
+    }
+
+    const fence_vtable: Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    /// Counts a use after the call; true when it is one.
+    fn touch(f: *Fence) bool {
+        if (!f.closed.load(.acquire)) return false;
+        _ = f.late.fetchAdd(1, .monotonic);
+        return true;
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        // A late use is counted, and gets nothing: the arena is the call's.
+        if (f.touch()) return null;
+        const memory = f.arena.allocator().rawAlloc(len, alignment, ret_addr) orelse return null;
+        f.remember(memory[0..len]);
+        return memory;
+    }
+
+    fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        if (f.touch()) return false;
+        if (!f.arena.allocator().rawResize(memory, alignment, new_len, ret_addr)) return false;
+        f.forget(memory);
+        f.remember(memory.ptr[0..new_len]);
+        return true;
+    }
+
+    fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        if (f.touch()) return null;
+        const moved_to = f.arena.allocator().rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        f.forget(memory);
+        f.remember(moved_to[0..new_len]);
+        return moved_to;
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const f: *Fence = @ptrCast(@alignCast(ptr));
+        if (f.touch()) return;
+        f.forget(memory);
+        f.arena.allocator().rawFree(memory, alignment, ret_addr);
+    }
+
+    /// Past 256 blocks held at once, `owns` does not know the rest.
+    fn remember(f: *Fence, block: []u8) void {
+        if (f.held == f.blocks.len) return;
+        f.blocks[f.held] = block;
+        f.held += 1;
+    }
+
+    fn forget(f: *Fence, memory: []u8) void {
+        for (f.blocks[0..f.held], 0..) |block, i| {
+            if (block.ptr == memory.ptr) {
+                f.blocks[i] = f.blocks[f.held - 1];
+                f.held -= 1;
+                return;
+            }
+        }
+    }
+};
+
 /// `conformance.run` with the time limit of a check given: the suite's
 /// own tests take a short one.
 pub fn runLimited(io: Io, gpa: Allocator, harness: anytype, options: conformance.Options, limit: Io.Duration) conformance.RunError!conformance.Report {
@@ -420,7 +759,7 @@ fn runCheck(
     if (hung) {
         // Said at once: a task that ignores its cancelation would keep the
         // report from ever coming.
-        std.debug.print("scheduler conformance: {s} still runs after {f}: it hangs, and its task is canceled\n", .{ check.label(), limit });
+        log.warn("conformance: {s} still runs after {f}: it hangs, and its task is canceled", .{ check.label(), limit });
         task.cancel(io);
     } else task.await(io);
     if (store_name.len == 0 and r.store_name.len > 0) store_name.* = try arena.dupe(u8, r.store_name);
@@ -453,7 +792,13 @@ fn awaitDone(io: Io, done: *Io.Event, limit: Io.Duration) bool {
 
 fn bodyOf(check: Check) ?Body {
     return switch (check) {
+        .s1 => records.s1,
+        .s2 => records.s2,
         .s3 => records.s3,
+        .s4 => records.s4,
+        .s5 => records.s5,
+        .s18 => records.s18,
+        .s19 => records.s19,
         else => null,
     };
 }

@@ -79,7 +79,7 @@ fn expectNoFailures(report: *const conformance.Report) !void {
 
 test "a run reports every check" {
     var harness: MemoryHarness = .{};
-    const only = [_]conformance.Check{.s3};
+    const only = [_]conformance.Check{ .s1, .s2, .s3, .s4, .s5, .s18, .s19 };
     var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &only });
     defer report.deinit();
     try expectNoFailures(&report);
@@ -95,7 +95,8 @@ test "a run reports every check" {
     }
     const text = try std.fmt.allocPrint(testing.allocator, "{f}", .{&report});
     defer testing.allocator.free(text);
-    try testing.expectStringStartsWith(text, "scheduler conformance of \"memory\": 1 passed, 0 failed, 21 skipped\n");
+    var totals: [80]u8 = undefined;
+    try testing.expectStringStartsWith(text, try std.fmt.bufPrint(&totals, "scheduler conformance of \"memory\": {d} passed, 0 failed, {d} skipped\n", .{ only.len, 22 - only.len }));
     try testing.expect(std.mem.find(u8, text, "\n  passed   S3   get of a record and of none; remove is true, then false\n") != null);
     // The totals, then a line a check.
     try testing.expectEqual(@as(usize, 23), std.mem.count(u8, text, "\n"));
@@ -117,6 +118,10 @@ fn sleepyGet(vtable: *Store.VTable) void {
 }
 
 test "a check past its time limit fails" {
+    // The run warns about the check that hangs.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
     var harness: PatchedHarness = .{ .patch = sleepyGet };
     const only = [_]conformance.Check{.s3};
     const start = Io.Clock.awake.now(testing.io);
@@ -126,5 +131,25 @@ test "a check past its time limit fails" {
     try testing.expect(start.durationTo(Io.Clock.awake.now(testing.io)).nanoseconds < Io.Duration.fromSeconds(8).nanoseconds);
     try testing.expectEqualStrings("sleepy", report.store_name);
     try testing.expectStringStartsWith(try failedWhy(report.outcome(.s3)), "it did not end in 1s, and its task was canceled");
+    try testing.expectEqual(@as(usize, 1), report.failedCount());
+}
+
+/// A create of a live key that answers created, though it changed nothing.
+fn createdTwice(vtable: *Store.VTable) void {
+    vtable.name = "created-twice";
+    vtable.create = struct {
+        fn create(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.CreateRequest, options: Store.CallOptions) scheduler.StoreError!Store.CreateResult {
+            const result = try memoryOf(ptr).create(io, ctx, request, options);
+            return if (result == .existing) .created else result;
+        }
+    }.create;
+}
+
+test "a store that breaks a rule fails its check" {
+    var harness: PatchedHarness = .{ .patch = createdTwice };
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{ .s1, .s3 } });
+    defer report.deinit();
+    try testing.expectEqualStrings("create of a pending key answered created, not existing", try failedWhy(report.outcome(.s1)));
+    try testing.expect(report.outcome(.s3) == .passed);
     try testing.expectEqual(@as(usize, 1), report.failedCount());
 }
