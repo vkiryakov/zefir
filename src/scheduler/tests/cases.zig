@@ -36,6 +36,13 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "when_at_run_time.zig", .expect = "scheduler: weeklyOn(.friday, 5, 0, 60, .pm): a second is 0–59" },
     // Moments.
     .{ .file = dir ++ "from_utc_february_29.zig", .expect = "scheduler: fromUtc(2026, 2, 29, 0, 0, 0, .h24): 2026-02-29 is not a date" },
+    // Store.init; stores.zig is not a fixture, but the methods they share.
+    .{ .file = dir ++ "store_by_value.zig", .expect = "scheduler: Store.init: pass a pointer to the store, e.g. &store; got BadStore" },
+    .{ .file = dir ++ "store_no_name.zig", .expect = "scheduler: Store.init: BadStore has no pub const name: []const u8" },
+    .{ .file = dir ++ "store_no_claim.zig", .expect = "scheduler: Store.init: BadStore has no method claim; expected pub fn claim(self: *BadStore, io: std.Io, " ++
+        "ctx: core.Context, request: *const scheduler.Store.ClaimRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.ClaimResult" },
+    .{ .file = dir ++ "store_renew_signature.zig", .expect = "scheduler: Store.init: BadStore.renew has the wrong signature; expected pub fn renew(self: *BadStore, io: std.Io, " ++
+        "ctx: core.Context, request: *const scheduler.Store.RenewRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.RenewResult" },
 };
 
 const twelve = "an hour of the 12-hour clock is 1–12; ";

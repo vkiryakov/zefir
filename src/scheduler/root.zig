@@ -67,6 +67,14 @@ pub const Record = record.Record;
 pub const LastRun = record.LastRun;
 pub const Run = record.Run;
 
+/// The store contract: `scheduler.MemoryStore`, `mongo.SchedulerStore` or a
+/// store of your own behind one interface.
+pub const Store = @import("Store.zig");
+pub const StoreError = Store.StoreError;
+pub const Error = Store.Error;
+pub const Outcome = Store.Outcome;
+pub const outcome = Store.outcome;
+
 /// When to run a job.
 pub const When = union(enum) {
     /// Once, at this moment; a moment already past runs at once.
@@ -80,9 +88,11 @@ pub const When = union(enum) {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("signature.zig");
     _ = @import("tests/diagnostics_tests.zig");
     _ = @import("tests/instant_tests.zig");
     _ = @import("tests/schedule_tests.zig");
     _ = @import("tests/cron_tests.zig");
     _ = @import("tests/record_tests.zig");
+    _ = @import("tests/store_tests.zig");
 }
