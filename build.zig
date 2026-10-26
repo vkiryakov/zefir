@@ -13,6 +13,7 @@ const openapi_guide = @import("src/openapi/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 const odm_cases = @import("src/odm/tests/cases.zig");
 const odm_guide = @import("src/odm/examples/cases.zig");
+const scheduler_cases = @import("src/scheduler/tests/cases.zig");
 const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -264,6 +265,10 @@ pub fn build(b: *std.Build) void {
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
     addAppCompileChecks(b, test_core, core, target, optimize);
+    addSchedulerCompileChecks(b, test_scheduler, &.{
+        .{ .name = "scheduler", .module = scheduler },
+        .{ .name = "core", .module = core },
+    }, target, optimize);
     const openapi_app = addHttpCompileChecks(b, test_http, http, validator, target, optimize);
     // `zig build openapi` rewrites every OpenAPI document of zefir's tests
     // and guides from the code: the tests that compare them with their
@@ -2138,6 +2143,32 @@ fn addAppGuide(
 /// refuse, each file with the message it must fail with; and a large
 /// generated application that must compile. Each file imports "core"
 /// alone.
+/// zefir-scheduler compile errors: each fixture of
+/// src/scheduler/tests/cases.zig is compiled, never run, and passes only
+/// when the compilation fails with an error whose message is `expect`, as
+/// in addAppCompileChecks. `imports` are what a fixture may import.
+fn addSchedulerCompileChecks(
+    b: *std.Build,
+    test_scheduler: *std.Build.Step,
+    imports: []const std.Build.Module.Import,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    for (scheduler_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_scheduler.dependOn(&t.step);
+    }
+}
+
 fn addAppCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
