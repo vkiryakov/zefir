@@ -1,0 +1,130 @@
+//! Tests of scheduler.testing.conformance: MemoryStore passes it, a store
+//! that breaks a rule fails the check of that rule, and a check past its
+//! time limit fails while the run goes on.
+
+const std = @import("std");
+const testing = std.testing;
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+const core = @import("core");
+const scheduler = @import("../root.zig");
+const runner = @import("../testing/checks/runner.zig");
+const conformance = scheduler.testing.conformance;
+const Store = scheduler.Store;
+const MemoryStore = scheduler.MemoryStore;
+
+/// A MemoryStore for each check.
+const MemoryHarness = struct {
+    memory: MemoryStore = undefined,
+
+    pub fn setUp(h: *MemoryHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        return .{ .store = h.memory.store(), .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *MemoryHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+};
+
+/// A MemoryStore behind a table of its own, whose methods a test may
+/// replace with flawed ones.
+const PatchedHarness = struct {
+    patch: *const fn (vtable: *Store.VTable) void,
+    memory: MemoryStore = undefined,
+    vtable: Store.VTable = undefined,
+
+    pub fn setUp(h: *PatchedHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        const inner = h.memory.store();
+        h.vtable = inner.vtable.*;
+        h.patch(&h.vtable);
+        return .{ .store = .{ .ptr = inner.ptr, .vtable = &h.vtable }, .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *PatchedHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+};
+
+fn memoryOf(ptr: *anyopaque) *MemoryStore {
+    return @ptrCast(@alignCast(ptr));
+}
+
+/// What a report says of a check that failed; a test of another outcome
+/// fails.
+fn failedWhy(outcome: conformance.Outcome) ![]const u8 {
+    return switch (outcome) {
+        .failed => |why| why,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+fn skippedWhy(outcome: conformance.Outcome) ![]const u8 {
+    return switch (outcome) {
+        .skipped => |why| why,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+fn expectNoFailures(report: *const conformance.Report) !void {
+    if (report.failedCount() == 0) return;
+    std.debug.print("{f}", .{report});
+    return error.TestUnexpectedResult;
+}
+
+test "a run reports every check" {
+    var harness: MemoryHarness = .{};
+    const only = [_]conformance.Check{.s3};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &only });
+    defer report.deinit();
+    try expectNoFailures(&report);
+    try testing.expectEqualStrings("memory", report.store_name);
+    try testing.expectEqual(only.len, report.passedCount());
+    try testing.expectEqual(22 - only.len, report.skippedCount());
+    for (std.enums.values(conformance.Check)) |check| {
+        if (std.mem.findScalar(conformance.Check, &only, check) != null) {
+            try testing.expect(report.outcome(check) == .passed);
+        } else {
+            try testing.expectEqualStrings("not in options.only", try skippedWhy(report.outcome(check)));
+        }
+    }
+    const text = try std.fmt.allocPrint(testing.allocator, "{f}", .{&report});
+    defer testing.allocator.free(text);
+    try testing.expectStringStartsWith(text, "scheduler conformance of \"memory\": 1 passed, 0 failed, 21 skipped\n");
+    try testing.expect(std.mem.find(u8, text, "\n  passed   S3   get of a record and of none; remove is true, then false\n") != null);
+    // The totals, then a line a check.
+    try testing.expectEqual(@as(usize, 23), std.mem.count(u8, text, "\n"));
+}
+
+/// A get that sleeps 10 s first: S3, which starts with one, cannot end in
+/// time.
+fn sleepyGet(vtable: *Store.VTable) void {
+    vtable.name = "sleepy";
+    vtable.get = struct {
+        fn get(ptr: *anyopaque, io: Io, ctx: core.Context, ref: *const scheduler.Ref, options: Store.CallOptions) scheduler.StoreError!?scheduler.Record {
+            io.sleep(.fromSeconds(10), .awake) catch {
+                io.recancel();
+                return error.Cancelled;
+            };
+            return memoryOf(ptr).get(io, ctx, ref, options);
+        }
+    }.get;
+}
+
+test "a check past its time limit fails" {
+    var harness: PatchedHarness = .{ .patch = sleepyGet };
+    const only = [_]conformance.Check{.s3};
+    const start = Io.Clock.awake.now(testing.io);
+    var report = try runner.runLimited(testing.io, testing.allocator, &harness, .{ .only = &only }, .fromSeconds(1));
+    defer report.deinit();
+    // The run did not wait for the sleep: the check's task was canceled.
+    try testing.expect(start.durationTo(Io.Clock.awake.now(testing.io)).nanoseconds < Io.Duration.fromSeconds(8).nanoseconds);
+    try testing.expectEqualStrings("sleepy", report.store_name);
+    try testing.expectStringStartsWith(try failedWhy(report.outcome(.s3)), "it did not end in 1s, and its task was canceled");
+    try testing.expectEqual(@as(usize, 1), report.failedCount());
+}

@@ -104,4 +104,5 @@ test {
     _ = @import("tests/memory_store_tests.zig");
     _ = @import("tests/memory_load_tests.zig");
     _ = @import("tests/faulty_store_tests.zig");
+    _ = @import("tests/conformance_tests.zig");
 }
