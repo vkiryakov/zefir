@@ -102,31 +102,27 @@ pub fn list(s: *MemoryStore, io: Io, ctx: core.Context, request: *const Store.Li
 }
 
 pub fn claim(s: *MemoryStore, io: Io, ctx: core.Context, request: *const Store.ClaimRequest, options: Store.CallOptions) StoreError!Store.ClaimResult {
-    _ = try s.enter(io, ctx, options.diagnostics);
+    const at = try s.enter(io, ctx, options.diagnostics);
     defer s.leave(io);
-    _ = request;
-    return error.Unavailable;
+    return s.table.claim(at, request, options.allocator, options.diagnostics);
 }
 
 pub fn renew(s: *MemoryStore, io: Io, ctx: core.Context, request: *const Store.RenewRequest, options: Store.CallOptions) StoreError!Store.RenewResult {
-    _ = try s.enter(io, ctx, options.diagnostics);
+    const at = try s.enter(io, ctx, options.diagnostics);
     defer s.leave(io);
-    _ = request;
-    return error.Unavailable;
+    return s.table.renew(at, request);
 }
 
 pub fn finish(s: *MemoryStore, io: Io, ctx: core.Context, request: *const Store.FinishRequest, options: Store.CallOptions) StoreError!Store.FinishResult {
-    _ = try s.enter(io, ctx, options.diagnostics);
+    const at = try s.enter(io, ctx, options.diagnostics);
     defer s.leave(io);
-    _ = request;
-    return error.Unavailable;
+    return s.table.finish(at, request, options.allocator, options.diagnostics);
 }
 
 pub fn history(s: *MemoryStore, io: Io, ctx: core.Context, request: *const Store.HistoryRequest, options: Store.CallOptions) StoreError!record.RunPage {
     _ = try s.enter(io, ctx, options.diagnostics);
     defer s.leave(io);
-    _ = request;
-    return error.Unavailable;
+    return s.table.history(request, options.allocator, options.diagnostics);
 }
 
 fn clock(io: Io) Instant {
