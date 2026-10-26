@@ -23,14 +23,55 @@ pub fn known(comptime T: type) bool {
 
 /// `x`, an integer of any type, as an `i64`. A value beyond `i64` becomes
 /// its nearer end, which no rule of a schedule or a moment takes either.
+/// Only builtins and comparisons here: a value known at compile time stays
+/// known, which a call of a function would not keep.
 pub inline fn int(comptime call: []const u8, comptime name: []const u8, x: anytype) i64 {
     const X = @TypeOf(x);
     switch (@typeInfo(X)) {
         .comptime_int, .int => {},
         else => @compileError("scheduler: " ++ call ++ ": " ++ name ++ " is an integer, not " ++ @typeName(X)),
     }
-    return std.math.cast(i64, x) orelse if (x < 0) std.math.minInt(i64) else std.math.maxInt(i64);
+    const any = X == comptime_int;
+    if ((any or std.math.maxInt(X) > std.math.maxInt(i64)) and x > std.math.maxInt(i64)) return std.math.maxInt(i64);
+    if ((any or std.math.minInt(X) < std.math.minInt(i64)) and x < std.math.minInt(i64)) return std.math.minInt(i64);
+    return @intCast(x);
 }
+
+/// A text from a call or a record inside the quotes of a message: `"` and
+/// `\` behind a backslash, and a byte that is no printable character as
+/// `\xNN`, so that the message stays one line of UTF-8.
+pub const Quoted = struct {
+    text: []const u8,
+
+    pub fn format(q: Quoted, w: *Io.Writer) Io.Writer.Error!void {
+        var i: usize = 0;
+        while (i < q.text.len) {
+            const byte = q.text[i];
+            if (byte == '"' or byte == '\\') {
+                try w.writeAll(&.{ '\\', byte });
+                i += 1;
+            } else if (byte >= 0x20 and byte < 0x7f) {
+                try w.writeByte(byte);
+                i += 1;
+            } else if (character(q.text[i..])) |len| {
+                try w.writeAll(q.text[i..][0..len]);
+                i += len;
+            } else {
+                try w.print("\\x{x:0>2}", .{byte});
+                i += 1;
+            }
+        }
+    }
+
+    /// The length of the character of more than one byte that `bytes`
+    /// starts with, or null when they start with no such character.
+    fn character(bytes: []const u8) ?usize {
+        const len = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return null;
+        if (len < 2 or len > bytes.len) return null;
+        _ = std.unicode.utf8Decode(bytes[0..len]) catch return null;
+        return len;
+    }
+};
 
 /// A time of day as a call got it, its hour still read by `clock`.
 pub const Time = struct {

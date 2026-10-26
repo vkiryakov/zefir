@@ -47,11 +47,24 @@ const calendar = @import("schedule/calendar.zig");
 
 pub const Diagnostics = @import("Diagnostics.zig");
 pub const Instant = @import("Instant.zig");
+pub const Schedule = @import("schedule/Schedule.zig");
 pub const HourFormat = calendar.HourFormat;
 pub const Weekday = calendar.Weekday;
+
+/// When to run a job.
+pub const When = union(enum) {
+    /// Once, at this moment; a moment already past runs at once.
+    at: Instant,
+    /// Once, this long after the store took the job, by the store's clock.
+    /// A negative one is `error.InvalidArgument`.
+    after: std.Io.Duration,
+    /// Again and again, by the schedule.
+    repeat: Schedule,
+};
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests/diagnostics_tests.zig");
     _ = @import("tests/instant_tests.zig");
+    _ = @import("tests/schedule_tests.zig");
 }

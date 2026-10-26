@@ -43,12 +43,12 @@ pub fn add(i: Instant, d: Io.Duration) Instant {
 /// of the years 1970–9999, or no hour of their clock, give `invalid`.
 pub inline fn fromUtc(year: anytype, month: anytype, day: anytype, hour: anytype, minute: anytype, second: anytype, clock: HourFormat) Instant {
     if (comptime args.known(@TypeOf(.{ year, month, day, hour, minute, second, clock }))) {
-        const ms = comptime check: {
+        return comptime check: {
             @setEvalBranchQuota(10_000);
             const u = utc(year, month, day, hour, minute, second, clock);
-            break :check u.unixMs() orelse @compileError("scheduler: " ++ std.fmt.comptimePrint("{f}", .{std.fmt.alt(u, .writeProblem)}));
+            const ms = u.unixMs() orelse @compileError("scheduler: " ++ std.fmt.comptimePrint("{f}", .{std.fmt.alt(u, .writeProblem)}));
+            break :check fromUnixMs(ms);
         };
-        return .{ .unix_ms = ms };
     }
     const u = utc(year, month, day, hour, minute, second, clock);
     return .{ .unix_ms = u.unixMs() orelse return invalid };
