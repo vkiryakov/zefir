@@ -77,6 +77,9 @@ pub const outcome = Store.outcome;
 /// A store in the memory of the process: for one instance, for tests, and
 /// for jobs that each instance runs on its own.
 pub const MemoryStore = @import("MemoryStore.zig");
+/// For tests of workers and applications: `testing.FaultyStore` fails any
+/// store on demand.
+pub const testing = @import("testing.zig");
 
 /// When to run a job.
 pub const When = union(enum) {
@@ -100,4 +103,5 @@ test {
     _ = @import("tests/store_tests.zig");
     _ = @import("tests/memory_store_tests.zig");
     _ = @import("tests/memory_load_tests.zig");
+    _ = @import("tests/faulty_store_tests.zig");
 }
