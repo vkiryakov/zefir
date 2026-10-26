@@ -101,6 +101,8 @@ pub const Record = struct {
     lease_until: ?Instant,
     last: ?LastRun,
     created_at: Instant,
+    /// When `create` made the record or `update` last changed it; claims,
+    /// renewals and finishes leave it as it is.
     updated_at: Instant,
     /// Succeeded and failed: when it finished, and when the store may drop
     /// it (null: kept always).

@@ -38,7 +38,7 @@ pub fn s6(r: *Runner) Error!void {
         const rec = c.record;
         try r.expect(std.mem.eql(u8, rec.key, b.key), "a claim took {s}/{s} where {s}/{s}, older, was due", .{ rec.job, rec.key, b.job, b.key });
         try r.expect(c.took_over == null, "a claim of a pending record gave a took_over", .{});
-        try r.expect(rec.attempt == b.attempt + 1 and rec.fence == b.fence + 1, "a claim gave attempt {d} and fence {d}, not {d} and {d}", .{ rec.attempt, rec.fence, b.attempt + 1, b.fence + 1 });
+        try r.expect(rec.attempt == b.attempt +% 1 and rec.fence == b.fence +% 1, "a claim gave attempt {d} and fence {d}, not {d} and {d}", .{ rec.attempt, rec.fence, b.attempt +% 1, b.fence +% 1 });
         try r.expect(rec.claimed_at.?.unix_ms >= b.run_at.?.unix_ms, "a claim at {f} took a record due at {?f}", .{ rec.claimed_at.?, b.run_at });
         try r.expectNear(rec.lease_until, rec.claimed_at.?, rec.claimed_at.?, lease, "lease_until of a claim");
         try r.expectSame(b, rec, &.{ "state", "run_at", "attempt", "fence", "owner", "claimed_at", "lease_until" }, "a claim");
@@ -159,7 +159,7 @@ pub fn s9(r: *Runner) Error!void {
         const rec = took.record;
         const over = took.took_over orelse return r.fail("a claim of an expired lease gave no took_over", .{});
         try r.expect(std.mem.eql(u8, over.owner, held.owner.?) and over.claimed_at.unix_ms == held.claimed_at.?.unix_ms, "took_over names {s} claimed at {f}, not {s} claimed at {f}", .{ over.owner, over.claimed_at, held.owner.?, held.claimed_at.? });
-        try r.expect(rec.attempt == held.attempt + 1 and rec.fence == held.fence + 1, "a takeover gave attempt {d} and fence {d}, not {d} and {d}", .{ rec.attempt, rec.fence, held.attempt + 1, held.fence + 1 });
+        try r.expect(rec.attempt == held.attempt +% 1 and rec.fence == held.fence +% 1, "a takeover gave attempt {d} and fence {d}, not {d} and {d}", .{ rec.attempt, rec.fence, held.attempt +% 1, held.fence +% 1 });
         try r.expect(rec.claimed_at.?.unix_ms >= held.lease_until.?.unix_ms, "a takeover at {f} of a lease until {f}", .{ rec.claimed_at.?, held.lease_until.? });
         try r.expectSame(held, rec, &.{ "attempt", "fence", "owner", "claimed_at", "lease_until" }, "a takeover");
     }
@@ -178,7 +178,7 @@ pub fn s10(r: *Runner) Error!void {
     try r.expectSame(held, longer, &.{"lease_until"}, "a renew");
     // Another owner or fence: lost, and nothing changes.
     var stranger = held;
-    stranger.fence += 1;
+    stranger.fence +%= 1;
     for ([_][]const u8{ "s10-w2", "s10-w1" }, [_]Record{ held, stranger }) |owner, other| {
         const result = try r.renew(other, owner, r.ms(60_000));
         try r.expect(result == .lost, "renew by owner {s} with fence {d} of a claim of s10-w1 with fence {d} answered {t}, not lost", .{ owner, other.fence, held.fence, result });

@@ -79,7 +79,7 @@ fn expectNoFailures(report: *const conformance.Report) !void {
 
 test "a run reports every check" {
     var harness: MemoryHarness = .{};
-    const only = [_]conformance.Check{ .s6, .s7, .s8, .s9, .s10, .s14, .s15, .s21, .s22 };
+    const only = [_]conformance.Check{ .s3, .s15 };
     var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &only });
     defer report.deinit();
     try expectNoFailures(&report);
@@ -97,9 +97,81 @@ test "a run reports every check" {
     defer testing.allocator.free(text);
     var totals: [80]u8 = undefined;
     try testing.expectStringStartsWith(text, try std.fmt.bufPrint(&totals, "scheduler conformance of \"memory\": {d} passed, 0 failed, {d} skipped\n", .{ only.len, 22 - only.len }));
-    try testing.expect(std.mem.find(u8, text, "\n  passed   S6   claim: due records of the listed jobs, at most max, the oldest first, running with owner, attempt and fence\n") != null);
+    try testing.expect(std.mem.find(u8, text, "\n  passed   S3   get of a record and of none; remove is true, then false\n") != null);
+    try testing.expect(std.mem.find(u8, text, "\n  skipped  S17  lost replies of create, update, claim, renew and finish: a right answer or OutcomeUnknown, never a false one: not in options.only\n") != null);
     // The totals, then a line a check.
     try testing.expectEqual(@as(usize, 23), std.mem.count(u8, text, "\n"));
+}
+
+test "MemoryStore passes the conformance suite" {
+    // With the default limits, the mix of S20 may evict rows of the
+    // history, and MemoryStore warns about it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var harness: MemoryHarness = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{});
+    defer report.deinit();
+    try expectNoFailures(&report);
+    try testing.expectEqual(@as(usize, 21), report.passedCount());
+    try testing.expectEqualStrings("the harness has no loseNextReply", try skippedWhy(report.outcome(.s17)));
+}
+
+/// A MemoryStore behind a FaultyStore, which loses the reply of a call on
+/// demand: every answer after a lost reply is OutcomeUnknown.
+const LosingHarness = struct {
+    memory: MemoryStore = undefined,
+    faulty: scheduler.testing.FaultyStore = undefined,
+
+    pub fn setUp(h: *LosingHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        h.faulty = .init(h.memory.store());
+        return .{ .store = h.faulty.store(), .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *LosingHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+
+    pub fn loseNextReply(h: *LosingHarness, io: Io, op: scheduler.testing.Op) !void {
+        h.faulty.loseNextReply(io, op);
+    }
+};
+
+/// A MemoryStore whose replies are never lost: every answer of S17 is
+/// definite.
+const SureHarness = struct {
+    inner: MemoryHarness = .{},
+
+    pub fn setUp(h: *SureHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        return h.inner.setUp(io, gpa);
+    }
+
+    pub fn tearDown(h: *SureHarness, io: Io, setup: conformance.Setup) void {
+        h.inner.tearDown(io, setup);
+    }
+
+    pub fn loseNextReply(h: *SureHarness, io: Io, op: scheduler.testing.Op) !void {
+        _ = h;
+        _ = io;
+        _ = op;
+    }
+};
+
+test "S17 takes a right answer or OutcomeUnknown after a lost reply" {
+    var losing: LosingHarness = .{};
+    var unknown = try conformance.run(testing.io, testing.allocator, &losing, .{ .only = &.{.s17} });
+    defer unknown.deinit();
+    try expectNoFailures(&unknown);
+    try testing.expect(unknown.outcome(.s17) == .passed);
+    try testing.expectEqualStrings("faulty", unknown.store_name);
+    var sure: SureHarness = .{};
+    var definite = try conformance.run(testing.io, testing.allocator, &sure, .{ .only = &.{.s17} });
+    defer definite.deinit();
+    try expectNoFailures(&definite);
+    try testing.expect(definite.outcome(.s17) == .passed);
 }
 
 /// A get that sleeps 10 s first: S3, which starts with one, cannot end in

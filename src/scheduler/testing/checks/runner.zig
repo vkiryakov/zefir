@@ -17,6 +17,7 @@ const model = @import("../../record.zig");
 const Op = @import("../FaultyStore.zig").Op;
 const records = @import("records.zig");
 const claims = @import("claims.zig");
+const outcomes = @import("outcomes.zig");
 const Check = conformance.Check;
 const Setup = conformance.Setup;
 const Record = model.Record;
@@ -156,7 +157,7 @@ pub fn waitPast(r: *Runner, at: Instant) Error!void {
     while (true) {
         const left = at.unix_ms -| r.now().unix_ms;
         if (left < 0) return;
-        try r.sleep(.fromMilliseconds(@min(left + 1, 100)));
+        try r.sleep(.fromMilliseconds(@min(left +| 1, 100)));
     }
 }
 
@@ -204,7 +205,7 @@ pub fn update(r: *Runner, current: Record, set: Store.Patch) Error!Store.UpdateR
 /// `update` that must apply, a revision one more; the record after it.
 pub fn updated(r: *Runner, current: Record, set: Store.Patch) Error!Record {
     switch (try r.update(current, set)) {
-        .updated => |revision| try r.expect(revision == current.revision + 1, "update of revision {d} answered revision {d}", .{ current.revision, revision }),
+        .updated => |revision| try r.expect(revision == current.revision +% 1, "update of revision {d} answered revision {d}", .{ current.revision, revision }),
         .conflict => |now_| return r.fail("update of {s}/{s} on its revision and state answered conflict, with revision {d} and state {t}", .{ current.job, current.key, now_.revision, now_.state }),
         .not_found => return r.fail("update of {s}/{s} answered not_found", .{ current.job, current.key }),
     }
@@ -747,7 +748,6 @@ fn selected(options: conformance.Options, check: Check) bool {
 
 /// Why `check` cannot run with this harness.
 fn skipReason(check: Check, h: Harness) ?[]const u8 {
-    if (bodyOf(check) == null) return "not written yet";
     return switch (check) {
         .s17 => if (h.lose_next_reply == null) "the harness has no loseNextReply" else null,
         else => null,
@@ -776,7 +776,7 @@ fn runCheck(
         .harness = h,
         .options = options,
         .check = check,
-        .body = bodyOf(check).?,
+        .body = bodyOf(check),
         .rng = .init(@backingInt(check) + 1),
     };
     var done: Io.Event = .unset;
@@ -816,7 +816,7 @@ fn awaitDone(io: Io, done: *Io.Event, limit: Io.Duration) bool {
     return true;
 }
 
-fn bodyOf(check: Check) ?Body {
+fn bodyOf(check: Check) Body {
     return switch (check) {
         .s1 => records.s1,
         .s2 => records.s2,
@@ -828,12 +828,17 @@ fn bodyOf(check: Check) ?Body {
         .s8 => claims.s8,
         .s9 => claims.s9,
         .s10 => claims.s10,
+        .s11 => outcomes.s11,
+        .s12 => outcomes.s12,
+        .s13 => outcomes.s13,
         .s14 => claims.s14,
         .s15 => claims.s15,
+        .s16 => outcomes.s16,
+        .s17 => outcomes.s17,
         .s18 => records.s18,
         .s19 => records.s19,
+        .s20 => outcomes.s20,
         .s21 => claims.s21,
         .s22 => claims.s22,
-        else => null,
     };
 }

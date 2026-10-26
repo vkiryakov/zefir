@@ -343,7 +343,7 @@ pub fn s19(r: *Runner) Error!void {
 
     // A conflict gives a record; a claim records and took_over; a finish
     // that answers changed, a record: all in the allocator of the call.
-    const update: Store.UpdateRequest = .{ .ref = .{ .job = job, .key = lend(&borrowed, 0, "k1") }, .expect = .{ .revision = kept.revision + 1, .state = .pending }, .set = .{ .plan = lend(&borrowed, 2, "every 8s") }, .tag = r.newTag() };
+    const update: Store.UpdateRequest = .{ .ref = .{ .job = job, .key = lend(&borrowed, 0, "k1") }, .expect = .{ .revision = kept.revision +% 1, .state = .pending }, .set = .{ .plan = lend(&borrowed, 2, "every 8s") }, .tag = r.newTag() };
     const conflict = try r.need(r.store().update(r.io, r.ctx(), &update, .{ .allocator = fences[2].allocator() }), "update");
     fences[2].close();
     @memset(&borrowed, 0x55);
