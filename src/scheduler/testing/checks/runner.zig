@@ -16,6 +16,7 @@ const Store = @import("../../Store.zig");
 const model = @import("../../record.zig");
 const Op = @import("../FaultyStore.zig").Op;
 const records = @import("records.zig");
+const claims = @import("claims.zig");
 const Check = conformance.Check;
 const Setup = conformance.Setup;
 const Record = model.Record;
@@ -233,6 +234,31 @@ pub fn running(r: *Runner, job: []const u8, key: []const u8, owner: []const u8, 
     const rec = result.claimed[0].record;
     try r.expect(std.mem.eql(u8, rec.key, key), "a claim of the due record {s}/{s} took {s}/{s}", .{ job, key, rec.job, rec.key });
     return rec;
+}
+
+/// The renew of the claim of `claimed` by `owner`: its life and fence.
+pub fn renew(r: *Runner, claimed: Record, owner: []const u8, lease: Io.Duration) Error!Store.RenewResult {
+    const request: Store.RenewRequest = .{ .ref = refOf(claimed), .life = claimed.life, .owner = owner, .fence = claimed.fence, .lease = lease };
+    return r.need(r.store().renew(r.io, r.ctx(), &request, r.call()), "renew");
+}
+
+/// Waits until the lease of `held` expired by the store's clock, then
+/// claims records of its job for `owner` until one is taken, 10 s at most:
+/// the claim, which must be of `held`'s record.
+pub fn takeOver(r: *Runner, owner: []const u8, held: Record, lease: Io.Duration) Error!Store.Claimed {
+    try r.waitPast(held.lease_until orelse return r.fail("{s}/{s} was not running", .{ held.job, held.key }));
+    const give_up = Io.Clock.awake.now(r.io).addDuration(r.ms(10_000));
+    while (true) {
+        const result = try r.claim(owner, &.{held.job}, &.{}, 1, lease);
+        if (result.claimed.len == 1) {
+            const took = result.claimed[0];
+            try r.expect(std.mem.eql(u8, took.record.key, held.key) and std.mem.eql(u8, &took.record.life, &held.life), "a claim after the lease of {s}/{s} took {s}/{s}", .{ held.job, held.key, took.record.job, took.record.key });
+            return took;
+        }
+        if (Io.Clock.awake.now(r.io).nanoseconds > give_up.nanoseconds)
+            return r.fail("no claim took over {s}/{s} within 10 s after its lease expired", .{ held.job, held.key });
+        try r.sleep(r.ms(50));
+    }
 }
 
 /// The finish of the claim of `claimed` by `owner`, with its life, fence
@@ -797,8 +823,17 @@ fn bodyOf(check: Check) ?Body {
         .s3 => records.s3,
         .s4 => records.s4,
         .s5 => records.s5,
+        .s6 => claims.s6,
+        .s7 => claims.s7,
+        .s8 => claims.s8,
+        .s9 => claims.s9,
+        .s10 => claims.s10,
+        .s14 => claims.s14,
+        .s15 => claims.s15,
         .s18 => records.s18,
         .s19 => records.s19,
+        .s21 => claims.s21,
+        .s22 => claims.s22,
         else => null,
     };
 }

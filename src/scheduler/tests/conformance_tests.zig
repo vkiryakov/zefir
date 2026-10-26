@@ -79,7 +79,7 @@ fn expectNoFailures(report: *const conformance.Report) !void {
 
 test "a run reports every check" {
     var harness: MemoryHarness = .{};
-    const only = [_]conformance.Check{ .s1, .s2, .s3, .s4, .s5, .s18, .s19 };
+    const only = [_]conformance.Check{ .s6, .s7, .s8, .s9, .s10, .s14, .s15, .s21, .s22 };
     var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &only });
     defer report.deinit();
     try expectNoFailures(&report);
@@ -97,7 +97,7 @@ test "a run reports every check" {
     defer testing.allocator.free(text);
     var totals: [80]u8 = undefined;
     try testing.expectStringStartsWith(text, try std.fmt.bufPrint(&totals, "scheduler conformance of \"memory\": {d} passed, 0 failed, {d} skipped\n", .{ only.len, 22 - only.len }));
-    try testing.expect(std.mem.find(u8, text, "\n  passed   S3   get of a record and of none; remove is true, then false\n") != null);
+    try testing.expect(std.mem.find(u8, text, "\n  passed   S6   claim: due records of the listed jobs, at most max, the oldest first, running with owner, attempt and fence\n") != null);
     // The totals, then a line a check.
     try testing.expectEqual(@as(usize, 23), std.mem.count(u8, text, "\n"));
 }
