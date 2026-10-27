@@ -241,7 +241,7 @@ edit examples/rpc-custom-transport/README.md    | rpc rpc-nats security zefir
 edit examples/other/main.zig                    | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
 edit src/confy/examples/README.md               | confy rpc rpc-nats odm mongo redis nats http security openapi zefir
-edit README.md src/validator/root.zig           | core log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
+edit README.md src/mongo-bson/root.zig          | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
 edit README.md                                  | core log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
 edit CONTRIBUTING.md                            |
 edit context7.json                              |

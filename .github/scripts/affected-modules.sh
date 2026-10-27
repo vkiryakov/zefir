@@ -19,12 +19,14 @@
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
 # module.
-# Documentation outside src/ (*.md files, CONTRIBUTING.md among them, and
-# docs/) affects none, and neither does context7.json, which says what
-# Context7 indexes of the guides. README.md at the root does: its "confy in
-# a minute", "core in a minute", "log in a minute", "nats in a minute",
-# "rpc in a minute" and "http in a minute" are programs of the guides of
-# those modules, which their tests check, so it counts as all six.
+# Documentation outside src/ and the paths above (*.md files,
+# CONTRIBUTING.md among them, and docs/) affects none, and neither does
+# context7.json, which says what Context7 indexes of the guides. README.md
+# at the root does: its "confy in a minute", "core in a minute", "log in a
+# minute", "nats in a minute", "rpc in a minute" and "http in a minute"
+# are programs of the guides of those modules, which their tests check, so
+# it counts as all six; with core among them, it affects every module but
+# mongo-bson.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with

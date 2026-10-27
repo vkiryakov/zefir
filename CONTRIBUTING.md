@@ -5,6 +5,7 @@ This page is for those who change Zefir itself: how to run its tests and checks,
 ```sh
 zig build test --summary all                                                     # run all tests
 zig build test-log --summary all                                                 # run one module's tests: test-core, test-log, …
+zig build bench                                                                  # run the benchmarks of core and log, built with ReleaseFast
 # check formatting, as CI does
 zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
@@ -13,7 +14,9 @@ zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
-CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except README.md at the root: its "confy in a minute", "core in a minute", "log in a minute", "nats in a minute", "rpc in a minute" and "http in a minute" are programs that the tests of confy, core, log, nats, rpc and http check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/`, `tests/` and `examples/` runs none, except README.md at the root: its "confy in a minute", "core in a minute", "log in a minute", "nats in a minute", "rpc in a minute" and "http in a minute" are programs that the tests of confy, core, log, nats, rpc and http check, and since core is among them, an edit of README.md runs every module but mongo-bson. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`, and the folder of its guide into `folders` of `context7.json`, with its name in the rule that lists the modules, so that Context7 indexes the guide.
+
+Each guide in `src/<module>/examples` is checked by the tests of its module, and the App guide in `src/core/examples/app` by those of `zefir`: a file it shows whole must be as it is, any other Zig block a part of a file that the build compiles (but for `// build.zig` blocks and, in the guides of log and the validator, code marked `// compile error:`), and the run of a program that needs neither a server nor zio as the program prints it, apart from what changes from run to run, such as timestamps and ids. A file and its copy in a guide therefore change in the same commit.
 
 The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
 
