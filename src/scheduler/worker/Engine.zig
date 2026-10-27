@@ -452,6 +452,16 @@ pub fn graceEnd(e: *Engine, io: Io) ?i96 {
     return began.nanoseconds +| e.options.shutdown_grace.nanoseconds;
 }
 
+/// The time a stop leaves for the cancels and the outcomes after its grace.
+const outcome_budget: Duration = .fromSeconds(2);
+
+/// The last moment of a stop to write outcomes in, on the awake clock: the
+/// end of the grace and 2 s; null while no stop began.
+pub fn stopEnd(e: *Engine, io: Io) ?i96 {
+    const grace = e.graceEnd(io) orelse return null;
+    return grace +| outcome_budget.nanoseconds;
+}
+
 /// The entry of the job `name`.
 pub fn entryOf(e: *const Engine, name: []const u8) ?*const Entry {
     for (e.entries) |*entry| {

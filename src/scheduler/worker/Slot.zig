@@ -240,7 +240,10 @@ fn handler(s: *Slot) anyerror!void {
 }
 
 /// Sends the transition of `ending` to the store, on condition of the
-/// claim; a change of the client that came meanwhile is decided again.
+/// claim; a change of the client that came meanwhile is decided again. A
+/// failed call goes again a quarter of `renew_every` later while the
+/// claim may still be this one's, so a short outage of the store does not
+/// run the job twice; a stop cuts that short.
 fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, ending: Ending) void {
     const e = s.engine;
     const io = e.io;
@@ -276,7 +279,11 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
         };
         var diag: Diagnostics = .{};
         const options: Store.CallOptions = .{ .allocator = s.arena.allocator(), .diagnostics = &diag };
-        const result = e.tally(io, "finish", e.store.finish(io, e.callContext(io), &request, options), &diag) catch return;
+        const result = e.tally(io, "finish", e.store.finish(io, e.callContext(io), &request, options), &diag) catch {
+            if (s.pause(io)) continue;
+            log.warn("{s}/{s}: the outcome of the run could not be written before the stop; the job goes back when its lease ends", .{ r.job, r.key });
+            return;
+        };
         switch (result) {
             .done => return s.account(r, &d),
             .lost => {
@@ -293,6 +300,22 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
                 current = now;
             },
         }
+    }
+}
+
+/// Waits a quarter of `renew_every` before a finish goes again; false once
+/// a stop leaves no time for it.
+fn pause(s: *Slot, io: Io) bool {
+    const e = s.engine;
+    const until = Io.Clock.awake.now(io).nanoseconds +| @divTrunc(e.options.renew_every.nanoseconds, 4);
+    while (true) {
+        s.wake.reset();
+        const now = Io.Clock.awake.now(io).nanoseconds;
+        const end = e.stopEnd(io);
+        if (end) |x| if (now >= x) return false;
+        if (now >= until) return true;
+        const wake_at = if (end) |x| @min(until, x) else until;
+        s.wake.waitTimeout(io, .{ .deadline = .{ .raw = .{ .nanoseconds = wake_at }, .clock = .awake } }) catch {};
     }
 }
 

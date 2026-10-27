@@ -137,4 +137,5 @@ test {
     _ = @import("tests/worker_init_tests.zig");
     _ = @import("tests/worker_start_tests.zig");
     _ = @import("tests/worker_run_tests.zig");
+    _ = @import("tests/worker_store_tests.zig");
 }
