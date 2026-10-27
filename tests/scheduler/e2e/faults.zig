@@ -390,22 +390,27 @@ const Stalled = struct {
 
 const StalledJobs = struct { stalled: *Stalled };
 
-/// mongo-stall, paused until `resume_` or the end of the test.
+/// mongo-stall, paused until `end` or the end of the test. It counts as
+/// paused from before `docker pause` until `docker unpause` succeeded, so
+/// that a pause that took effect and then failed, and an unpause that
+/// failed, are undone at the end all the same.
 const Pause = struct {
     on: bool = false,
 
     fn begin(p: *Pause, io: Io) !void {
-        try e2e.pause(io, e2e.servers.stall_container);
         p.on = true;
+        try e2e.pause(io, e2e.servers.stall_container);
     }
 
     fn end(p: *Pause, io: Io) !void {
         if (!p.on) return;
-        p.on = false;
         try e2e.unpause(io, e2e.servers.stall_container);
+        p.on = false;
     }
 
-    /// For a `defer`: a failed test leaves the server running.
+    /// For a `defer`: a failed test leaves the server running. A server
+    /// that the failed pause left running makes `docker unpause` fail,
+    /// which is printed and is no error.
     fn endAtLast(p: *Pause, io: Io) void {
         p.end(io) catch |err| std.debug.print("unpause of {s}: {t}\n", .{ e2e.servers.stall_container, err });
     }
