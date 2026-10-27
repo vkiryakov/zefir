@@ -92,7 +92,8 @@ pub const outcome = Store.outcome;
 /// for jobs that each instance runs on its own.
 pub const MemoryStore = @import("MemoryStore.zig");
 /// For tests of workers and applications: `testing.FaultyStore` fails any
-/// store on demand.
+/// store on demand, and `testing.call` runs the handler of a job without a
+/// store or a worker.
 pub const testing = @import("testing.zig");
 
 /// When to run a job.
@@ -126,4 +127,5 @@ test {
     _ = @import("tests/policy_tests.zig");
     _ = @import("tests/transition_tests.zig");
     _ = @import("tests/declared_tests.zig");
+    _ = @import("tests/run_info_tests.zig");
 }
