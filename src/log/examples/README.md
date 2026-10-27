@@ -775,7 +775,10 @@ rules. Declare the bridge in the root file of the program, the one with
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 ```
 
-Then install it, once the logger exists:
+Then, once the logger exists, call `logger.installStdLog()` to install
+the bridge that `std_options` declares. From that call on, the records
+that std, other libraries and zefir's own clients of NATS, MongoDB and
+Redis write through std.log go to this logger:
 
 ```zig
 logger.installStdLog(); // std.log goes to the logger from here on
