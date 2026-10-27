@@ -6,6 +6,8 @@ and `v.militaryTime` check a format; `v.minDate` and `v.maxDate` bound a date
 or a date-time.
 
 ```zig
+const v = @import("validator");
+
 const Booking = struct {
     check_in: []const u8,
     created_at: []const u8,

@@ -4,6 +4,55 @@ For developers who know class-validator 0.15.1 and NestJS: how its ideas and
 decorators map to zefir-validator, and where zefir deliberately behaves
 differently from class-validator and validator.js 13.15.35.
 
+A DTO of class-validator, in the comment, and the same DTO in zefir:
+
+```zig
+const v = @import("validator");
+
+// class CreateUserDto {
+//   @Expose({ name: "userName" })
+//   @Transform(({ value }) => value.trim())
+//   @IsNotEmpty()
+//   @MaxLength(64)
+//   user_name: string;
+//
+//   @IsEmail()
+//   email: string;
+//
+//   @IsOptional()
+//   @IsInt()
+//   @Min(18)
+//   age?: number;
+//
+//   @ArrayMaxSize(5)
+//   @IsNotEmpty({ each: true })
+//   tags: string[];
+// }
+const CreateUserDto = struct {
+    user_name: []const u8,
+    email: []const u8,
+    age: ?u8 = null, // @IsOptional and @IsInt: an optional integer
+    tags: []const []const u8,
+
+    pub const field_rules = .{
+        .user_name = .{ v.rename("userName"), v.trim, v.notEmpty, v.maxLength(64) },
+        .email = v.email,
+        .age = v.min(18), // null skips the rule
+        .tags = .{ v.maxItems(5), v.each(v.notEmpty) },
+    };
+};
+```
+
+The decorators of a property become one entry of `field_rules`: the outside
+name first, then the transforms, then the rules, which run left to right.
+`@IsOptional` and `@IsInt` are the field type, `?u8`, and `{ each: true }` is
+`v.each(...)`, the last rule of its list. With `.user_name = "   "`,
+`.email = "ada.example.com"`, `.age = 17` and `.tags = &.{ "zig", "" }`,
+`v.transform` and then `v.checkAll` report `userName` (`validation.not_empty`,
+after the trim), `email` (`validation.email`), `age` (`validation.min`) and
+`tags[1]` (`validation.not_empty`). [Concepts](#concepts) and
+[Decorators](#decorators) map the rest.
+
 ## Contents
 
 - [Concepts](#concepts)

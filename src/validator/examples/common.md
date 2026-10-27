@@ -5,6 +5,8 @@ with one value, `v.oneOf` and `v.noneOf` with a list of values, and `v.empty` an
 `v.notEmpty` check that a string or a list is empty or not.
 
 ```zig
+const v = @import("validator");
+
 const Role = enum { admin, editor, viewer };
 
 const Team = struct {

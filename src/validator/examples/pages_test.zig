@@ -1,37 +1,44 @@
-//! The full code examples of the rule pages, compiled: each is declared here
-//! exactly as its page shows it, and a test checks the values that the page
-//! and the example's comments describe. The last test checks that every
-//! example of a page, a block of code that declares `field_rules` or
-//! `validateSelf`, appears verbatim in this file, so an example that changes
-//! on its page or here alone fails it.
+//! The full code examples of the rule pages and of class_validator.md,
+//! compiled: each page shows its example as lines of this file, from the
+//! import of the validator on, and a test checks the values that the page
+//! and the example's comments describe. Each example imports the validator
+//! as `v` in a namespace of its own, as a file of the reader would, so the
+//! tests import it as `validator`. readme_test.zig checks that every Zig
+//! block of a page is a part of this file, so an example that changes on
+//! its page or here alone fails there.
 
 const std = @import("std");
-const v = @import("validator");
+const validator = @import("validator");
 const h = @import("vtest");
 const testing = std.testing;
 
 // ------------------------------------------------------------------ common.md
 
-const Role = enum { admin, editor, viewer };
+const common = struct {
+    const v = @import("validator");
 
-const Team = struct {
-    name: []const u8,
-    members: []const []const u8,
-    motto: ?[]const u8 = null,
-    lead: Role,
-    accepted: bool,
+    const Role = enum { admin, editor, viewer };
 
-    pub const field_rules = .{
-        .name = .{ v.notEmpty, v.noneOf(.{ "admin", "root" }) },
-        .members = .{ v.notEmpty, v.each(v.notEmpty) },
-        .motto = v.notEmpty, // null skips the rule
-        .lead = v.oneOf(.{ .admin, .editor }),
-        .accepted = v.equals(true),
+    const Team = struct {
+        name: []const u8,
+        members: []const []const u8,
+        motto: ?[]const u8 = null,
+        lead: Role,
+        accepted: bool,
+
+        pub const field_rules = .{
+            .name = .{ v.notEmpty, v.noneOf(.{ "admin", "root" }) },
+            .members = .{ v.notEmpty, v.each(v.notEmpty) },
+            .motto = v.notEmpty, // null skips the rule
+            .lead = v.oneOf(.{ .admin, .editor }),
+            .accepted = v.equals(true),
+        };
     };
 };
 
 test "the example of the common page checks a team" {
-    comptime v.assertRules(Team);
+    const Team = common.Team;
+    comptime validator.assertRules(Team);
     try h.expectValid(&Team{ .name = "core", .members = &.{"ann"}, .lead = .editor, .accepted = true });
     try h.expectAll(&Team{ .name = "root", .members = &.{ "ann", "" }, .motto = "", .lead = .viewer, .accepted = false }, &.{
         .{ .code = "validation.none_of", .field = "name" },
@@ -44,22 +51,27 @@ test "the example of the common page checks a team" {
 
 // ------------------------------------------------------------------ numbers.md
 
-const Payment = struct {
-    amount_cents: u64,
-    rate: f64,
-    installments: []const u32,
-    retries: u8,
+const numbers = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .amount_cents = .{ v.positive, v.divisibleBy(5) },
-        .rate = v.range(0, 1), // NaN and infinities fail first, with validation.finite
-        .installments = v.each(v.positive),
-        .retries = v.max(5),
+    const Payment = struct {
+        amount_cents: u64,
+        rate: f64,
+        installments: []const u32,
+        retries: u8,
+
+        pub const field_rules = .{
+            .amount_cents = .{ v.positive, v.divisibleBy(5) },
+            .rate = v.range(0, 1), // NaN and infinities fail first, with validation.finite
+            .installments = v.each(v.positive),
+            .retries = v.max(5),
+        };
     };
 };
 
 test "the example of the numbers page checks a payment" {
-    comptime v.assertRules(Payment);
+    const Payment = numbers.Payment;
+    comptime validator.assertRules(Payment);
     try h.expectValid(&Payment{ .amount_cents = 1500, .rate = 0.25, .installments = &.{ 500, 1000 }, .retries = 5 });
     try h.expectAll(&Payment{ .amount_cents = 1501, .rate = std.math.nan(f64), .installments = &.{ 500, 0 }, .retries = 6 }, &.{
         .{ .code = "validation.divisible_by", .field = "amount_cents" },
@@ -72,24 +84,29 @@ test "the example of the numbers page checks a payment" {
 
 // ------------------------------------------------------------------ strings.md
 
-const SignUp = struct {
-    name: []const u8,
-    login: []const u8,
-    password: []const u8,
-    pin: ?[]const u8 = null,
-    tags: []const []const u8 = &.{},
+const strings = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .name = .{ v.notBlank, v.maxLength(64) },
-        .login = .{ v.length(3, 32), v.alphanumeric, v.lowercase },
-        .password = .{ v.maxLength(128), v.strongPassword(.{ .min_length = 12 }) },
-        .pin = .{ v.length(4, 4), v.digits }, // null skips the rules
-        .tags = v.each(.{ v.notEmpty, v.notContains(" ") }),
+    const SignUp = struct {
+        name: []const u8,
+        login: []const u8,
+        password: []const u8,
+        pin: ?[]const u8 = null,
+        tags: []const []const u8 = &.{},
+
+        pub const field_rules = .{
+            .name = .{ v.notBlank, v.maxLength(64) },
+            .login = .{ v.length(3, 32), v.alphanumeric, v.lowercase },
+            .password = .{ v.maxLength(128), v.strongPassword(.{ .min_length = 12 }) },
+            .pin = .{ v.length(4, 4), v.digits }, // null skips the rules
+            .tags = v.each(.{ v.notEmpty, v.notContains(" ") }),
+        };
     };
 };
 
 test "the example of the strings page checks a sign-up" {
-    comptime v.assertRules(SignUp);
+    const SignUp = strings.SignUp;
+    comptime validator.assertRules(SignUp);
     try h.expectValid(&SignUp{ .name = "Ada Lovelace", .login = "ada", .password = "Correct-Horse-9", .tags = &.{"zig"} });
     try h.expectAll(&SignUp{ .name = " \t", .login = "Ada", .password = "password", .pin = "12a4", .tags = &.{ "go", "zig lang" } }, &.{
         .{ .code = "validation.not_blank", .field = "name" },
@@ -102,24 +119,29 @@ test "the example of the strings page checks a sign-up" {
 
 // ------------------------------------------------------------------ formats.md
 
-const Server = struct {
-    host: []const u8,
-    port: []const u8,
-    admin: ?[]const u8 = null,
-    mirrors: []const []const u8 = &.{},
-    lat: f64,
+const formats = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .host = v.fqdn(.{ .require_tld = false }), // "localhost" passes
-        .port = v.port,
-        .admin = v.email, // null skips the rule
-        .mirrors = .{ v.maxItems(5), v.each(v.httpUrl) },
-        .lat = v.latitude, // a float field: NaN fails with validation.finite
+    const Server = struct {
+        host: []const u8,
+        port: []const u8,
+        admin: ?[]const u8 = null,
+        mirrors: []const []const u8 = &.{},
+        lat: f64,
+
+        pub const field_rules = .{
+            .host = v.fqdn(.{ .require_tld = false }), // "localhost" passes
+            .port = v.port,
+            .admin = v.email, // null skips the rule
+            .mirrors = .{ v.maxItems(5), v.each(v.httpUrl) },
+            .lat = v.latitude, // a float field: NaN fails with validation.finite
+        };
     };
 };
 
 test "the example of the formats page checks a server" {
-    comptime v.assertRules(Server);
+    const Server = formats.Server;
+    comptime validator.assertRules(Server);
     try h.expectValid(&Server{ .host = "localhost", .port = "8080", .mirrors = &.{"https://mirror.example.com/"}, .lat = 59.9 });
     try h.expectAll(&Server{ .host = "-bad", .port = "080", .admin = "ops@localhost", .mirrors = &.{"ftp://x"}, .lat = std.math.nan(f64) }, &.{
         .{ .code = "validation.fqdn", .field = "host" },
@@ -132,24 +154,29 @@ test "the example of the formats page checks a server" {
 
 // ------------------------------------------------------------------ encodings.md
 
-const Upload = struct {
-    metadata: []const u8,
-    content: []const u8,
-    content_type: []const u8,
-    language: ?[]const u8 = null,
-    tags: []const []const u8,
+const encodings = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .metadata = v.json,
-        .content = .{ v.notEmpty, v.base64 }, // "" is valid base64: require content first
-        .content_type = v.mimeType,
-        .language = v.locale, // null skips the rule
-        .tags = v.each(v.hexColor),
+    const Upload = struct {
+        metadata: []const u8,
+        content: []const u8,
+        content_type: []const u8,
+        language: ?[]const u8 = null,
+        tags: []const []const u8,
+
+        pub const field_rules = .{
+            .metadata = v.json,
+            .content = .{ v.notEmpty, v.base64 }, // "" is valid base64: require content first
+            .content_type = v.mimeType,
+            .language = v.locale, // null skips the rule
+            .tags = v.each(v.hexColor),
+        };
     };
 };
 
 test "the example of the encodings page checks an upload" {
-    comptime v.assertRules(Upload);
+    const Upload = encodings.Upload;
+    comptime validator.assertRules(Upload);
     try h.expectValid(&Upload{ .metadata = "{\"size\":3}", .content = "Zm9v", .content_type = "text/plain; charset=utf-8", .tags = &.{ "#fff", "#ff000080" } });
     try h.expectAll(&Upload{ .metadata = "3", .content = "", .content_type = "text", .language = "en_US", .tags = &.{ "#fff", "fff" } }, &.{
         .{ .code = "validation.json", .field = "metadata" },
@@ -162,38 +189,44 @@ test "the example of the encodings page checks an upload" {
 
 // ------------------------------------------------------------------ identifiers.md
 
-const Payout = struct {
-    request_id: []const u8,
-    iban: []const u8,
-    bic: ?[]const u8 = null,
-    wallet: ?[]const u8 = null,
-    receipt_digest: []const u8,
-    isbns: []const []const u8,
+const identifiers = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .request_id = v.uuid,
-        .iban = v.iban, // upper case, no spaces: normalize before the check
-        .bic = v.bic, // null skips the rule
-        .wallet = v.btcAddress(.mainnet),
-        .receipt_digest = v.hash(.sha256),
-        .isbns = v.each(v.isbn),
+    const Payout = struct {
+        request_id: []const u8,
+        iban: []const u8,
+        bic: ?[]const u8 = null,
+        wallet: ?[]const u8 = null,
+        receipt_digest: []const u8,
+        isbns: []const []const u8,
+
+        pub const field_rules = .{
+            .request_id = v.uuid,
+            .iban = v.iban, // upper case, no spaces: normalize before the check
+            .bic = v.bic, // null skips the rule
+            .wallet = v.btcAddress(.mainnet),
+            .receipt_digest = v.hash(.sha256),
+            .isbns = v.each(v.isbn),
+        };
+    };
+
+    const Withdrawal = struct {
+        network: v.BtcNetwork, // chosen by the user
+        address: []const u8,
+
+        pub fn validateSelf(self: *const Withdrawal) ?v.Violation {
+            if (!v.isBtcAddress(self.address, self.network))
+                return v.fail(@This(), .address, "withdrawals.bad_address", "must be a Bitcoin address of the chosen network");
+            return null;
+        }
     };
 };
 
-const Withdrawal = struct {
-    network: v.BtcNetwork, // chosen by the user
-    address: []const u8,
-
-    pub fn validateSelf(self: *const Withdrawal) ?v.Violation {
-        if (!v.isBtcAddress(self.address, self.network))
-            return v.fail(@This(), .address, "withdrawals.bad_address", "must be a Bitcoin address of the chosen network");
-        return null;
-    }
-};
-
 test "the examples of the identifiers page check a payout and a withdrawal" {
-    comptime v.assertRules(Payout);
-    comptime v.assertRules(Withdrawal);
+    const Payout = identifiers.Payout;
+    const Withdrawal = identifiers.Withdrawal;
+    comptime validator.assertRules(Payout);
+    comptime validator.assertRules(Withdrawal);
     const good: Payout = .{
         .request_id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
         .iban = "DE89370400440532013000",
@@ -216,22 +249,27 @@ test "the examples of the identifiers page check a payout and a withdrawal" {
 
 // ------------------------------------------------------------------ dates.md
 
-const Booking = struct {
-    check_in: []const u8,
-    created_at: []const u8,
-    reminder: ?[]const u8 = null,
-    opening_hours: []const []const u8,
+const dates = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .check_in = .{ v.date.withMessage("use YYYY-MM-DD"), v.minDate("2024-01-01") },
-        .created_at = v.maxDate("2100-01-01T00:00:00Z"), // a date-time bound: the value needs an offset
-        .reminder = v.rfc3339, // null skips the rule
-        .opening_hours = v.each(v.militaryTime),
+    const Booking = struct {
+        check_in: []const u8,
+        created_at: []const u8,
+        reminder: ?[]const u8 = null,
+        opening_hours: []const []const u8,
+
+        pub const field_rules = .{
+            .check_in = .{ v.date.withMessage("use YYYY-MM-DD"), v.minDate("2024-01-01") },
+            .created_at = v.maxDate("2100-01-01T00:00:00Z"), // a date-time bound: the value needs an offset
+            .reminder = v.rfc3339, // null skips the rule
+            .opening_hours = v.each(v.militaryTime),
+        };
     };
 };
 
 test "the example of the dates page checks a booking" {
-    comptime v.assertRules(Booking);
+    const Booking = dates.Booking;
+    comptime validator.assertRules(Booking);
     try h.expectValid(&Booking{ .check_in = "2024-02-29", .created_at = "2024-01-01T10:00:00+02:00", .opening_hours = &.{ "09:00", "1800" } });
     try h.expectAll(&Booking{ .check_in = "29.02.2024", .created_at = "2024-01-01", .reminder = "2024-01-01T10:00", .opening_hours = &.{ "09:00", "24:00" } }, &.{
         .{ .code = "validation.date", .field = "check_in" },
@@ -245,20 +283,25 @@ test "the example of the dates page checks a booking" {
 
 // ------------------------------------------------------------------ lists.md
 
-const Order = struct {
-    tags: []const []const u8,
-    quantities: [3]u32,
-    scores: []const ?f64,
+const lists = struct {
+    const v = @import("validator");
 
-    pub const field_rules = .{
-        .tags = .{ v.maxItems(10), v.uniqueItems, v.each(v.notEmpty) }, // the list, then each item
-        .quantities = v.each(v.positive),
-        .scores = v.each(v.positive), // null items are skipped
+    const Order = struct {
+        tags: []const []const u8,
+        quantities: [3]u32,
+        scores: []const ?f64,
+
+        pub const field_rules = .{
+            .tags = .{ v.maxItems(10), v.uniqueItems, v.each(v.notEmpty) }, // the list, then each item
+            .quantities = v.each(v.positive),
+            .scores = v.each(v.positive), // null items are skipped
+        };
     };
 };
 
 test "the example of the lists page checks an order" {
-    comptime v.assertRules(Order);
+    const Order = lists.Order;
+    comptime validator.assertRules(Order);
     try h.expectValid(&Order{ .tags = &.{ "a", "b" }, .quantities = .{ 1, 2, 3 }, .scores = &.{ 1.5, null } });
     try h.expectAll(&Order{ .tags = &.{ "a", "a" }, .quantities = .{ 1, 0, 2 }, .scores = &.{ null, -1 } }, &.{
         .{ .code = "validation.unique_items", .field = "tags" },
@@ -268,36 +311,60 @@ test "the example of the lists page checks an order" {
     try h.expectAt(&Order{ .tags = &.{ "a", "" }, .quantities = .{ 1, 2, 3 }, .scores = &.{} }, "validation.not_empty", "must not be empty", "tags[1]");
 }
 
-// ------------------------------------------------------------------ the pages
+// ------------------------------------------------------------------ class_validator.md
 
-/// The rule pages, each with at least one example.
-const pages = .{ "common.md", "numbers.md", "strings.md", "formats.md", "encodings.md", "identifiers.md", "dates.md", "lists.md" };
+const class_validator = struct {
+    const v = @import("validator");
 
-test "every example of the rule pages is declared in this file as its page shows it" {
-    const gpa = testing.allocator;
-    // Git may check files out with CRLF on Windows.
-    const own = try std.mem.replaceOwned(u8, gpa, @embedFile("pages_test.zig"), "\r\n", "\n");
-    defer gpa.free(own);
-    inline for (pages) |page| {
-        const doc = try std.mem.replaceOwned(u8, gpa, @embedFile(page), "\r\n", "\n");
-        defer gpa.free(doc);
-        var examples: usize = 0;
-        var rest: []const u8 = doc;
-        while (std.mem.find(u8, rest, "```zig\n")) |start| {
-            const body = rest[start + "```zig\n".len ..];
-            const end = std.mem.find(u8, body, "\n```") orelse return error.TestUnclosedBlock;
-            const block = body[0 .. end + 1];
-            rest = body[end + "\n```".len ..];
-            if (std.mem.find(u8, block, "field_rules") == null and std.mem.find(u8, block, "validateSelf") == null) continue;
-            examples += 1;
-            if (std.mem.find(u8, own, block) == null) {
-                std.debug.print("{s} shows an example that pages_test.zig does not declare verbatim:\n{s}\n", .{ page, block });
-                return error.TestExampleNotCompiled;
-            }
-        }
-        if (examples == 0) {
-            std.debug.print("{s} shows no example with field_rules or validateSelf\n", .{page});
-            return error.TestPageWithoutExample;
-        }
-    }
+    // class CreateUserDto {
+    //   @Expose({ name: "userName" })
+    //   @Transform(({ value }) => value.trim())
+    //   @IsNotEmpty()
+    //   @MaxLength(64)
+    //   user_name: string;
+    //
+    //   @IsEmail()
+    //   email: string;
+    //
+    //   @IsOptional()
+    //   @IsInt()
+    //   @Min(18)
+    //   age?: number;
+    //
+    //   @ArrayMaxSize(5)
+    //   @IsNotEmpty({ each: true })
+    //   tags: string[];
+    // }
+    const CreateUserDto = struct {
+        user_name: []const u8,
+        email: []const u8,
+        age: ?u8 = null, // @IsOptional and @IsInt: an optional integer
+        tags: []const []const u8,
+
+        pub const field_rules = .{
+            .user_name = .{ v.rename("userName"), v.trim, v.notEmpty, v.maxLength(64) },
+            .email = v.email,
+            .age = v.min(18), // null skips the rule
+            .tags = .{ v.maxItems(5), v.each(v.notEmpty) },
+        };
+    };
+};
+
+test "the example of class_validator.md checks a user as the DTO of class-validator does" {
+    const CreateUserDto = class_validator.CreateUserDto;
+    comptime validator.assertRules(CreateUserDto);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var good: CreateUserDto = .{ .user_name = " ada ", .email = "ada@example.com", .tags = &.{"zig"} };
+    try validator.transform(arena.allocator(), &good);
+    try testing.expectEqualStrings("ada", good.user_name);
+    try h.expectValid(&good);
+    var bad: CreateUserDto = .{ .user_name = "   ", .email = "ada.example.com", .age = 17, .tags = &.{ "zig", "" } };
+    try validator.transform(arena.allocator(), &bad);
+    try h.expectAll(&bad, &.{
+        .{ .code = "validation.not_empty", .field = "userName" },
+        .{ .code = "validation.email", .field = "email" },
+        .{ .code = "validation.min", .field = "age" },
+        .{ .code = "validation.not_empty", .field = "tags[1]" },
+    });
 }

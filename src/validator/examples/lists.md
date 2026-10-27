@@ -6,6 +6,8 @@ items, `v.uniqueItems` and `v.uniqueBy` reject repeated items or keys,
 items, and `v.each` declares the rules of the items.
 
 ```zig
+const v = @import("validator");
+
 const Order = struct {
     tags: []const []const u8,
     quantities: [3]u32,

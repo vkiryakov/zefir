@@ -9,6 +9,8 @@ predicate with the same grammar, `v.isEmail(s)` and so on, for code outside
 `field_rules`.
 
 ```zig
+const v = @import("validator");
+
 const Server = struct {
     host: []const u8,
     port: []const u8,

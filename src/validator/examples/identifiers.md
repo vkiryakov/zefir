@@ -9,6 +9,8 @@ for crypto addresses. Each rule has a predicate with the same verdict,
 `v.isUuid` … `v.isEthereumAddress`, for code outside `field_rules`.
 
 ```zig
+const v = @import("validator");
+
 const Payout = struct {
     request_id: []const u8,
     iban: []const u8,

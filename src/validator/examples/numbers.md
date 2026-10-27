@@ -6,6 +6,8 @@ sign, `v.divisibleBy` checks that it is a multiple, and `v.finite` that a float
 is a number at all.
 
 ```zig
+const v = @import("validator");
+
 const Payment = struct {
     amount_cents: u64,
     rate: f64,
