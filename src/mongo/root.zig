@@ -126,4 +126,5 @@ test {
     _ = @import("tests/odm_conformance.zig");
     _ = SchedulerStore;
     _ = @import("tests/scheduler_store_tests.zig");
+    _ = @import("tests/scheduler_records_tests.zig");
 }

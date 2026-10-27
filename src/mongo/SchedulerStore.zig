@@ -49,8 +49,11 @@ const bson = @import("mongo-bson");
 const scheduler = @import("scheduler");
 const mongo = @import("root.zig");
 const documents = @import("scheduler/documents.zig");
+const records = @import("scheduler/records.zig");
 const Clock = @import("scheduler/Clock.zig");
 const Instant = scheduler.Instant;
+const Store = scheduler.Store;
+const StoreError = Store.StoreError;
 const SchedulerStore = @This();
 
 const log = std.log.scoped(.mongo);
@@ -151,6 +154,35 @@ pub fn start(s: *SchedulerStore, io: Io) mongo.Error!void {
 /// The store's clock as the process knows it, without I/O.
 pub fn now(s: *SchedulerStore, io: Io) Instant {
     return s.clock.now(io);
+}
+
+/// A record of a new life, pending from `request.run_at`: one upsert whose
+/// pipeline keeps a live record of the key and replaces a finished one.
+pub fn create(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.CreateRequest, options: Store.CallOptions) StoreError!Store.CreateResult {
+    return records.create(s, io, ctx, request, options);
+}
+
+pub fn get(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const scheduler.Ref, options: Store.CallOptions) StoreError!?scheduler.Record {
+    return records.get(s, io, ctx, ref, options);
+}
+
+/// `request.set` on condition of the record's revision and state.
+pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) StoreError!Store.UpdateResult {
+    return records.update(s, io, ctx, request, options);
+}
+
+pub fn remove(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const scheduler.Ref, options: Store.CallOptions) StoreError!bool {
+    return records.remove(s, io, ctx, ref, options);
+}
+
+/// The records of the filter by their `_id`, "<job>/<key>": a job's
+/// records together, by key.
+pub fn list(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.ListRequest, options: Store.CallOptions) StoreError!scheduler.RecordPage {
+    return records.list(s, io, ctx, request, options);
+}
+
+pub fn history(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.HistoryRequest, options: Store.CallOptions) StoreError!scheduler.RunPage {
+    return records.history(s, io, ctx, request, options);
 }
 
 /// The database of the collections, on the client.
