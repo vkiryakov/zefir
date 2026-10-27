@@ -16,8 +16,13 @@ const Context = @import("../Context.zig").Context;
 const Policy = @import("policy.zig").Policy;
 const Stats = @import("stats.zig").Stats;
 const Counters = @import("stats.zig").Counters;
+const declared = @import("declared.zig");
+const poll = @import("poll.zig");
+const Slot = @import("Slot.zig");
+const core = @import("core");
 
 const Engine = @This();
+const log = std.log.scoped(.scheduler);
 
 pub const Options = struct {
     /// How many jobs this instance runs at once.
@@ -77,6 +82,36 @@ pub const Read = union(enum) {
     out_of_memory,
 };
 
+/// A claimed record on its way from the poll to a slot.
+pub const Item = struct {
+    round: *Round,
+    claimed: *const Store.Claimed,
+    /// When its claim was sent, on the boot clock.
+    sent: Io.Timestamp,
+};
+
+/// The memory of the records of one claim: the slot done with the last of
+/// them frees it.
+pub const Round = struct {
+    arena: std.heap.ArenaAllocator,
+    left: std.atomic.Value(u32) = .init(0),
+
+    pub fn create(gpa: Allocator) error{OutOfMemory}!*Round {
+        const r = try gpa.create(Round);
+        r.* = .{ .arena = .init(gpa) };
+        return r;
+    }
+
+    pub fn destroy(r: *Round, gpa: Allocator) void {
+        r.arena.deinit();
+        gpa.destroy(r);
+    }
+
+    pub fn release(r: *Round, gpa: Allocator) void {
+        if (r.left.fetchSub(1, .acq_rel) == 1) r.destroy(gpa);
+    }
+};
+
 gpa: Allocator,
 io: Io,
 store: Store,
@@ -90,17 +125,47 @@ keyed_only: []const []const u8,
 /// What `start` hands over; nothing reads it before.
 entries: []const Entry = &.{},
 
-/// Guards the fields below it that are no atomics, for short sections
-/// without a call of the store, a wait or a log line.
+/// Guards the fields up to `outage`, for short sections without a call
+/// of the store, a wait or a log line.
 mutex: Io.Mutex = .init,
+/// A stop was asked for: while starting, `start` goes on to draining.
+stop_requested: bool = false,
+/// When the stop began, on the awake clock.
+stop_began: ?Io.Timestamp = null,
+/// The failures of the store in a row, for the logs.
+outage: ?Outage = null,
+
 state_value: std.atomic.Value(State) = .init(.configured),
 /// The address of the worker since `start`: a moved worker panics.
 home: std.atomic.Value(usize) = .init(0),
 /// Tasks inside `wait`, `run` or `shutdown`: `deinit` panics while any is.
 in_calls: std.atomic.Value(u32) = .init(0),
+/// Not 0 once a stop began: the poll claims nothing more, and a slot
+/// gives back what it takes from the queue without running it.
+stopping: std.atomic.Value(u32) = .init(0),
+/// The records claimed and not yet done with, queued or in a slot.
+busy: std.atomic.Value(u32) = .init(0),
+/// The tasks that still run, and one more for `start` while it spawns.
+live: std.atomic.Value(u32) = .init(0),
+tasks: Io.Group = .init,
+/// Wakes the poll: a slot freed up, or a stop.
+poll_wake: Io.Event = .unset,
 /// Set once the worker stopped: every task of it ended.
 stopped: Io.Event = .unset,
+/// From the poll to the slots: `workers` items, which it never exceeds,
+/// since a claim takes no more records than there are free slots.
+queue: Io.Queue(Item) = undefined,
+queue_buffer: []Item = &.{},
+slots: []Slot = &.{},
 counters: Counters = .{},
+
+const Outage = struct { since: Io.Timestamp, tries: u64, warned: Io.Timestamp };
+
+/// The longest wait handed to `std.Io` at once: some implementations
+/// overflow on a far deadline.
+pub const max_step: Duration = .fromSeconds(60 * 60);
+/// How many races a write of `start` may lose before error.Contended.
+const max_races = 8;
 
 /// Checks the settings and names this instance, without I/O.
 pub fn init(gpa: Allocator, io: Io, store: Store, any_key: []const []const u8, keyed_only: []const []const u8, options: Options) InitError!Engine {
@@ -160,17 +225,194 @@ pub fn stats(e: *const Engine) Stats {
     return e.counters.snapshot(e.options.workers);
 }
 
+/// Writes the records of the declared jobs, then starts the poll and the
+/// slots. On an error nothing runs and the worker is stopped.
+pub fn start(e: *Engine, io: Io, entries: []const Entry) StartError!void {
+    {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        if (e.state_value.load(.monotonic) != .configured) return error.InvalidState;
+        e.state_value.store(.starting, .release);
+    }
+    e.home.store(@intFromPtr(e), .monotonic);
+    e.entries = entries;
+    e.declare(io) catch |err| {
+        e.markStopped(io);
+        return err;
+    };
+    try e.spawn(io);
+    const stop = stop: {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        // A stop asked for while it started: straight to draining.
+        if (e.state_value.load(.monotonic) == .starting) e.state_value.store(if (e.stop_requested) .draining else .running, .release);
+        break :stop e.stop_requested;
+    };
+    log.info("{d} job types, {d} workers, instance {s}", .{ e.entries.len, e.options.workers, e.instance });
+    if (stop) e.wakeAll(io);
+}
+
+/// The records of the declared jobs (А32: none, no call of the store): a
+/// job with `.repeat` gets its record, or the code's plan in the one
+/// there; a job known without `.repeat` whose record is there finds it
+/// parked, and it stays so.
+fn declare(e: *Engine, io: Io) StartError!void {
+    for (e.entries) |*entry| {
+        if (entry.wanted != null) break;
+    } else return;
+    var arena: std.heap.ArenaAllocator = .init(e.gpa);
+    defer arena.deinit();
+    const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), e.options.start_timeout));
+    for (e.entries) |*entry| {
+        if (entry.wanted) |wanted| {
+            try e.declareOne(io, ctx, arena.allocator(), wanted);
+            continue;
+        }
+        var d: Diagnostics = .{};
+        const ref: record.Ref = .{ .job = entry.policy.name, .key = "" };
+        if (try e.tally(io, "get", e.store.get(io, ctx, &ref, .{ .allocator = arena.allocator(), .diagnostics = &d }), &d) == null) continue;
+        _ = e.counters.undeclared.fetchAdd(1, .monotonic);
+        log.warn("{s}: the record of a declaration this code does not have is parked, and no instance of it runs it; " ++
+            "remove it with client.cancel(io, ctx, .declared({s}), .{{}})", .{ entry.policy.name, entry.type_name });
+    }
+}
+
+fn declareOne(e: *Engine, io: Io, ctx: core.Context, a: Allocator, wanted: *const fn (Allocator, Instant, record.Life) error{ OutOfMemory, InvalidArgument }!Store.CreateRequest) StartError!void {
+    var d: Diagnostics = .{};
+    const options: Store.CallOptions = .{ .allocator = a, .diagnostics = &d };
+    var life: record.Life = undefined;
+    io.random(&life);
+    const want = wanted(a, e.store.now(io), life) catch |err| {
+        if (err == error.InvalidArgument) log.warn("a declared record cannot be written: a string of its Payload{{}} is not UTF-8, or its schedule has no run within 9 years", .{});
+        return err;
+    };
+    const ref: record.Ref = .{ .job = want.job, .key = "" };
+    var lost: u32 = 0;
+    while (lost <= max_races) : (lost += 1) {
+        switch (try e.tally(io, "create", e.store.create(io, ctx, &want, options), &d)) {
+            .created, .replaced => return log.info("{s}: declared, {s}", .{ want.job, want.plan }),
+            .existing => {},
+        }
+        var current = (try e.tally(io, "get", e.store.get(io, ctx, &ref, options), &d)) orelse continue;
+        // A finished record goes again to create, which replaces it.
+        while (current.state != .succeeded and current.state != .failed) : (lost += 1) {
+            const patch = declared.reconcile(&current, want.plan, want.run_at) orelse return;
+            if (lost == max_races) return error.Contended;
+            var tag: Store.Tag = undefined;
+            io.random(&tag);
+            const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = current.revision, .state = current.state }, .set = patch, .tag = tag };
+            switch (try e.tally(io, "update", e.store.update(io, ctx, &request, options), &d)) {
+                .updated => return log.info("{s}: the declared record takes the plan of the code, {s}", .{ want.job, want.plan }),
+                .conflict => |now| current = now,
+                .not_found => break,
+            }
+        }
+    }
+    return error.Contended;
+}
+
+/// The slots, then the poll, each a task of `tasks`. When the Io has no
+/// task for one, those that run stop, and so does the worker.
+fn spawn(e: *Engine, io: Io) StartError!void {
+    const n = e.options.workers;
+    e.queue_buffer = e.gpa.alloc(Item, n) catch {
+        e.markStopped(io);
+        return error.OutOfMemory;
+    };
+    e.queue = .init(e.queue_buffer);
+    e.slots = e.gpa.alloc(Slot, n) catch {
+        e.markStopped(io);
+        return error.OutOfMemory;
+    };
+    for (e.slots) |*s| s.* = .init(e, io);
+    // The reference of `start`: no task stops the worker before all run.
+    e.live.store(1, .release);
+    const spawned = for (e.slots) |*s| {
+        _ = e.live.fetchAdd(1, .acq_rel);
+        e.tasks.concurrent(io, Slot.loop, .{s}) catch {
+            _ = e.live.fetchSub(1, .acq_rel);
+            break false;
+        };
+    } else poll_task: {
+        _ = e.live.fetchAdd(1, .acq_rel);
+        e.tasks.concurrent(io, poll.loop, .{e}) catch {
+            _ = e.live.fetchSub(1, .acq_rel);
+            break :poll_task false;
+        };
+        break :poll_task true;
+    };
+    if (!spawned) {
+        // No poll runs: close its queue, and the slots that run end.
+        e.requestStop(io);
+        e.queue.close(io);
+    }
+    e.taskEnded(io);
+    if (spawned) return;
+    e.stopped.waitUncancelable(io);
+    return error.ConcurrencyUnavailable;
+}
+
+/// One of the tasks ended; the last stops the worker.
+pub fn taskEnded(e: *Engine, io: Io) void {
+    if (e.live.fetchSub(1, .acq_rel) == 1) e.markStopped(io);
+}
+
+fn markStopped(e: *Engine, io: Io) void {
+    const was = was: {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        break :was e.state_value.swap(.stopped, .acq_rel);
+    };
+    if (was == .running or was == .draining) log.info("stopped", .{});
+    e.stopped.set(io);
+}
+
 /// Stops claiming and begins the stop; from any task, without waiting.
 pub fn requestStop(e: *Engine, io: Io) void {
-    e.mutex.lockUncancelable(io);
-    defer e.mutex.unlock(io);
-    switch (e.state_value.load(.monotonic)) {
-        .configured => {
-            e.state_value.store(.stopped, .release);
-            e.stopped.set(io);
-        },
-        else => {},
-    }
+    const wake = wake: {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        switch (e.state_value.load(.monotonic)) {
+            .configured => {
+                e.state_value.store(.stopped, .release);
+                e.stopped.set(io);
+                break :wake false;
+            },
+            // `start` wakes the tasks once they run.
+            .starting => {
+                e.beginStop(io);
+                break :wake false;
+            },
+            .running => {
+                e.state_value.store(.draining, .release);
+                e.beginStop(io);
+                break :wake true;
+            },
+            .draining, .stopped => break :wake false,
+        }
+    };
+    if (!wake) return;
+    log.info("stopping", .{});
+    e.wakeAll(io);
+}
+
+/// Under `mutex`.
+fn beginStop(e: *Engine, io: Io) void {
+    e.stop_requested = true;
+    if (e.stop_began == null) e.stop_began = Io.Clock.awake.now(io);
+    // A read-modify-write, as the reads of the tasks after their resets:
+    // a task that read 0 sees the wake that follows.
+    _ = e.stopping.swap(1, .acq_rel);
+}
+
+/// Wakes the poll and every slot; only once the tasks run.
+fn wakeAll(e: *Engine, io: Io) void {
+    e.poll_wake.set(io);
+    for (e.slots) |*s| s.wake.set(io);
+}
+
+pub fn isStopping(e: *Engine) bool {
+    return e.stopping.fetchAdd(0, .acq_rel) != 0;
 }
 
 /// Waits until the worker stopped.
@@ -181,11 +423,77 @@ pub fn wait(e: *Engine, io: Io) WaitError!void {
     try e.stopped.wait(io);
 }
 
-/// Stops the worker if it runs, waits for the stop and frees it.
+/// Stops the worker if it runs, waits for its tasks without a limit and
+/// frees it.
 pub fn deinit(e: *Engine, io: Io) void {
     if (e.in_calls.load(.acquire) != 0)
         @panic("zefir-scheduler: Worker.deinit() while a task is in wait, run or shutdown: let it return first");
+    // No cancelation point: a cancelation request of the caller stays.
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
     e.requestStop(io);
+    e.tasks.await(io) catch {};
+    for (e.slots) |*s| s.deinit();
+    e.gpa.free(e.slots);
+    e.gpa.free(e.queue_buffer);
     e.gpa.free(e.instance);
     e.* = undefined;
+}
+
+/// The entry of the job `name`.
+pub fn entryOf(e: *const Engine, name: []const u8) ?*const Entry {
+    for (e.entries) |*entry| {
+        if (std.mem.eql(u8, entry.policy.name, name)) return entry;
+    }
+    return null;
+}
+
+/// The context of a call of the store by the poll or a slot: never the
+/// handler's token, a deadline of `store_timeout`.
+pub fn callContext(e: *Engine, io: Io) core.Context {
+    return core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), e.options.store_timeout));
+}
+
+/// Counts what a call of the store gave: an error, or an answer.
+pub fn tally(e: *Engine, io: Io, comptime what: []const u8, result: anytype, d: *const Diagnostics) @TypeOf(result) {
+    if (result) |_| e.storeAnswered(io) else |err| e.storeFailed(io, what, err, d);
+    return result;
+}
+
+/// Logs the first failure of the store, then once a minute while it goes
+/// on failing.
+fn storeFailed(e: *Engine, io: Io, comptime what: []const u8, err: anyerror, d: *const Diagnostics) void {
+    e.counters.add(.store_errors, 1);
+    e.counters.store_down.store(true, .release);
+    const now = Io.Clock.awake.now(io);
+    const tries: u64 = tries: {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        const o = if (e.outage) |*o| o else {
+            e.outage = .{ .since = now, .tries = 1, .warned = now };
+            break :tries 1;
+        };
+        o.tries += 1;
+        if (now.nanoseconds -| o.warned.nanoseconds < std.time.ns_per_min) break :tries 0;
+        o.warned = now;
+        break :tries o.tries;
+    };
+    switch (tries) {
+        0 => {},
+        1 => log.warn("the store fails: " ++ what ++ ": error.{t}: {s}", .{ err, d.message() }),
+        else => log.warn("the store still fails, {d} tries: " ++ what ++ ": error.{t}: {s}", .{ tries, err, d.message() }),
+    }
+}
+
+fn storeAnswered(e: *Engine, io: Io) void {
+    e.counters.store_down.store(false, .release);
+    const since = since: {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        const o = e.outage orelse break :since null;
+        e.outage = null;
+        break :since o.since;
+    };
+    const began = since orelse return;
+    log.warn("the store answers again after {f}", .{began.durationTo(Io.Clock.awake.now(io))});
 }

@@ -70,6 +70,21 @@ pub fn Worker(comptime Jobs: type) type {
             return w;
         }
 
+        /// Writes the records of the declared jobs (none: no call of the
+        /// store), then starts the poll and the slots. A store that fails
+        /// here gives its error, and nothing runs; a second `start` is
+        /// `error.InvalidState`. Do not move the worker afterwards.
+        pub fn start(w: *Self, io: Io) StartError!void {
+            w.engine.checkUse(io);
+            return w.engine.start(io, &w.entries);
+        }
+
+        /// `start` and `wait`: for a program whose main work the worker is.
+        pub fn run(w: *Self, io: Io) (StartError || WaitError)!void {
+            try w.start(io);
+            return w.wait(io);
+        }
+
         /// running. Thread-safe; for health checks.
         pub fn isReady(w: *const Self) bool {
             return w.engine.isReady();
