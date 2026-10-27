@@ -1,9 +1,9 @@
 //! Tests of scheduler.MemoryStore under load: tasks that claim the same
 //! records at once, and tasks that mix every operation of the contract for
-//! 3 s, after which its rules still hold. The load tasks stop by a flag,
-//! and no gate holds them, before their group is cancelled: on macOS, std
-//! 0.17 can lose a cancel while std.testing.allocator records a stack
-//! trace.
+//! 3 s, after which its rules still hold, also when a pause lands on a new
+//! life of its record. The load tasks stop by a flag, and no gate holds
+//! them, before their group is cancelled: on macOS, std 0.17 can lose a
+//! cancel while std.testing.allocator records a stack trace.
 
 const std = @import("std");
 const testing = std.testing;
@@ -13,6 +13,7 @@ const Store = scheduler.Store;
 const Record = scheduler.Record;
 const Instant = scheduler.Instant;
 const MemoryStore = scheduler.MemoryStore;
+const StalledPause = @import("stalled_pause_fixture.zig").StalledPause;
 
 const io = testing.io;
 
@@ -303,7 +304,15 @@ const Mixer = struct {
             .updated => |revision| {
                 if (revision != now.revision + 1) m.fail("update raised the revision by other than 1");
                 const paused = if (set.state) |state| state == .paused else false;
-                if (paused) try m.quiets.append(testing.allocator, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
+                // An update holds on the revision and state, not on the
+                // life: a new life of the key, created since the get, may be
+                // the one paused. A life never comes back to its key, so a
+                // get that still finds it shows the pause was of it.
+                if (paused) {
+                    const after = (try store.get(io, .root, slot, m.options())) orelse return;
+                    m.see(after);
+                    if (std.mem.eql(u8, &after.life, &now.life)) try m.quiets.append(testing.allocator, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
+                }
             },
             .conflict => |rec| m.see(rec),
             .not_found => {},
@@ -455,7 +464,25 @@ test "16 tasks mix every operation for 3 s and the invariants hold" {
     defer testing.log_level = level;
     var memory: MemoryStore = .init(testing.allocator, io, .{ .max_history = 64, .max_finished = 4 });
     defer memory.deinit();
-    var load: Load = .{ .store = memory.store() };
+    try mix(memory.store(), &memory);
+}
+
+test "the invariants of the mix hold when a pause lands on a new life of its record" {
+    // Small limits evict under the load, and warn about it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var stalled: StalledPause = undefined;
+    stalled.init(testing.allocator, io, .{ .max_history = 64, .max_finished = 4 });
+    defer stalled.deinit();
+    try mix(stalled.store(), &stalled.memory);
+    try testing.expect(stalled.landed.load(.acquire));
+}
+
+/// 16 tasks mix every operation on `store` for 3 s, and then its rules
+/// hold; `memory` is the MemoryStore behind it.
+fn mix(store: Store, memory: *MemoryStore) !void {
+    var load: Load = .{ .store = store };
     var mixers: [16]Mixer = undefined;
     for (&mixers, 0..) |*m, i| m.* = .init(&load, @intCast(i));
     defer for (&mixers) |*m| m.deinit();
@@ -476,7 +503,7 @@ test "16 tasks mix every operation for 3 s and the invariants hold" {
         problems += m.problems;
     }
     try testing.expectEqual(@as(usize, 0), problems);
-    try checkIndexes(&memory);
+    try checkIndexes(memory);
 
     // One record a key, each of the model.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

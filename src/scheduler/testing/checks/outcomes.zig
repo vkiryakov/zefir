@@ -497,7 +497,15 @@ const Mixer = struct {
         switch (try s.update(m.r.io, m.r.ctx(), &request, m.options())) {
             .updated => |revision| {
                 if (revision != now.revision +% 1) m.fail("update raised the revision by other than 1");
-                if (set.state == .paused) try m.quiets.append(m.r.gpa, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
+                // An update holds on the revision and state, not on the
+                // life: a new life of the key, created since the get, may be
+                // the one paused. A life never comes back to its key, so a
+                // get that still finds it shows the pause was of it.
+                if (set.state == .paused) {
+                    const after = (try s.get(m.r.io, m.r.ctx(), slot, m.options())) orelse return;
+                    m.see(after);
+                    if (std.mem.eql(u8, &after.life, &now.life)) try m.quiets.append(m.r.gpa, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
+                }
             },
             .conflict => |rec| m.see(rec),
             .not_found => {},

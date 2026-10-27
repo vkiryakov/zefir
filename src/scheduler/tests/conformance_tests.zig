@@ -1,4 +1,5 @@
-//! Tests of scheduler.testing.conformance: MemoryStore passes it, a store
+//! Tests of scheduler.testing.conformance: MemoryStore passes it, also when
+//! a pause of the mix of S20 lands on a new life of its record; a store
 //! that breaks a rule fails the check of that rule, and a check past its
 //! time limit fails while the run goes on.
 
@@ -12,6 +13,7 @@ const runner = @import("../testing/checks/runner.zig");
 const conformance = scheduler.testing.conformance;
 const Store = scheduler.Store;
 const MemoryStore = scheduler.MemoryStore;
+const StalledPause = @import("stalled_pause_fixture.zig").StalledPause;
 
 /// A MemoryStore for each check.
 const MemoryHarness = struct {
@@ -115,6 +117,37 @@ test "MemoryStore passes the conformance suite" {
     try expectNoFailures(&report);
     try testing.expectEqual(@as(usize, 21), report.passedCount());
     try testing.expectEqualStrings("the harness has no loseNextReply", try skippedWhy(report.outcome(.s17)));
+}
+
+/// A MemoryStore whose pause of a pending record stalls until a claim took
+/// the record and it has a new life: `stalled_pause_fixture.zig`.
+const StalledHarness = struct {
+    stalled: StalledPause = undefined,
+
+    pub fn setUp(h: *StalledHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.stalled.init(gpa, io, .{});
+        return .{ .store = h.stalled.store(), .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *StalledHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.stalled.deinit();
+    }
+};
+
+test "S20 holds when a pause of the mix lands on a new life of its record" {
+    // With the default limits, the mix of S20 may evict rows of the
+    // history, and MemoryStore warns about it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var harness: StalledHarness = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s20} });
+    defer report.deinit();
+    try expectNoFailures(&report);
+    try testing.expect(report.outcome(.s20) == .passed);
+    try testing.expect(harness.stalled.landed.load(.acquire));
 }
 
 /// A MemoryStore behind a FaultyStore, which loses the reply of a call on
