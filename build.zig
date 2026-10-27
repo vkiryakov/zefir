@@ -2418,7 +2418,9 @@ fn addOpenapiCompileChecks(
 /// their directory under testdata/: it gets the absolute path from the
 /// build (`fixtures`) and goes there itself, so the run starts where every
 /// run does (see addOpenapiGoldens); the files are inputs of its runs. Each
-/// run must exit with the code of its case.
+/// run must exit with the code of its case. readme_test.zig then checks
+/// that the pages, and README.md of the repository, show every file as it
+/// is and every run as it printed to stderr, where std.log writes.
 fn addConfyGuide(
     b: *std.Build,
     test_confy: *std.Build.Step,
@@ -2459,6 +2461,15 @@ fn addConfyGuide(
         test_confy.dependOn(&t.step);
     }
 
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "confy in a minute" of the repository's README.md is a program of
+    // the guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
     for (confy_guide.programs) |program| {
         const files_dir = if (program.dir) |name| b.fmt(dir ++ "testdata/{s}/", .{name}) else "";
         const fixtures = b.addOptions();
@@ -2480,16 +2491,15 @@ fn addConfyGuide(
             }),
         });
         exe.root_module.addOptions("fixtures", fixtures);
-        for (program.runs) |case| {
+        for (program.runs, 0..) |case, i| {
             const run = addRun(b, exe, tsan);
             for (case.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
             for (program.files) |file| run.addFileInput(b.path(b.fmt("{s}{s}", .{ files_dir, file })));
             run.expectExitCode(case.exit);
-            // std.log writes to stderr; the log of a run is not the build's.
-            _ = run.captureStdErr(.{});
-            test_confy.dependOn(&run.step);
+            readme.addAnonymousImport(b.fmt("{s}.{d}.err", .{ program.name, i }), .{ .root_source_file = run.captureStdErr(.{}) });
         }
     }
+    test_confy.dependOn(&addRun(b, b.addTest(.{ .name = "confy-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The modules that the examples of the security guide import.
