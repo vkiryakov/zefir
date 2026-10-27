@@ -894,7 +894,7 @@ calls that change a job take one:
 |---|---|---|
 | `schedule(io, ctx, J, request, options)` | makes the job of the key, unless one is there | `.created`; `.existing`, which changed nothing |
 | `cancel(io, ctx, ref, options)` | removes the job, in any state | `true`, or `false` when there was none |
-| `pause(io, ctx, ref, options)` | a pending job waits until `unpause`; a running one pauses when its run ends | `Changed` |
+| `pause(io, ctx, ref, options)` | a pending job waits until `unpause`; a running one pauses when its run ends, or without a run when its instance was lost and another takes it over | `Changed` |
 | `unpause(io, ctx, ref, options)` | the job waits again for its time; a time already past runs at once | `Changed` |
 | `reschedule(io, ctx, ref, when, options)` | moves the job, or changes its schedule | `Changed` |
 | `retry(io, ctx, ref, options)` | gives a failed job all its attempts again, see [Failures and retries](#failures-and-retries) | `Changed` |
@@ -2005,12 +2005,18 @@ key, so a key is taken once:
   life: "9f1c0e5b2d41a8c6e9f0b1d2a3c4e5f6",   new when the key is scheduled again
   plan: "",                            "" once; a schedule as text: "daily 03:30:00"
   payload: "{\"order_id\":42,\"amount_cents\":1999}",   the JSON, byte for byte
+  trace: "00-4bf92f…-00f067…-01",      the trace of the caller of schedule, if it had one
   state: "pending",                    pending, running, paused, succeeded, failed
   scheduled_at: Date, run_at: Date,
   wake_at: Date,                       when it may be claimed: run_at, or lease_until when running
   attempt: 0, fence: 0, revision: 0,
+  pause_requested: true,               a pause asked for while it runs
   owner: "shop/7f3a…", claimed_at: Date, lease_until: Date,   while it runs
+  claim: { attempt, scheduled_at },    while it runs: the attempt and the moment its claim gave the run
+  prev: { owner, claimed_at, attempt, scheduled_at },   while it runs after a takeover: the claim taken over
+  tag: "3e9d…",                        the mark of the last update, claim or finish, read after a lost reply
   last: { outcome, error, attempt, started_at, finished_at },   the last run
+  unreadable_since: Date,              since when the instances that claimed it could not read it
   created_at: Date, updated_at: Date,
   finished_at: Date, expires_at: Date  when it is finished and kept
 }
