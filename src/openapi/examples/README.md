@@ -1224,8 +1224,7 @@ pub const openapi: zefir.openapi.MiddlewareDoc = .{
 };
 ```
 
-`requireUser`, which answers 401 without a user, and `requirePermission`,
-which answers 403 without a permission:
+`requireUser`, which answers 401 without a user:
 
 ```zig
 /// 401 without a signed-in user: `error.Unauthenticated`, which the
@@ -1243,6 +1242,8 @@ pub const requireUser = struct {
     }
 };
 ```
+
+`requirePermission`, which answers 403 without a permission:
 
 ```zig
 pub const name = "requirePermission(" ++ permission ++ ")";
@@ -1345,6 +1346,8 @@ pub const LiveEvent = union(enum) {
 };
 ```
 
+The route of the stream declares it in `.events`:
+
 ```zig
 .events = http.sse.get("/events", .{ .events = dto.LiveEvent, .heartbeat = std.Io.Duration.fromSeconds(15), .on_close = .eventsClosed }),
 ```
@@ -1375,9 +1378,7 @@ reconnecting:
 OpenAPI 3.2 describes each event with a schema, `itemSchema`: with
 `.version = .@"3.2"`, a variant is an object with its `event` and its
 `data`, which is JSON of the schema of its type, and an optional `id` and
-`retry`. A stream of the tests of zefir-openapi,
-[secure-3.2.json](../tests/golden/secure-3.2.json), whose event
-`todo.created` carries a `TodoResponse` too:
+`retry`. The variant `todo.created`, whose data is a `TodoResponse`:
 
 ```json
 "text/event-stream": {
@@ -1420,12 +1421,14 @@ the same in both.
 ## Serving the document
 
 `zefir.openapi.Docs(.{})` is a controller: the application keeps one as a
-field, puts it in `.controllers`, and gives it the document, as
-`Service.start` of the small application does:
+field, puts it in `.controllers`, and gives it the document. The field, in
+`Service.zig` of the small application:
 
 ```zig
 docs: zefir.openapi.Docs(.{}) = undefined, // GET /api/openapi.json and the page GET /api/docs
 ```
+
+`Service.start` gives it the document:
 
 ```zig
 s.docs = try .init(gpa, comptime zefir.openapi.document(@TypeOf(parts), .{
@@ -1598,9 +1601,9 @@ $ zig build test
 src/TodosV1Controller.zig:62:16: error: missing struct field: exportCsv
 ```
 
-The tests of the guide reach every route, under the Debug check, and
-compare the document with
-[src/http/examples/openapi.json](../../http/examples/openapi.json).
+The tests of the http guide's service reach every route, under the Debug
+check, and compare the document with its
+[`openapi.json`](../../http/examples/openapi.json).
 
 ## The Debug check
 
