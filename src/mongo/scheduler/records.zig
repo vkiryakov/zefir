@@ -132,7 +132,7 @@ pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
 }
 
 /// After a definite answer, an error of the read that tells the rest.
-fn readFailed(c: *Call, err: (mongo.Error || documents.ReadError)) StoreError {
+pub fn readFailed(c: *Call, err: (mongo.Error || documents.ReadError)) StoreError {
     return switch (err) {
         error.Corrupt => error.Corrupt,
         error.OutOfMemory => error.OutOfMemory,

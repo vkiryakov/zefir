@@ -50,6 +50,7 @@ const scheduler = @import("scheduler");
 const mongo = @import("root.zig");
 const documents = @import("scheduler/documents.zig");
 const records = @import("scheduler/records.zig");
+const claims = @import("scheduler/claims.zig");
 const Clock = @import("scheduler/Clock.zig");
 const Instant = scheduler.Instant;
 const Store = scheduler.Store;
@@ -183,6 +184,26 @@ pub fn list(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store
 
 pub fn history(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.HistoryRequest, options: Store.CallOptions) StoreError!scheduler.RunPage {
     return records.history(s, io, ctx, request, options);
+}
+
+/// One `findAndModify` per record, the oldest due first, by the index
+/// `scan`.
+pub fn claim(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.ClaimRequest, options: Store.CallOptions) StoreError!Store.ClaimResult {
+    return claims.claim(s, io, ctx, request, options);
+}
+
+pub fn renew(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.RenewRequest, options: Store.CallOptions) StoreError!Store.RenewResult {
+    return claims.renew(s, io, ctx, request, options);
+}
+
+pub fn finish(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.FinishRequest, options: Store.CallOptions) StoreError!Store.FinishResult {
+    return claims.finish(s, io, ctx, request, options);
+}
+
+/// The store behind the contract of zefir-scheduler, for its client and
+/// its worker. The store stays where it is from now on.
+pub fn store(s: *SchedulerStore) Store {
+    return .init(s);
 }
 
 /// The database of the collections, on the client.
