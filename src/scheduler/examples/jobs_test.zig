@@ -41,11 +41,11 @@ fn soon() std.Io.Clock.Timestamp {
 /// Waits until the billing service sent `n` invoices: a loop on the clock,
 /// 10 s at most.
 fn waitForInvoices(billing: *Invoices.Billing, n: usize) !void {
-    for (0..500) |_| {
-        if (billing.count(io) >= n) return;
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake });
+    while (billing.count(io) < n) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.TestTimedOut;
         try io.sleep(.fromMilliseconds(20), .awake);
     }
-    return error.TestTimedOut;
 }
 
 test "an invoice goes out once for each run key" {

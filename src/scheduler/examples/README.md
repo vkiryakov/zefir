@@ -2937,11 +2937,11 @@ fn soon() std.Io.Clock.Timestamp {
 /// Waits until the billing service sent `n` invoices: a loop on the clock,
 /// 10 s at most.
 fn waitForInvoices(billing: *Invoices.Billing, n: usize) !void {
-    for (0..500) |_| {
-        if (billing.count(io) >= n) return;
+    const deadline: std.Io.Clock.Timestamp = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake });
+    while (billing.count(io) < n) {
+        if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.TestTimedOut;
         try io.sleep(.fromMilliseconds(20), .awake);
     }
-    return error.TestTimedOut;
 }
 
 test "an invoice goes out once for each run key" {
@@ -3144,9 +3144,10 @@ test "a declaration that left the code is parked until it is removed" {
   takes longer, and still passes. A test stops its worker with `shutdown`
   before it reads what the store kept: then every run has written its
   outcome.
-- **A store that fails.** The worker logs a warning for each failure, so
-  the test lowers `std.testing.log_level` to `.err` around it; the test
-  runner would print the warnings, and they are what the test expects.
+- **A store that fails.** The worker warns at the first failure and once
+  more when the store answers again, so the test lowers
+  `std.testing.log_level` to `.err` around it; the test runner would
+  print the warnings, and they are what the test expects.
   The worker waits out the three failures with growing pauses, runs the
   job, and its counters show them.
 - **A lost reply.** `error.Unavailable` is of the class
