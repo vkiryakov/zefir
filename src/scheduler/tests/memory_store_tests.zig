@@ -761,35 +761,48 @@ test "history rows are unique by (life, fence) and the owner's row replaces aban
     try f.check();
 }
 
-test "keep_for sets expires_at; expired records and rows are gone and never claimed" {
-    var f: Fixture = .init(.{});
-    defer f.deinit();
-    const r = try f.running("a", "k", "w1", .fromSeconds(60));
-    const done = try f.store().finish(io, .root, &.{
-        .ref = .{ .job = "a", .key = "k" },
+/// The finish of the claim of `r` by "w1", succeeded: the record and the
+/// row of its run are kept for `keep`.
+fn finishKept(f: *Fixture, r: Record, keep: Io.Duration) !Store.FinishResult {
+    return f.store().finish(io, .root, &.{
+        .ref = .{ .job = r.job, .key = r.key },
         .life = r.life,
         .owner = "w1",
         .fence = r.fence,
         .revision = r.revision,
         .tag = @splat(4),
-        .next = .{ .done = .{ .state = .succeeded, .keep = .{ .keep_for = .fromMilliseconds(40) } } },
+        .next = .{ .done = .{ .state = .succeeded, .keep = .{ .keep_for = keep } } },
         .last = null,
-        .history = .{ .runs = &.{rowOf(r, .succeeded, null, "w1")}, .keep = .{ .keep_for = .fromMilliseconds(40) } },
+        .history = .{ .runs = &.{rowOf(r, .succeeded, null, "w1")}, .keep = .{ .keep_for = keep } },
     }, f.options());
-    try testing.expect(done == .done);
-    const kept = try f.get("a", "k");
-    const expires_at = kept.expires_at orelse return error.TestUnexpectedResult;
-    const finished_at = kept.finished_at orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(finished_at.add(.fromMilliseconds(40)), expires_at);
-    const rows = try f.history(.{});
-    try testing.expectEqual(@as(usize, 1), rows.len);
-    try testing.expectEqual(@as(?Instant, rows[0].finished_at.add(.fromMilliseconds(40))), rows[0].expires_at);
+}
 
-    try f.waitPast(expires_at);
-    try testing.expectEqual(@as(?Record, null), try f.store().get(io, .root, &.{ .job = "a", .key = "k" }, f.options()));
-    try testing.expectEqual(@as(usize, 0), (try f.history(.{})).len);
+test "keep_for sets expires_at; expired records and rows are gone and never claimed" {
+    var f: Fixture = .init(.{});
+    defer f.deinit();
+    // Kept for an hour: expires_at is finished_at and the hour, on the
+    // record and on the row.
+    const hour = try f.running("a", "hour", "w1", .fromSeconds(60));
+    try testing.expect(try finishKept(&f, hour, .fromSeconds(3600)) == .done);
+    const kept = try f.get("a", "hour");
+    const finished_at = kept.finished_at orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(?Instant, finished_at.add(.fromSeconds(3600))), kept.expires_at);
+    const rows = try f.history(.{ .key = "hour" });
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqual(@as(?Instant, rows[0].finished_at.add(.fromSeconds(3600))), rows[0].expires_at);
+
+    // Kept for 40 ms: once the store's clock is past the end of the finish
+    // and 40 ms, the record and its row are gone, and no claim takes the
+    // record. Nothing is read before they expire.
+    const brief = try f.running("a", "brief", "w1", .fromSeconds(60));
+    try testing.expect(try finishKept(&f, brief, .fromMilliseconds(40)) == .done);
+    try f.waitPast(f.now().add(.fromMilliseconds(40)));
+    try testing.expectEqual(@as(?Record, null), try f.store().get(io, .root, &.{ .job = "a", .key = "brief" }, f.options()));
+    try testing.expectEqual(@as(usize, 0), (try f.history(.{ .key = "brief" })).len);
     try testing.expectEqual(@as(usize, 0), (try f.claim("w1", &.{"a"}, &.{}, 5, .fromSeconds(60))).claimed.len);
-    try testing.expectEqual(@as(usize, 0), (try f.store().list(io, .root, &.{ .filter = .{}, .page = .{} }, f.options())).records.len);
+    const left = (try f.store().list(io, .root, &.{ .filter = .{}, .page = .{} }, f.options())).records;
+    try testing.expectEqual(@as(usize, 1), left.len);
+    try testing.expectEqualStrings("hour", left[0].key);
     try f.check();
 }
 
