@@ -157,4 +157,8 @@ test {
     testing.refAllDecls(@This());
     _ = @import("conformance.zig");
     _ = @import("explain.zig");
+    _ = @import("declared.zig");
+    _ = @import("instances.zig");
+    _ = @import("takeover.zig");
+    _ = @import("kill.zig");
 }

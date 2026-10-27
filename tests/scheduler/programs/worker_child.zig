@@ -1,0 +1,78 @@
+//! A worker in a process of its own, which the test of a killed instance
+//! (e2e/kill.zig) starts and kills: on zio, it runs the job `e2e-kill` of
+//! a database, notes the start of each run in the collection `effects`,
+//! and holds the run until the process ends.
+//!
+//! Settings, from the environment:
+//!
+//!   SCHEDULER_E2E_URI        the connection string of mongod
+//!   SCHEDULER_E2E_DATABASE   the database of the store and of `effects`
+
+const std = @import("std");
+const zio = @import("zio");
+const core = @import("core");
+const scheduler = @import("scheduler");
+const mongo = @import("mongo");
+const bson = @import("mongo-bson");
+
+/// A panic prints its message and exits with code 3 instead of aborting.
+pub const panic = std.debug.FullPanic(exitOnPanic);
+
+/// On stderr, as the tests' own log.
+pub const std_options: std.Options = .{ .log_level = .warn };
+
+fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
+    std.debug.print("panic: {s}\n", .{message});
+    std.process.exit(3);
+}
+
+/// The job of the test, as e2e/kill.zig knows it too: a run notes its
+/// start, then holds.
+const Kill = struct {
+    effects: mongo.Collection,
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "e2e-kill", .history = .forever };
+
+    pub fn run(self: *Kill, ctx: *scheduler.Context) !void {
+        const io = ctx.io();
+        const info = ctx.info();
+        const start = std.Io.Clock.real.now(io).toMilliseconds();
+        _ = try self.effects.insertOne(io, .of(ctx.operation()), .{
+            .job = info.job,
+            .key = info.key,
+            .instance = info.instance,
+            .attempt = @as(i64, info.attempt),
+            .fence = @as(i64, @intCast(info.fence)),
+            .start = start,
+            .end = start,
+        }, .{ .allocator = ctx.allocator() });
+        while (true) try io.sleep(.fromSeconds(1), .awake);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const uri = init.environ_map.get("SCHEDULER_E2E_URI") orelse return error.NoUri;
+    const database = init.environ_map.get("SCHEDULER_E2E_DATABASE") orelse return error.NoDatabase;
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .exact(2) });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: mongo.Client = try .init(init.gpa, io, .{ .uri = uri });
+    defer client.deinit();
+    try client.connect(io, core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromSeconds(30))), null);
+    var store: mongo.SchedulerStore = try .init(init.gpa, io, &client, .{ .database = database });
+    defer store.deinit();
+    var ids: bson.ObjectId.Generator = .init(io);
+    var kill: Kill = .{ .effects = mongo.Database.init(&client, database, &ids).collection("effects") };
+    // The times of the tests: a lease of 3 s, renewed every second.
+    var worker: scheduler.Worker(struct { kill: *Kill }) = try .init(init.gpa, io, store.store(), .{ .kill = &kill }, .{
+        .workers = 1,
+        .lease = .fromSeconds(3),
+        .renew_every = .fromSeconds(1),
+        .poll_every = .fromMilliseconds(100),
+        .store_timeout = .fromSeconds(1),
+        .instance = "child",
+    });
+    defer worker.deinit(io);
+    try worker.run(io);
+}

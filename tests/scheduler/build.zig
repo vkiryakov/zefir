@@ -1,11 +1,15 @@
 //! The end-to-end tests of zefir-scheduler against real mongod servers, on
-//! zio: the conformance suite on `mongo.SchedulerStore`. The servers are
+//! zio: the conformance suite on `mongo.SchedulerStore`, also through a
+//! proxy that loses replies, the plan of a claim, and workers in several
+//! instances, one of them in a process of its own that the tests kill,
+//! through faults of the network and of the servers. The servers are
 //! mongo-plain, mongo-stall and mongo-restart, of the profile `mongo` of
 //! docker-compose.yml at the repository root.
 //!
 //!   zig build e2e     start the servers, run the tests
-//!   zig build check   build the tests without running them; no servers
-//!                     needed, so CI runs it on every system
+//!   zig build check   build the tests and the program they start without
+//!                     running them; no servers needed, so CI runs it on
+//!                     every system
 //!   zig build up      only start the servers; it also unpauses
 //!                     mongo-stall, which a run that died in the middle of
 //!                     a test leaves paused
@@ -50,20 +54,36 @@ pub fn build(b: *std.Build) void {
     const down = compose(b, compose_file, &.{"down"});
     b.step("down", "Stop mongo-plain, mongo-stall and mongo-restart").dependOn(&down.step);
 
-    const e2e = b.addTest(.{
-        .name = "e2e",
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = zefir.module("zefir-core") },
+        .{ .name = "scheduler", .module = zefir.module("zefir-scheduler") },
+        .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+        .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+        .{ .name = "zio", .module = zio.module("zio") },
+    };
+    // The worker that a test starts in a process of its own and kills: its
+    // path goes to the tests.
+    const child = b.addExecutable(.{
+        .name = "worker_child",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("e2e/root.zig"),
+            .root_source_file = b.path("programs/worker_child.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "core", .module = zefir.module("zefir-core") },
-                .{ .name = "scheduler", .module = zefir.module("zefir-scheduler") },
-                .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
-                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
-                .{ .name = "zio", .module = zio.module("zio") },
-            },
+            .imports = imports,
         }),
+    });
+    const programs = b.addOptions();
+    programs.addOptionPath("worker_child", child.getEmittedBin());
+    const e2e_module = b.createModule(.{
+        .root_source_file = b.path("e2e/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    e2e_module.addImport("programs", programs.createModule());
+    const e2e = b.addTest(.{
+        .name = "e2e",
+        .root_module = e2e_module,
         // One line per test; a panic exits with code 3 instead of aborting.
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
@@ -73,7 +93,7 @@ pub fn build(b: *std.Build) void {
     run.stdio = .inherit;
     run.step.dependOn(&up.step);
     b.step("e2e", "Run the end-to-end tests against the mongod servers").dependOn(&run.step);
-    b.step("check", "Build the tests without running them").dependOn(&e2e.step);
+    b.step("check", "Build the tests and the program they start without running them").dependOn(&e2e.step);
 }
 
 /// `docker compose --profile mongo <args> <services>`, so that only the
