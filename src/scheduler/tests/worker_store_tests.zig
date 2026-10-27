@@ -102,6 +102,45 @@ test "a finish that fails is repeated until it goes through" {
     try testing.expectEqual(@as(u32, 1), f.faulty.calls(io, .finish));
 }
 
+const Timed = Job(.{ .name = "timed", .timeout = .fromSeconds(2), .retry = .{ .attempts = 1 } });
+
+/// A run held 10 s whose first renewal, a second after its claim, hangs
+/// until its deadline; the lease of 30 s leaves the renewal its whole
+/// `store_timeout`, 5 s, unless the timeout of the job or the end of the
+/// grace of a stop comes first.
+fn renewalHangs(cut: enum { timeout, grace }) !void {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{ .hold = .fromSeconds(10) };
+    var lossy: Lossy = .{ .probe = &probe };
+    var timed: Timed = .{ .probe = &probe };
+    switch (cut) {
+        .timeout => try f.schedule(Timed, "x", .{ .after = .zero }),
+        .grace => try f.schedule(Lossy, "x", .{ .after = .zero }),
+    }
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var options = quick;
+    options.lease = .fromSeconds(30);
+    options.shutdown_grace = .fromMilliseconds(1500);
+    var w: scheduler.Worker(struct { lossy: *Lossy, timed: *Timed }) = try .init(testing.allocator, io, f.store(), .{ .lossy = &lossy, .timed = &timed }, options);
+    defer w.deinit(io);
+    try w.start(io);
+    try reach(&probe.runs, 1, 5);
+    f.faulty.stallNext(io, .renew, .fromSeconds(10));
+    if (cut == .grace) w.requestStop(io);
+    try reach(&probe.ended, 1, 10);
+    // Cancelled at 2 s or 1.5 s, not once the renewal gave up at 6 s.
+    try testing.expectEqual(@as(u32, 1), probe.cancelled.load(.acquire));
+    try testing.expect(probe.stopped.load(.acquire) - probe.started.load(.acquire) < 4000);
+}
+
+test "a renewal that hangs ends at the timeout of its run or at the end of the grace" {
+    try renewalHangs(.timeout);
+    try renewalHangs(.grace);
+}
+
 test "wait returns no store errors" {
     var f: Fixture = undefined;
     f.init();

@@ -144,7 +144,7 @@ fn run(s: *Slot, entry: *const Engine.Entry, r: *const record.Record, payload: *
         const grace = e.graceEnd(io);
         if (grace) |g| if (awake >= g) break .{ .interrupted = .shutdown };
         if (boot >= renew_at) {
-            switch (s.renew(r, local)) {
+            switch (s.renew(r, local, grace, timeout)) {
                 .renewed => |t| {
                     confirmed = t;
                     renew_at = t +| o.renew_every.nanoseconds;
@@ -217,14 +217,19 @@ fn run(s: *Slot, entry: *const Engine.Entry, r: *const record.Record, payload: *
 
 const Renewed = union(enum) { renewed: i96, failed, lost, removed };
 
-/// One renewal, which waits no longer than the local deadline `local`.
-fn renew(s: *Slot, r: *const record.Record, local: i96) Renewed {
+/// One renewal, with the context of a call of the store that ends no later
+/// than the local deadline `local` (boot clock), the end of the grace and
+/// the timeout of the run (awake clock): the slot looks at them only once
+/// it returned.
+fn renew(s: *Slot, r: *const record.Record, local: i96, grace: ?i96, timeout: ?i96) Renewed {
     const e = s.engine;
     const io = e.io;
     defer _ = s.calls.reset(.retain_capacity);
     const t = Io.Clock.boot.now(io).nanoseconds;
-    const budget: Io.Duration = .fromNanoseconds(@min(local -| t, e.options.store_timeout.nanoseconds));
-    const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), budget));
+    var until = Io.Clock.awake.now(io).nanoseconds +| (local -| t);
+    if (grace) |g| until = @min(until, g);
+    if (timeout) |x| until = @min(until, x);
+    const ctx = e.callContext(io).withDeadline(.at(.{ .nanoseconds = until }));
     var d: Diagnostics = .{};
     const request: Store.RenewRequest = .{ .ref = .{ .job = r.job, .key = r.key }, .life = r.life, .owner = e.instance, .fence = r.fence, .lease = e.options.lease };
     const result = e.tally(io, .renew, e.store.renew(io, ctx, &request, .{ .allocator = s.calls.allocator(), .diagnostics = &d }), &d) catch return .failed;
