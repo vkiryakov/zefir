@@ -330,8 +330,18 @@ must be present is not optional, and there is no `required` rule. `""` is a
 value: `v.notEmpty` fails it.
 
 ```zig
+const Address = struct {
+    city: []const u8,
+    zip: []const u8,
+
+    pub const field_rules = .{
+        .city = v.notBlank,
+        .zip = .{ v.length(5, 5), v.digits },
+    };
+};
+
 const Checkout = struct {
-    billing: ?Address = null, // the Address of Getting started
+    billing: ?Address = null, // its rules run when it is there
     tip_percent: ?u8 = null,
     coupon: ?[]const u8 = null,
 
@@ -413,15 +423,17 @@ union or an opaque type that the walk reaches, they are a compile error too.
 
 ### Reusing rules
 
-Rules are compile-time values, so a project declares its own once:
+Rules are compile-time values, so a project declares its own once, in a
+file of rules such as this `rules.zig`:
 
 ```zig
-// rules.zig
 const v = @import("validator");
 
 pub const quantity = .{ v.positive, v.max(1000) }; // a tuple
 pub const sku: v.Rule = v.notEmpty; // one rule
 ```
+
+A DTO imports the file and uses its rules as entries, or as parts of them:
 
 ```zig
 const v = @import("validator");
@@ -740,20 +752,19 @@ panic in Debug, `validation.invalid` in the other modes.
 
 `v.rename` reaches JSON only through a codec: the code that reads a struct
 from JSON, a query string or a form and writes it back. The codec takes the
-outside names from the validator with `v.nameOf` and `v.fieldNamed`:
+outside names from the validator with two functions:
 
-```zig
-pub fn nameOf(comptime T: type, comptime field: std.meta.FieldEnum(T)) []const u8
-pub fn fieldNamed(comptime T: type, name: []const u8) ?std.meta.FieldEnum(T)
-```
-
-- `v.nameOf(T, .tracking_number)` is `"trackingNumber"`: the name that the
-  entry gives the field with `v.rename`, or else its Zig name. It works for any
-  struct, with `field_rules` or without, and it is known at compile time.
+- `v.nameOf(T, field)` takes a struct type and a tag of
+  `std.meta.FieldEnum(T)`, both known at compile time, and returns the
+  field's outside name, a `[]const u8`: `v.nameOf(T, .tracking_number)` is
+  `"trackingNumber"`, the name that the entry gives the field with
+  `v.rename`, or else its Zig name. It works for any struct, with
+  `field_rules` or without.
 - `v.fieldNamed(T, key)` goes the other way, for the keys that a decoder
-  reads: the field, or `null` for a key that names none. It works at run time,
-  from a table built at compile time. A renamed field is found by its outside
-  name only, never by its Zig name.
+  reads: it takes a `[]const u8` and returns the field, a
+  `?std.meta.FieldEnum(T)`, or `null` for a key that names none. It works at
+  run time, from a table built at compile time. A renamed field is found by
+  its outside name only, never by its Zig name.
 
 This test shows a small codec of your own:
 
@@ -902,12 +913,9 @@ What each of them allocates is in [Memory](#memory).
 ### v.transformWith
 
 `v.transformWith(f)` runs a function of your own. `f` takes the allocator and
-the value and returns the new value:
-
-```zig
-fn (allocator: std.mem.Allocator, value: T) E!T // or, when it cannot fail:
-fn (allocator: std.mem.Allocator, value: T) T
-```
+the value and returns the new value: it is a
+`fn (allocator: std.mem.Allocator, value: T) E!T`, or a
+`fn (allocator: std.mem.Allocator, value: T) T` when it cannot fail.
 
 `T` is exactly the field type without `?`, and inside `v.each` the item type
 without `?`. Any type works, not only strings: on a `u32` field,
@@ -943,8 +951,19 @@ fn sortTags(allocator: std.mem.Allocator, tags: []const []const u8) std.mem.Allo
     return copy;
 }
 
-// .tags = .{ v.transformWith(sortTags), v.maxItems(5), v.each(.{ v.trim, v.toLower }) },
+const Post = struct {
+    tags: []const []const u8,
+
+    pub const field_rules = .{
+        .tags = .{ v.transformWith(sortTags), v.maxItems(5), v.each(.{ v.trim, v.toLower }) },
+    };
+};
 ```
+
+`.{ .tags = &.{ " zig", "Ada" } }` becomes `.{ .tags = &.{ "ada", "zig" } }`:
+sorted before the transforms of its items, `" zig"` would have stayed first,
+since a space sorts before a letter. A list whose items are already trimmed,
+lowercased and sorted stays the same slice: nothing is copied.
 
 When `f` fails:
 
@@ -959,7 +978,9 @@ When `f` fails:
   `fn toCents(_: std.mem.Allocator, euros: u32) error{Overflow}!u32` would add
   `Overflow`.
 
-The handler decides what each error means:
+So the handler of an order whose `amount` has `v.transformWith(toCents)`
+decides what each error means, and its `switch` compiles only while it names
+every error of the set:
 
 ```zig
 v.transform(arena.allocator(), &order) catch |err| switch (err) {
@@ -1261,12 +1282,10 @@ name — and a malformed one is a programmer error:
 
 ## v.custom
 
-```zig
-pub fn custom(comptime code: []const u8, comptime message: []const u8, comptime f: anytype) v.Rule
-```
-
-A rule with your own predicate: it passes when `f` returns `true`; otherwise the
-violation has your code and message.
+`v.custom(code, message, f)` is a rule with your own predicate: it passes when
+`f` returns `true`; otherwise the violation has your code and message. All
+three are known at compile time, `code` and `message` as strings and `f` as a
+function, and the call returns a `v.Rule`, like any built-in rule.
 
 ```zig
 fn startsWithAt(s: []const u8) bool {
@@ -1364,14 +1383,10 @@ chooses the singular or the plural (`must have at least 1 item`,
 
 ### .withMessage
 
-```zig
-pub fn withMessage(comptime rule: v.Rule, comptime template: []const u8) v.Rule
-```
-
-`rule.withMessage(template)` returns a copy of the rule with another message;
-the code stays. The template must be known at compile time (a literal, a
-`const`, or `++` of them): the compiler fills in the placeholders, and the rule
-keeps the result as a static string.
+`rule.withMessage(template)`, a method of `v.Rule`, returns a copy of the rule
+with another message; the code stays. The template is a `[]const u8` that must
+be known at compile time (a literal, a `const`, or `++` of them): the compiler
+fills in the placeholders, and the rule keeps the result as a static string.
 
 ```zig
 const std = @import("std");
@@ -1638,41 +1653,38 @@ never sees a NaN, nor `v.maxLength` invalid UTF-8.
 
 ### v.Violation
 
-```zig
-pub const Violation = struct {
-    code: []const u8,
-    message: []const u8,
-    field: ?[]const u8 = null,
-};
-```
+A violation is a `v.Violation`, a struct of three fields:
 
-- `code`: `validation.<kind>` for a built-in rule (`validation.not_empty`), a
-  precondition's code (`validation.finite`), `validation.invalid` for a
-  malformed `validateSelf` result outside Debug builds, or the `code` of
-  `v.custom` and `v.fail`. Codes are part of the [compatibility](#compatibility)
-  contract: branch on them, send them to clients, translate by them.
-- `message`: what the value must be, without the field name: a built-in English
-  message such as `must not be empty`, or your own from `.withMessage`,
-  `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
-- `field`: the path of the value from the root: `email`, `address.city`,
-  `items[2].name`, `[1].email` for a slice root. Fields appear by their
-  outside names: `speakers[1].displayName` for a field renamed with
-  `v.rename("displayName")`. `null` means the root value itself or, for `check`
-  only, a path that did not fit `path_buf`. In the result of `v.fail` or a
-  hand-built `validateSelf` result, it is the Zig name of a field of that
-  struct instead (`display_name`), which the walk turns into the field's path.
+- `code: []const u8`: `validation.<kind>` for a built-in rule
+  (`validation.not_empty`), a precondition's code (`validation.finite`),
+  `validation.invalid` for a malformed `validateSelf` result outside Debug
+  builds, or the `code` of `v.custom` and `v.fail`. Codes are part of the
+  [compatibility](#compatibility) contract: branch on them, send them to
+  clients, translate by them.
+- `message: []const u8`: what the value must be, without the field name: a
+  built-in English message such as `must not be empty`, or your own from
+  `.withMessage`, `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
+- `field: ?[]const u8 = null`: the path of the value from the root: `email`,
+  `address.city`, `items[2].name`, `[1].email` for a slice root. Fields
+  appear by their outside names: `speakers[1].displayName` for a field
+  renamed with `v.rename("displayName")`. `null` means the root value itself
+  or, for `check` only, a path that did not fit `path_buf`. In the result of
+  `v.fail` or a hand-built `validateSelf` result, it is the Zig name of a
+  field of that struct instead (`display_name`), which the walk turns into
+  the field's path.
 
 ### v.check
 
-```zig
-pub fn check(value: anytype, path_buf: []u8) ?v.Violation
-```
+`v.check(value, path_buf)` takes a pointer to the value (`anytype`) and the
+room for the path (`[]u8`), and returns `?v.Violation`. The program at the top
+of this guide calls it so:
 
 ```zig
+// v.check allocates no memory, so it needs room from you to write the path
+// of the field that failed, such as "seats"; violation.field points into it.
 var path_buf: [256]u8 = undefined;
 if (v.check(&request, &path_buf)) |violation| {
-    // violation.code, violation.message, violation.field: ?[]const u8
-    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+    logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
 ```
 
@@ -1692,23 +1704,24 @@ if (v.check(&request, &path_buf)) |violation| {
 
 ### v.checkAll and Report
 
-```zig
-pub fn checkAll(gpa: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!v.Report
-```
+`v.checkAll(gpa, value)` takes an allocator (`std.mem.Allocator`) and a
+pointer to the value, and returns a `v.Report`, or `error.OutOfMemory`. A
+report holds `violations: []const v.Violation` and `truncated: bool`. The
+program of [validateSelf and v.fail](#validateself-and-vfail) logs them all:
 
 ```zig
-const report = try v.checkAll(gpa, &request);
+const report = try v.checkAll(init.gpa, &trip);
 defer report.deinit();
 for (report.violations) |violation| {
-    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+    logger.warn("Invalid trip", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
-if (report.truncated) logger.warn("More violations not reported", .{ .reported = report.violations.len });
 ```
 
 - `violations` are in walk order, at most one per value and at most 100
   (`v.max_report_violations`) in all; `truncated` is `true` exactly when there
-  was a 101st. The first violation equals the result of `check` (its `field`
-  too, when the path fits `path_buf`).
+  was a 101st, so a program that logs the violations or sends them to a
+  client says then that there were more. The first violation equals the
+  result of `check` (its `field` too, when the path fits `path_buf`).
 - The report owns its memory, like `std.json.Parsed`: one arena from `gpa`
   holds the list and every path, and paths have no length limit. Call `deinit`
   exactly once after every successful call, even for a valid value. After it
@@ -1727,14 +1740,6 @@ values at once, the same value included, when:
 - `v.custom` functions and `validateSelf` are pure, as they must be anyway.
 
 ### Violation
-
-```zig
-pub const Violation = struct {
-    code: []const u8,
-    message: []const u8,
-    field: ?[]const u8 = null,
-};
-```
 
 | Field | Content |
 | --- | --- |
@@ -1846,19 +1851,28 @@ test "CreateUserRequest rejects an invalid email" {
   the loop: `inline for (.{ CreateUserRequest, User }) |Dto| comptime v.assertRules(Dto);`.
 - `assertRules` cannot see a private `field_rules` and does not run the rules.
   The second test, a value that must fail, catches both.
-- For a DTO with transforms, a test of a value runs `v.transform` before
-  `v.check`, as a handler does:
 
-  ```zig
-  test "SignUp accepts an email with spaces around it" {
-      var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-      defer arena.deinit();
-      var req: SignUp = .{ .email = " Ada@Example.COM " }; // .email = .{ v.trim, v.toLower, v.email }
-      try v.transform(arena.allocator(), &req);
-      var path_buf: [256]u8 = undefined;
-      try std.testing.expectEqual(null, v.check(&req, &path_buf));
-  }
-  ```
+For a DTO with transforms, a test of a value runs `v.transform` before
+`v.check`, as a handler does:
+
+```zig
+const SignUp = struct {
+    email: []const u8,
+
+    pub const field_rules = .{
+        .email = .{ v.trim, v.toLower, v.email },
+    };
+};
+
+test "SignUp accepts an email with spaces around it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var req: SignUp = .{ .email = " Ada@Example.COM " };
+    try v.transform(arena.allocator(), &req);
+    var path_buf: [256]u8 = undefined;
+    try std.testing.expectEqual(null, v.check(&req, &path_buf));
+}
+```
 
 ## Compile errors
 
