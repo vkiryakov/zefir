@@ -255,6 +255,76 @@ test "S17 fails a claim that gives a record twice after a lost reply" {
     try testing.expectEqualStrings("a claim with its reply lost gave s17-three/t1 twice", try failedWhy(report.outcome(.s17)));
 }
 
+/// A MemoryStore whose history reads as if an `abandoned` row replaced the
+/// row of its claim whenever it came last, the owner's row too; a row of
+/// the owner that comes after it replaces it again.
+const AbandonedLastHarness = struct {
+    memory: MemoryStore = undefined,
+    vtable: Store.VTable = undefined,
+    /// The claims whose last row was abandoned.
+    claims: [16]Claim = undefined,
+    len: usize = 0,
+
+    const Claim = struct { life: scheduler.Life, fence: u64 };
+
+    pub fn setUp(h: *AbandonedLastHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        h.vtable = h.memory.store().vtable.*;
+        h.vtable.name = "abandoned-last";
+        h.vtable.finish = finish;
+        h.vtable.history = history;
+        h.len = 0;
+        return .{ .store = .{ .ptr = &h.memory, .vtable = &h.vtable }, .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *AbandonedLastHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+
+    fn find(h: *const AbandonedLastHarness, life: scheduler.Life, fence: u64) ?usize {
+        for (h.claims[0..h.len], 0..) |c, i| {
+            if (std.mem.eql(u8, &c.life, &life) and c.fence == fence) return i;
+        }
+        return null;
+    }
+
+    fn finish(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.FinishRequest, options: Store.CallOptions) scheduler.StoreError!Store.FinishResult {
+        const h: *AbandonedLastHarness = @fieldParentPtr("memory", memoryOf(ptr));
+        if (request.history.keep != .none) for (request.history.runs) |run| {
+            const at = h.find(run.life, run.fence);
+            if (run.outcome == .abandoned) {
+                if (at == null and h.len < h.claims.len) {
+                    h.claims[h.len] = .{ .life = run.life, .fence = run.fence };
+                    h.len += 1;
+                }
+            } else if (at) |i| {
+                h.claims[i] = h.claims[h.len - 1];
+                h.len -= 1;
+            }
+        };
+        return memoryOf(ptr).finish(io, ctx, request, options);
+    }
+
+    fn history(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.HistoryRequest, options: Store.CallOptions) scheduler.StoreError!scheduler.RunPage {
+        const h: *AbandonedLastHarness = @fieldParentPtr("memory", memoryOf(ptr));
+        const page = try memoryOf(ptr).history(io, ctx, request, options);
+        const runs = try options.allocator.dupe(scheduler.Run, page.runs);
+        for (runs) |*run| {
+            if (h.find(run.life, run.fence) != null) run.outcome = .abandoned;
+        }
+        return .{ .runs = runs, .next = page.next };
+    }
+};
+
+test "S12 fails a store whose abandoned row replaces the owner's" {
+    var harness: AbandonedLastHarness = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s12} });
+    defer report.deinit();
+    try testing.expectEqualStrings("the row of fence 1 is abandoned of s12-w1, not the owner's succeeded one", try failedWhy(report.outcome(.s12)));
+}
+
 /// A get that sleeps 10 s first: S3, which starts with one, cannot end in
 /// time.
 fn sleepyGet(vtable: *Store.VTable) void {

@@ -134,11 +134,15 @@ pub fn s12(r: *Runner) Error!void {
     other_job.life = r.newLife();
     other_job.tenant = "acme";
     // The same row again is one row; the owner's row replaces the abandoned
-    // one of its (life, fence), and no row replaces the owner's.
+    // one of its (life, fence), and no row replaces the owner's: neither an
+    // abandoned one after it, as the instance that took over writes it when
+    // the late owner wrote first, nor another of the owner.
     try writeRows(r, &.{abandoned});
     try writeRows(r, &.{abandoned});
     try writeRows(r, &.{own});
+    try writeRows(r, &.{abandoned});
     try writeRows(r, &.{Runner.rowOf(run, .failed, "Declined", "s12-w1")});
+    try writeRows(r, &.{abandoned});
     try writeRows(r, &.{ skipped, other_key });
     try writeRows(r, &.{other_job});
     const of_key = try r.historyAll(.{ .job = job, .key = "k1" }, 2);
