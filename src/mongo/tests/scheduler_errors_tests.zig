@@ -449,3 +449,94 @@ test "a write that ran without its write concern gives what its reply says it di
         "aggregate", "findAndModify", "findAndModify", "findAndModify", "find",
     });
 }
+
+/// What a record "send/k1" may be when a finish of the claim of "w1" with
+/// fence 1 at revision 0 reads it again after a lost reply.
+const After = struct {
+    life: []const u8 = fixture.life_hex,
+    state: scheduler.State,
+    fence: i64,
+    revision: i64 = 0,
+    /// The mark of the write that left the record so.
+    tag: []const u8,
+    /// Running: the claim of "w2" took over the claim of "w1".
+    took_over: bool = false,
+};
+
+/// The record of `after`; a running one has the claim of "w2".
+fn afterDoc(a: std.mem.Allocator, after: After) !bson.RawDocument {
+    var b: bson.Builder = .init(a);
+    try b.putString("_id", "send/k1");
+    try b.putString("job", "send");
+    try b.putString("key", "k1");
+    try b.putString("life", after.life);
+    try b.putString("plan", "");
+    try b.putString("payload", "{}");
+    try b.putString("state", @tagName(after.state));
+    try b.putDateTime("scheduled_at", .{ .milliseconds = 1_793_000_000_000 });
+    try b.putInt32("attempt", if (after.state == .running) 1 else 0);
+    try b.putInt64("fence", after.fence);
+    try b.putInt64("revision", after.revision);
+    try b.putString("tag", after.tag);
+    switch (after.state) {
+        .running => {
+            try b.putString("owner", "w2");
+            try b.putDateTime("claimed_at", .{ .milliseconds = 1_793_000_005_000 });
+            try b.putDateTime("lease_until", .{ .milliseconds = 1_793_000_065_000 });
+            if (after.took_over) try b.put("prev", .{
+                .owner = "w1",
+                .claimed_at = bson.DateTime{ .milliseconds = 1_793_000_001_000 },
+                .attempt = @as(i32, 1),
+                .scheduled_at = bson.DateTime{ .milliseconds = 1_793_000_000_000 },
+            });
+        },
+        .pending, .paused => try b.putDateTime("run_at", .{ .milliseconds = 1_793_000_000_000 }),
+        .succeeded, .failed => try b.putDateTime("finished_at", .{ .milliseconds = 1_793_000_009_000 }),
+    }
+    try b.putDateTime("created_at", .{ .milliseconds = 1_792_999_000_000 });
+    try b.putDateTime("updated_at", .{ .milliseconds = 1_792_999_000_000 });
+    return (try b.finish()).raw();
+}
+
+test "after a lost reply, finish answers lost only when its transition cannot have applied" {
+    var f: Fixture = .{};
+    const a = f.a();
+    const claim_tag = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd-1";
+    const other_tag = "efefefefefefefefefefefefefefefef";
+    // The transition made the record due, and a claim of "w2" took it
+    // before the store read it: one fence on, no claim taken over.
+    const claimed_after = try afterDoc(a, .{ .state = .running, .fence = 2, .tag = claim_tag });
+    // The claim one fence on took over the claim of "w1", still running:
+    // the transition had not applied, and its condition holds no more.
+    const taken_over = try afterDoc(a, .{ .state = .running, .fence = 2, .tag = claim_tag, .took_over = true });
+    // The transition applied, and a change of the client wrote its tag.
+    const changed_after = try afterDoc(a, .{ .state = .pending, .fence = 1, .revision = 1, .tag = other_tag });
+    // The next claim ran the record and finished it.
+    const finished_after = try afterDoc(a, .{ .state = .succeeded, .fence = 2, .tag = other_tag });
+    // A cancel, and the key made again since.
+    const reborn = try afterDoc(a, .{ .life = other_life_hex, .state = .pending, .fence = 0, .tag = other_tag });
+    try f.start(&.{
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{claimed_after}) },
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{taken_over}) },
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{changed_after}) },
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{finished_after}) },
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{reborn}) },
+        // A cancel: no record.
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{}) },
+    });
+    defer f.stop();
+    const finish = finishOf(.{ .wait = .{ .state = .pending, .run_at = .{ .after = .zero }, .scheduled_at = null, .attempt = 0 } });
+
+    // The store cannot tell its transition, which a claim, a change or a
+    // cancel came after, from one that never applied.
+    try testing.expectError(error.OutcomeUnknown, f.store.finish(io, fixture.no_deadline, &finish, f.call()));
+    try expectClean(&f);
+    try afterProbe();
+    try testing.expectEqual(Store.FinishResult.lost, try f.store.finish(io, fixture.no_deadline, &finish, f.call()));
+    try afterProbe();
+    for (0..4) |_| {
+        try testing.expectError(error.OutcomeUnknown, f.store.finish(io, fixture.no_deadline, &finish, f.call()));
+        try afterProbe();
+    }
+    try f.expectCommands(&.{ "update", "find", "update", "find", "update", "find", "update", "find", "update", "find", "update", "find" });
+}

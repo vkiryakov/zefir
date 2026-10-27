@@ -319,8 +319,13 @@ pub fn finish(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     return .{ .changed = try documents.recordOut(c.out, &now.record) };
 }
 
-/// Our tag: applied; no record after a `delete`: done (A48); our claim at
-/// its revision: not applied; else another claim or a change came first.
+/// Our tag: applied; no record after a `delete`: done (A48); still our
+/// claim: not applied, and at another revision it never will (changed);
+/// taken over from our claim while it ran: not applied, and its condition
+/// holds no more (lost). Else the transition may have applied and a claim,
+/// a change or a cancel come since without a mark of it, which the store
+/// cannot tell from a transition that never applied: unknown, and the
+/// worker sends it again.
 fn finishLost(c: *Call, id: []const u8, request: *const Store.FinishRequest, err: mongo.Error) StoreError!Store.FinishResult {
     switch (Call.classOf(err)) {
         .not_sent => return c.nothing(err),
@@ -329,7 +334,7 @@ fn finishLost(c: *Call, id: []const u8, request: *const Store.FinishRequest, err
     }
     var md: mongo.Diagnostics = .{};
     const now = (c.read(id, &md) catch |e| return c.unknown(err, e)) orelse {
-        if (request.next != .delete) return .lost;
+        if (request.next != .delete) return c.unknownSince(err);
         c.ran(err);
         return .done;
     };
@@ -337,14 +342,25 @@ fn finishLost(c: *Call, id: []const u8, request: *const Store.FinishRequest, err
         c.ran(err);
         return .done;
     }
-    if (!ours(now.record, request)) return .lost;
-    if (now.record.revision != request.revision) return .{ .changed = try documents.recordOut(c.out, &now.record) };
-    return if (Call.classOf(err) == .answered) c.refused(err) else c.unknown(err, null);
+    if (ours(now.record, request)) {
+        if (now.record.revision != request.revision) return .{ .changed = try documents.recordOut(c.out, &now.record) };
+        return if (Call.classOf(err) == .answered) c.refused(err) else c.unknown(err, null);
+    }
+    if (tookOver(now, request)) return .lost;
+    return c.unknownSince(err);
 }
 
 /// The record is running under the claim of `request`.
 fn ours(r: scheduler.Record, request: *const Store.FinishRequest) bool {
     return r.state == .running and r.fence == request.fence and std.mem.eql(u8, &r.life, &request.life) and std.mem.eql(u8, r.owner orelse "", request.owner);
+}
+
+/// The record runs under the claim one fence past that of `request`, and
+/// that claim took over the claim of `request`: the record was still
+/// running under it then, as only a takeover keeps `prev`.
+fn tookOver(now: documents.Read, request: *const Store.FinishRequest) bool {
+    const over = now.took_over orelse return false;
+    return now.record.state == .running and now.record.fence == request.fence + 1 and std.mem.eql(u8, &now.record.life, &request.life) and std.mem.eql(u8, over.owner, request.owner);
 }
 
 /// `[{$set: …}, {$unset: […]}]` of a transition: the new state with its
