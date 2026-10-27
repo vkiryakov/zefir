@@ -638,6 +638,15 @@ and day of the week, or 6 with the seconds first; the time is UTC.
 - A field is `*`, a value `a`, a range `a-b`, a list `a,b,c`, or a step
   `*/n` or `a-b/n`. The months and the days of the week take their names
   in any case, `JAN`–`DEC` and `SUN`–`SAT`; Sunday is 0 and 7.
+- **A range goes up**, from its first value to its second, and does not
+  wrap round the end of its field. A range that goes down is an error
+  that names the line it means: the hours `22-2` are `22-23,0-2`, and
+  the weekend, since Sunday is 7 too, is `SAT-7`:
+
+  ```text
+  error: scheduler: cron "0 0 * * SAT-SUN": field 5, the day of the week, "SAT-SUN": a range goes up, and Sunday is 7 too: write SAT-7
+  ```
+
 - The macros are `@yearly` (or `@annually`), `@monthly`, `@weekly`,
   `@daily` (or `@midnight`) and `@hourly`.
 - **The two day fields.** When neither the day of the month nor the day
