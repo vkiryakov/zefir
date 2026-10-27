@@ -82,10 +82,11 @@ pub const vector_files = [_]VectorFile{
 /// (`records` null) must pass, and a program must log `records`. A program
 /// logs with zefir-log as text, one line per record, and each line starts
 /// with a timestamp, the only part that changes from run to run: `records`
-/// holds the lines without it. build.zig checks that stdout has each line of
-/// `records` after a timestamp, and README.md must show each file verbatim
-/// and a run of each program, `$ zig build run` and its records with sample
-/// timestamps (readme_test.zig).
+/// holds the lines without it. runs_test.zig checks that the stdout of a
+/// program is the lines of `records`, each after a timestamp, and nothing
+/// else, and README.md must show each file verbatim and a run of each
+/// program, `$ zig build run` and its records with sample timestamps
+/// (readme_test.zig).
 pub const Example = struct { name: []const u8, records: ?[]const u8 = null };
 
 pub const examples = [_]Example{

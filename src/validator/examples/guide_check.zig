@@ -1,8 +1,10 @@
 //! Checks of the guide of zefir-validator against its examples: that a page
 //! of the guide shows a file as it is, and no Zig code that is not a part
-//! of its examples. readme_test.zig runs them. Every function compares
-//! texts with "\r\n" turned into "\n", since Git may check files out with
-//! CRLF on Windows.
+//! of its examples, and that a run shows the records of a program and
+//! nothing else. readme_test.zig and runs_test.zig run them. The checks of
+//! a page compare texts with "\r\n" turned into "\n", since Git may check
+//! files out with CRLF on Windows; `showsRecords` takes lines that end with
+//! "\n" only.
 
 const std = @import("std");
 
@@ -44,8 +46,8 @@ fn closingFence(body: []const u8) ?usize {
 /// Fails unless every ```zig block of the document `name`, `doc`, is a part
 /// of one of `files` (see `isPartOf`), but a block that starts with the
 /// comment `// build.zig`, the build script of the reader's project, and
-/// a block of code that must not compile, whose wrong lines carry the
-/// comment `// compile error: …` (see `mustNotCompile`).
+/// a block of code that must not compile, whose every line of code carries
+/// the comment `// compile error: …` (see `mustNotCompile`).
 pub fn expectZigFromExamples(name: []const u8, doc: []const u8, files: []const []const u8) !void {
     if (try foreignZig(doc, files)) |block| {
         defer testing.allocator.free(block);
@@ -78,16 +80,21 @@ fn foreignZig(doc: []const u8, files: []const []const u8) !?[]u8 {
     return null;
 }
 
-/// Whether `block` is code that the guide shows as wrong: some line of it
-/// ends with the comment `// compile error: …`, which says what the
-/// compiler reports there. Such code is no part of a file that compiles.
+/// Whether `block` is code that the guide shows as wrong: it has a line of
+/// code, and every line of code ends with the comment
+/// `// compile error: …`, which says what the compiler reports there; blank
+/// lines and comments on lines of their own are no code. Such code is no
+/// part of a file that compiles.
 fn mustNotCompile(block: []const u8) bool {
-    var lines = std.mem.splitScalar(u8, block, '\n');
+    var marked = false;
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, block, "\n"), '\n');
     while (lines.next()) |line| {
-        const at = std.mem.find(u8, line, "// compile error: ") orelse continue;
-        if (std.mem.trim(u8, line[0..at], " ").len > 0) return true;
+        const code = std.mem.trim(u8, line, " ");
+        if (code.len == 0 or std.mem.startsWith(u8, code, "//")) continue;
+        if (std.mem.find(u8, code, "// compile error: ") == null) return false;
+        marked = true;
     }
-    return false;
+    return marked;
 }
 
 /// Whether the lines of `block`, without their leading spaces, are lines
@@ -112,6 +119,45 @@ pub fn isPartOf(file: []const u8, block: []const u8) !bool {
         } else return true;
     }
     return false;
+}
+
+/// Whether the lines of `shown` are the lines of `records`, each after a
+/// timestamp and a space.
+pub fn showsRecords(shown: []const u8, records: []const u8) bool {
+    var shown_lines = std.mem.splitScalar(u8, shown, '\n');
+    var record_lines = std.mem.splitScalar(u8, records, '\n');
+    while (record_lines.next()) |record| {
+        const line = shown_lines.next() orelse return false;
+        if (record.len == 0) {
+            if (line.len != 0) return false;
+            continue;
+        }
+        if (line.len != timestamp_form.len + 1 + record.len) return false;
+        if (!isTimestamp(line[0..timestamp_form.len]) or line[timestamp_form.len] != ' ') return false;
+        if (!std.mem.eql(u8, line[timestamp_form.len + 1 ..], record)) return false;
+    }
+    return shown_lines.next() == null;
+}
+
+/// The form of a zefir-log timestamp, such as 2026-10-13T09:41:07.415Z; `d`
+/// stands for a digit.
+const timestamp_form = "dddd-dd-ddTdd:dd:dd.dddZ";
+
+fn isTimestamp(s: []const u8) bool {
+    if (s.len != timestamp_form.len) return false;
+    for (s, timestamp_form) |c, f| {
+        if (if (f == 'd') !std.ascii.isDigit(c) else c != f) return false;
+    }
+    return true;
+}
+
+test "a run shows the records in order, each after a timestamp, and nothing else" {
+    const records = "WARN  a\nWARN  b\n";
+    try testing.expect(showsRecords("2026-10-13T09:41:07.415Z WARN  a\n2026-10-13T09:41:07.416Z WARN  b\n", records));
+    try testing.expect(!showsRecords("2026-10-13T09:41:07.415Z WARN  a\n", records));
+    try testing.expect(!showsRecords("2026-10-13T09:41:07.415Z WARN  a\n2026-10-13T09:41:07.416Z WARN  b\n2026-10-13T09:41:07.416Z WARN  c\n", records));
+    try testing.expect(!showsRecords("2026-10-13T09:41:07.416Z WARN  b\n2026-10-13T09:41:07.415Z WARN  a\n", records));
+    try testing.expect(!showsRecords("WARN  a\nWARN  b\n", records));
 }
 
 test "a block is a part of a file at any indentation, and nothing else is" {
@@ -140,7 +186,7 @@ test "a guide passes when it shows the file and only parts of the file" {
     try testing.expectEqualStrings("const x = 1;\nconst y = 2;\n", foreign);
 }
 
-test "code that must not compile is a block of its own, marked on a line of code" {
+test "code that must not compile is a block of its own, marked on every line of code" {
     const file = "const x = 1;\n";
     const wrong = "```zig\n// a rule after a transform\n.email = .{ v.email, v.trim }, // compile error: transforms must come first\n```\n";
     try expectZigFromExamples("doc", wrong, &.{file});
@@ -149,4 +195,14 @@ test "code that must not compile is a block of its own, marked on a line of code
     const foreign = (try foreignZig(comment_only, &.{file})) orelse return error.TestExpectedForeignBlock;
     defer testing.allocator.free(foreign);
     try testing.expectEqualStrings("// compile error: none\nconst z = 3;\n", foreign);
+    // A line of code without the marker: the block is checked.
+    const half = "```zig\n.a = v.rename(\"x\"),\n.b = v.rename(\"x\"), // compile error: both are named \"x\" outside\n```\n";
+    const unmarked = (try foreignZig(half, &.{file})) orelse return error.TestExpectedForeignBlock;
+    defer testing.allocator.free(unmarked);
+    try testing.expectEqualStrings(".a = v.rename(\"x\"),\n.b = v.rename(\"x\"), // compile error: both are named \"x\" outside\n", unmarked);
+    // Comments alone are no code that must not compile: the block is checked.
+    const comments = "```zig\n// compile error: none\n```\n";
+    const no_code = (try foreignZig(comments, &.{file})) orelse return error.TestExpectedForeignBlock;
+    defer testing.allocator.free(no_code);
+    try testing.expectEqualStrings("// compile error: none\n", no_code);
 }

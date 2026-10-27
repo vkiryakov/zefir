@@ -1885,14 +1885,29 @@ fn addValidatorTests(
     test_step.dependOn(&check_list.step);
 
     // The examples of src/validator/examples/README.md: a test must pass, and
-    // a program must exit with 0 and log each line of its `records`. Each
-    // record starts with a timestamp, the only part that changes from run to
-    // run, so a line must follow the "Z" that ends a timestamp. readme_test.zig
-    // checks that README.md shows every example and a run of every program,
-    // and that the guide shows no Zig code that is not a part of its examples.
-    // The programs are not part of `compile_step`: zefir-log uses 64-bit
-    // atomics, which Zig does not support on x86-linux-musl, the 32-bit
-    // target of CI.
+    // a program runs through example_main.zig, which exits with code 3 on a
+    // panic instead of aborting and with code 4 after 120 s, and must exit
+    // with 0. runs_test.zig then checks that the program logged its `records`
+    // and nothing else, each line after a timestamp, the only part that
+    // changes from run to run. readme_test.zig checks that README.md shows
+    // every example and a run of every program, and that the guide shows no
+    // Zig code that is not a part of its examples. The programs and runs_test
+    // are not part of `compile_step`: zefir-log uses 64-bit atomics, which
+    // Zig does not support on x86-linux-musl, the 32-bit target of CI.
+    const cases = b.createModule(.{
+        .root_source_file = b.path("src/validator/testdata/cases.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const runs_test = b.addTest(.{
+        .name = "runs_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator/examples/runs_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "cases", .module = cases }},
+        }),
+    });
     for (validator_cases.examples) |example| {
         const example_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("src/validator/examples/{s}.zig", .{example.name})),
@@ -1903,13 +1918,19 @@ fn addValidatorTests(
                 .{ .name = "log", .module = log },
             },
         });
-        if (example.records) |records| {
-            const example_exe = b.addExecutable(.{ .name = example.name, .root_module = example_module });
+        if (example.records != null) {
+            const example_exe = b.addExecutable(.{
+                .name = example.name,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/validator/examples/example_main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "example", .module = example_module }},
+                }),
+            });
             const example_run = addRun(b, example_exe, tsan);
-            var lines = std.mem.splitScalar(u8, records, '\n');
-            while (lines.next()) |line| {
-                if (line.len > 0) example_run.expectStdOutMatch(b.fmt("Z {s}\n", .{line}));
-            }
+            example_run.expectExitCode(0);
+            runs_test.root_module.addAnonymousImport(b.fmt("{s}.out", .{example.name}), .{ .root_source_file = example_run.captureStdOut(.{}) });
             test_step.dependOn(&example_run.step);
         } else {
             const example_test = b.addTest(.{ .name = example.name, .root_module = example_module });
@@ -1917,17 +1938,14 @@ fn addValidatorTests(
             compile_step.dependOn(&example_test.step);
         }
     }
+    test_step.dependOn(&b.addRunArtifact(runs_test).step);
     const readme_test = b.addTest(.{
         .name = "readme_test",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/validator/examples/readme_test.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "cases", .module = b.createModule(.{
-                .root_source_file = b.path("src/validator/testdata/cases.zig"),
-                .target = target,
-                .optimize = optimize,
-            }) }},
+            .imports = &.{.{ .name = "cases", .module = cases }},
         }),
     });
     // strings.md shows the options of v.strongPassword as strings.zig

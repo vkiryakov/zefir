@@ -1131,7 +1131,7 @@ mistake, and a program calls `v.transform` on each:
 // TalkProposal: a string transform on a u16
 .duration_minutes = .{ v.rename("durationMinutes"), v.trim }, // compile error: trim expects a string
 // Reviewer: two fields with one outside name
-.display_name = v.rename("displayName"),
+.display_name = v.rename("displayName"), // compile error: display_name and login are both named "displayName" outside
 .login = v.rename("displayName"), // compile error: both are named "displayName" outside
 ```
 

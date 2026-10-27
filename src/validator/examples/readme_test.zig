@@ -41,41 +41,11 @@ fn expectRunInReadme(records: []const u8) !void {
     while (std.mem.find(u8, rest, start)) |at| {
         const body = rest[at + start.len ..];
         const end = std.mem.find(u8, body, "```\n") orelse break;
-        if (showsRecords(body[0..end], records)) return;
+        if (check.showsRecords(body[0..end], records)) return;
         rest = body[end..];
     }
     std.debug.print("README.md shows no run that logs these records, each after a timestamp:\n{s}\n", .{records});
     return error.TestRunNotInReadme;
-}
-
-/// Whether the lines of `shown` are the lines of `records`, each after a
-/// timestamp and a space.
-fn showsRecords(shown: []const u8, records: []const u8) bool {
-    var shown_lines = std.mem.splitScalar(u8, shown, '\n');
-    var record_lines = std.mem.splitScalar(u8, records, '\n');
-    while (record_lines.next()) |record| {
-        const line = shown_lines.next() orelse return false;
-        if (record.len == 0) {
-            if (line.len != 0) return false;
-            continue;
-        }
-        if (line.len != timestamp_form.len + 1 + record.len) return false;
-        if (!isTimestamp(line[0..timestamp_form.len]) or line[timestamp_form.len] != ' ') return false;
-        if (!std.mem.eql(u8, line[timestamp_form.len + 1 ..], record)) return false;
-    }
-    return shown_lines.next() == null;
-}
-
-/// The form of a zefir-log timestamp, such as 2026-10-13T09:41:07.415Z; `d`
-/// stands for a digit.
-const timestamp_form = "dddd-dd-ddTdd:dd:dd.dddZ";
-
-fn isTimestamp(s: []const u8) bool {
-    if (s.len != timestamp_form.len) return false;
-    for (s, timestamp_form) |c, f| {
-        if (if (f == 'd') !std.ascii.isDigit(c) else c != f) return false;
-    }
-    return true;
 }
 
 test "README.md shows every example file and rules.zig as they are" {
