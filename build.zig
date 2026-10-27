@@ -2598,11 +2598,12 @@ const SecurityGuideModules = struct {
 /// The examples of src/security/examples/README.md, the guide of
 /// zefir-security, as cases.zig there lists them: the tests of the
 /// services, on the backend of zefir-http and the server of zefir-rpc in
-/// memory, and the programs, each run with its settings in the environment
-/// through example_main.zig, which exits with code 3 on a panic instead of
-/// aborting and with code 4 past its time limit; it must exit with 0.
-/// readme_test.zig then checks that README.md shows every file as it is
-/// and every run as it printed.
+/// memory, the claims that must not compile, and the programs, each run
+/// with its settings in the environment through example_main.zig, which
+/// exits with code 3 on a panic instead of aborting and with code 4 past
+/// its time limit; it must exit with 0. readme_test.zig then checks that
+/// README.md shows every file as it is, every run as it printed and the
+/// message of every claims type that does not compile.
 fn addSecurityGuide(
     b: *std.Build,
     test_security: *std.Build.Step,
@@ -2647,6 +2648,21 @@ fn addSecurityGuide(
             }),
         });
         test_security.dependOn(&addRun(b, tests, tsan).step);
+    }
+    // The claims of README.md that must not compile: compiled, never run,
+    // and passing only with their message.
+    for (security_guide.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = b.fmt("security-guide-error-{s}", .{fixture.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "compile_errors/{s}/auth.zig", .{fixture.name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_security.dependOn(&t.step);
     }
 
     const readme = b.createModule(.{

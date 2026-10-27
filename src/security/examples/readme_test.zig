@@ -1,8 +1,9 @@
 //! README.md shows every file of the examples as it is, a run of every
-//! program as it printed, after the program, and no Zig code that is not a
-//! part of these files: a file that changes without its copy in README.md,
-//! or a program that prints something else, fails this test. build.zig
-//! embeds what each program printed in this build as `<name>.out`.
+//! program as it printed, after the program, the messages of the claims
+//! that must not compile, and no Zig code that is not a part of these
+//! files: a file that changes without its copy in README.md, or a program
+//! that prints something else, fails this test. build.zig embeds what each
+//! program printed in this build as `<name>.out`.
 
 const std = @import("std");
 const cases = @import("cases.zig");
@@ -31,6 +32,12 @@ test "README.md shows a run of every program as it printed, after the program" {
 
 test "every Zig block of README.md but those of build.zig is a part of an example" {
     try check.expectZigFromExamples("README.md", guide, example_files);
+}
+
+test "README.md shows the messages of the claims that do not compile" {
+    comptime var block: []const u8 = "```text\n";
+    inline for (cases.compile_errors) |e| block = block ++ "error: " ++ e.expect ++ "\n";
+    try check.expectBlock("README.md", guide, block ++ "```\n");
 }
 
 test {
