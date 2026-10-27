@@ -1,4 +1,4 @@
-# rpc
+# zefir-rpc: typed RPC between Zig services
 
 **Typed calls between Zig services.** A service often needs an answer from
 another one: the orders service asks the users service who the customer is
@@ -133,12 +133,12 @@ $ zig build run
 - [Limits](#limits)
 - [Your own transport](#your-own-transport)
 
-Examples that `zig build test-rpc` compiles and runs, checking what they
-print against this guide:
-[getting started](getting_started.zig) · [a service that calls another](orders.zig) ·
-[authentication and middleware](service.zig) · [tests](users_test.zig) ·
-[access logs](access_log.zig) · [idempotency](idempotency.zig) · [a graceful stop](shutdown.zig) ·
-[under zefir.App](app.zig)
+Every example of this guide is shown whole, and every program with what it
+printed:
+[getting started](#getting-started) · [a service that calls another](#a-service-that-calls-another) ·
+[authentication and middleware](#authentication) · [tests](#tests) ·
+[access logs](#access-logs) · [idempotency](#idempotency) · [a graceful stop](#lifecycle-and-stopping) ·
+[under zefir.App](#under-zefirapp)
 
 ## Why RPC
 
@@ -229,38 +229,47 @@ types fit.
 
 ```zig
 // build.zig of the users service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-// The package of the contract, from build.zig.zon, with the modules of
-// this service's zefir.
-const users_api = b.dependency("users_api", .{}).module("users-api");
-users_api.addImport("rpc", zefir.module("zefir-rpc"));
-users_api.addImport("validator", zefir.module("zefir-validator"));
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
 
-const exe = b.addExecutable(.{
-    .name = "user-service",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "users-api", .module = users_api },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+    // The package of the contract, from build.zig.zon, with the modules of
+    // this service's zefir.
+    const users_api = b.dependency("users_api", .{}).module("users-api");
+    users_api.addImport("rpc", zefir.module("zefir-rpc"));
+    users_api.addImport("validator", zefir.module("zefir-validator"));
+
+    const exe = b.addExecutable(.{
+        .name = "user-service",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "users-api", .module = users_api },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 The package of the contract has a `build.zig` of its own, which declares
-the module and gives it no imports:
+the module and gives it no imports, and no target or mode either: the
+module takes those of the service that imports it.
 
 ```zig
 // build.zig of the package users-api
+const std = @import("std");
+
 pub fn build(b: *std.Build) void {
     _ = b.addModule("users-api", .{ .root_source_file = b.path("src/root.zig") });
 }
@@ -900,13 +909,20 @@ names the handler and says what to write:
 | an error of the framework in `.errors` | `rpc: users.v1: .errors.Unavailable: rpc maps Unavailable by itself, so a contract cannot list it; give the error another name` |
 | a type that JSON does not carry | `rpc: users.v1.listUsers: request <Req>.limit has unsupported type usize; its size depends on the target: use u64 or i64` |
 
-Take `deleteUser` out of `UserHandler.zig`, and the build of
-[getting_started.zig](getting_started.zig) stops with this error, whose
+Take `deleteUser` out of `UserHandler.zig`, and the build of the program
+of [Getting started](#getting-started) stops with this error, whose
 `referenced by` then points at the line of `rpc.Server.init`:
 
 ```text
 error: rpc: UserHandler implements users.v1 but has no pub fn deleteUser(self: *UserHandler, ctx: *rpc.Context, req: users_api.DeleteUserRequest) !void
 ```
+
+Zig names a type after the file that declares it: `UserHandler` is the
+file `UserHandler.zig`, and the types of the contract take the name of the
+contract's root file. Where this guide builds its examples, that file is
+`users_api.zig`, so the message says `users_api.DeleteUserRequest`; in your
+package users-api, whose root file is `src/root.zig`, it says
+`root.DeleteUserRequest`.
 
 Zig compiles only the code that something uses: a handler that is never
 passed to a server is never checked. Keep a test that builds the server of
