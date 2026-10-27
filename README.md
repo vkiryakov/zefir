@@ -186,7 +186,8 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-```json
+```text
+$ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
 ```
 
