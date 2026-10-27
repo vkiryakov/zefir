@@ -132,6 +132,8 @@ mutex: Io.Mutex = .init,
 stop_requested: bool = false,
 /// When the stop began, on the awake clock.
 stop_began: ?Io.Timestamp = null,
+/// The earliest deadline of a `shutdown`, on the awake clock.
+deadline: ?i96 = null,
 /// The failures of the store in a row, for the logs.
 outage: ?Outage = null,
 
@@ -417,6 +419,39 @@ pub fn isStopping(e: *Engine) bool {
     return e.stopping.fetchAdd(0, .acq_rel) != 0;
 }
 
+/// How much earlier than its deadline `shutdown` returns, so that the
+/// caller has time for what comes after.
+const reserve: Duration = .fromMilliseconds(250);
+
+/// `requestStop`, and a wait for the stop until 250 ms before `deadline`,
+/// which also cuts the grace (`graceEnd`).
+pub fn shutdown(e: *Engine, io: Io, deadline: Io.Clock.Timestamp) ShutdownError!void {
+    _ = e.in_calls.fetchAdd(1, .acq_rel);
+    defer _ = e.in_calls.fetchSub(1, .acq_rel);
+    const due = deadline.toClock(io, .awake).raw.nanoseconds;
+    const draining = draining: {
+        e.mutex.lockUncancelable(io);
+        defer e.mutex.unlock(io);
+        e.deadline = if (e.deadline) |given| @min(given, due) else due;
+        break :draining e.state_value.load(.monotonic) == .draining;
+    };
+    e.requestStop(io);
+    // The runs of a stop that began before look at their grace again.
+    if (draining) e.wakeAll(io);
+    const until = due -| reserve.nanoseconds;
+    while (!e.stopped.isSet()) {
+        const now = Io.Clock.awake.now(io).nanoseconds;
+        if (now >= until) break;
+        const step = @min(until, now +| max_step.nanoseconds);
+        e.stopped.waitTimeout(io, .{ .deadline = .{ .raw = .{ .nanoseconds = step }, .clock = .awake } }) catch |err| switch (err) {
+            error.Canceled => |c| return c,
+            error.Timeout => {},
+        };
+    } else return;
+    log.warn("the worker did not stop by its deadline: {d} runs have not ended since their cancel; it stays draining", .{e.cancelling.load(.acquire)});
+    return error.ShutdownTimeout;
+}
+
 /// Waits until the worker stopped.
 pub fn wait(e: *Engine, io: Io) WaitError!void {
     if (e.state_value.load(.acquire) == .configured) return error.InvalidState;
@@ -443,23 +478,35 @@ pub fn deinit(e: *Engine, io: Io) void {
 }
 
 /// The end of the grace of the stop, on the awake clock: `shutdown_grace`
-/// after it began; null while no stop began.
+/// after it began, but no later than 2 s and 250 ms before the deadline
+/// of a `shutdown`, for the cancels, the outcomes and the caller; never
+/// before it began. null while no stop began.
 pub fn graceEnd(e: *Engine, io: Io) ?i96 {
     if (!e.isStopping()) return null;
     e.mutex.lockUncancelable(io);
     defer e.mutex.unlock(io);
-    const began = e.stop_began orelse return null;
-    return began.nanoseconds +| e.options.shutdown_grace.nanoseconds;
+    const began = (e.stop_began orelse return null).nanoseconds;
+    const grace = began +| e.options.shutdown_grace.nanoseconds;
+    const due = e.deadline orelse return grace;
+    return @min(grace, @max(due -| (outcome_budget.nanoseconds + reserve.nanoseconds), began));
 }
 
 /// The time a stop leaves for the cancels and the outcomes after its grace.
 const outcome_budget: Duration = .fromSeconds(2);
 
-/// The last moment of a stop to write outcomes in, on the awake clock: the
-/// end of the grace and 2 s; null while no stop began.
+/// The last moment of a stop to write outcomes in, on the awake clock:
+/// 250 ms before the deadline of a `shutdown`, else 2 s after the grace;
+/// null while no stop began.
 pub fn stopEnd(e: *Engine, io: Io) ?i96 {
     const grace = e.graceEnd(io) orelse return null;
-    return grace +| outcome_budget.nanoseconds;
+    const due = e.deadlineOf(io) orelse return grace +| outcome_budget.nanoseconds;
+    return due -| reserve.nanoseconds;
+}
+
+fn deadlineOf(e: *Engine, io: Io) ?i96 {
+    e.mutex.lockUncancelable(io);
+    defer e.mutex.unlock(io);
+    return e.deadline;
 }
 
 /// The entry of the job `name`.
@@ -471,9 +518,12 @@ pub fn entryOf(e: *const Engine, name: []const u8) ?*const Entry {
 }
 
 /// The context of a call of the store by the poll or a slot: never the
-/// handler's token, a deadline of `store_timeout`.
+/// handler's token, a deadline of `store_timeout`, and no later than 250 ms
+/// before the deadline of a `shutdown`.
 pub fn callContext(e: *Engine, io: Io) core.Context {
-    return core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), e.options.store_timeout));
+    const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), e.options.store_timeout));
+    const due = e.deadlineOf(io) orelse return ctx;
+    return ctx.withDeadline(.at(.{ .nanoseconds = due -| reserve.nanoseconds }));
 }
 
 /// Counts what a call of the store gave: an error, or an answer.
