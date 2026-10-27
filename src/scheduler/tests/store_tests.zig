@@ -122,14 +122,15 @@ test "Store.init routes each wrapper to the method of the type" {
 }
 
 test "outcome classes the names of Error" {
-    const unknown = [_]scheduler.Error{ error.OutcomeUnknown, error.OutOfMemory };
+    // A record that does not read may come of a change that applied: a
+    // claim that took it before reading it.
+    const unknown = [_]scheduler.Error{ error.OutcomeUnknown, error.Corrupt, error.OutOfMemory };
     const not_applied = [_]scheduler.Error{
         error.InvalidArgument,
         error.Unavailable,
         error.DeadlineExceeded,
         error.Cancelled,
         error.Refused,
-        error.Corrupt,
         error.Contended,
     };
     for (unknown) |err| try testing.expectEqual(scheduler.Outcome.unknown, scheduler.outcome(err));

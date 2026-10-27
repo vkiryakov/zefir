@@ -127,7 +127,9 @@ pub const StoreError = error{
     /// still apply.
     OutcomeUnknown,
     /// A record of the store does not read (damaged, or of another
-    /// format).
+    /// format). The call may have changed the store: a store that applied
+    /// a change and cannot read the record it changed answers so, as a
+    /// claim that took a record before it read it.
     Corrupt,
     OutOfMemory,
 };
@@ -144,18 +146,17 @@ pub const Outcome = enum {
     unknown,
 };
 
-/// The class of `err`: `OutcomeUnknown` and `OutOfMemory` are `.unknown`,
-/// the rest `.not_applied`. The switch is the table: a new name of `Error`
-/// stops the build until it has a class.
+/// The class of `err`: `OutcomeUnknown`, `Corrupt` and `OutOfMemory` are
+/// `.unknown`, the rest `.not_applied`. The switch is the table: a new name
+/// of `Error` stops the build until it has a class.
 pub fn outcome(err: Error) Outcome {
     return switch (err) {
-        error.OutcomeUnknown, error.OutOfMemory => .unknown,
+        error.OutcomeUnknown, error.Corrupt, error.OutOfMemory => .unknown,
         error.InvalidArgument,
         error.Unavailable,
         error.DeadlineExceeded,
         error.Cancelled,
         error.Refused,
-        error.Corrupt,
         error.Contended,
         => .not_applied,
     };

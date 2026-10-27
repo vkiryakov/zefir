@@ -2572,7 +2572,7 @@ a failed call may have changed the store: `.not_applied` or `.unknown`.
 | `Cancelled` | the token or the task was cancelled before sending | `.not_applied` |
 | `Refused` | the store refused, and the change is known not to be applied | `.not_applied` |
 | `OutcomeUnknown` | the request may have arrived, and its outcome is unknown | `.unknown` |
-| `Corrupt` | a record of the store does not read | `.not_applied` |
+| `Corrupt` | a record of the store does not read, maybe one the call changed, as a claim that took it | `.unknown` |
 | `OutOfMemory` | | `.unknown` |
 | `Contended` | the client lost 8 races of changes in a row | `.not_applied` |
 
