@@ -180,24 +180,31 @@ serves with http; billing takes rpc instead of http:
 
 ```zig
 // build.zig of the orders service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const exe = b.addExecutable(.{
-    .name = "orders",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "security", .module = zefir.module("zefir-security") },
-            .{ .name = "validator", .module = zefir.module("zefir-validator") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "http", .module = zefir.module("zefir-http") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "orders",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "security", .module = zefir.module("zefir-security") },
+                .{ .name = "validator", .module = zefir.module("zefir-validator") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "http", .module = zefir.module("zefir-http") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -369,7 +376,7 @@ claims are enough. A field takes one of these types:
 | a struct | an object, with its own names and rules |
 
 - **Names.** A field's claim is its Zig name, or the name of `v.rename`, as
-  for the fields of a DTO in zefir-http and zefir-rpc. A name that is a URL,
+  for the fields of a DTO in zefir-http. A name that is a URL,
   as RFC 7519 suggests for claims that must not collide with others', goes
   into `pub const claim_names = .{ .is_root = "http://example.com/is_root" };`.
 - **Required or not.** A field without a default and not `?T` must be in
@@ -555,9 +562,9 @@ try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
 
 ## Signing in
 
-The sign-in of orders, `POST /api/login`, is a controller of zefir-http
-that checks a user's name and secret and signs a token for them,
-`LoginController.zig`:
+The sign-in of orders, `POST /api/login`, is `LoginController.zig`, a
+controller of zefir-http that checks a user's name and secret and signs a
+token for them:
 
 ```zig
 // Application code (src/LoginController.zig of the orders service): zefir-security ships none of these.
@@ -897,8 +904,8 @@ pub const AppErrors = struct {
 };
 ```
 
-The orders of a user, `OrdersController.zig`, stand behind `requireUser`,
-and read the user from `ctx.locals`:
+The controller of a user's orders, `OrdersController.zig`, stands behind
+`requireUser` and reads the user from `ctx.locals`:
 
 ```zig
 //! The orders of the signed-in user: GET /api/orders. Its routes stand
@@ -1465,7 +1472,7 @@ settings:
 //! }
 //! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
-//! // .authenticator = &authenticator in the options of rpc.Server
+//! // .authenticator = &authenticator among the parts of rpc.Server.init, next to .handlers
 
 const jwt = @import("security").jwt;
 const rpc = @import("rpc");
@@ -1929,11 +1936,12 @@ it expires, and nothing takes it back early. So:
 | a time (NumericDate) | 0 to 253402300799 seconds, the end of the year 9999 | — |
 | the path of a violation | 256 bytes | `Details.path_buf` |
 
-- **Memory.** `verify` takes its memory from the arena it is given, a few
-  sizes of the token, the slices of your claims included, and frees
-  nothing: the arena of the request frees it all. `sign` takes the token
-  from its allocator, which the caller frees, and frees its own buffers
-  before it returns.
+- **Memory.** `verify` takes its memory from the arena it is given: a few
+  sizes of the token, and for each list of your claims the memory of its
+  items, so a list of large structs can take more. It frees nothing: the
+  arena of the request frees it all. `sign` takes the token from its
+  allocator, which the caller frees, and frees its own buffers before it
+  returns.
 - **Many tasks at once.** A `Verifier` and a `Signer` never change after
   `init`, and own nothing: one of each serves every task of a service. The
   keys they borrow must live, unchanged, as long as they do: `deinit` a key

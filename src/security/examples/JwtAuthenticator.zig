@@ -15,7 +15,7 @@
 //! }
 //! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
-//! // .authenticator = &authenticator in the options of rpc.Server
+//! // .authenticator = &authenticator among the parts of rpc.Server.init, next to .handlers
 
 const jwt = @import("security").jwt;
 const rpc = @import("rpc");
