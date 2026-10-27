@@ -10,6 +10,7 @@ const scheduler = @import("scheduler");
 const mongo = @import("../root.zig");
 const Script = mongo.testing.Script;
 const Call = @import("../scheduler/Call.zig");
+const documents = @import("../scheduler/documents.zig");
 const fixture = @import("scheduler_fixture.zig");
 const Fixture = fixture.Fixture;
 const Store = scheduler.Store;
@@ -70,6 +71,7 @@ test "a write that may have run is resolved by reading the record again" {
     var f: Fixture = .{};
     const a = f.a();
     const ours = try fixture.pendingDoc(a, "send", "k1", fixture.life_hex, .{ .tag = fixture.tag_hex });
+    const as_expected = try fixture.pendingDoc(a, "send", "k1", fixture.life_hex, .{});
     const theirs = try fixture.pendingDoc(a, "send", "k1", "0123456789abcdef0123456789abcdef", .{});
     const tagged_claim = bson.literal(.{
         ._id = "send/k1",
@@ -98,7 +100,7 @@ test "a write that may have run is resolved by reading the record again" {
         // update, writeConcernError: our tag is there, so it ran.
         .{ .reply = concern },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{ours}) },
         // update, refused: the record as expected, so it did not run.
-        .{ .reply = refused },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{theirs}) },
+        .{ .reply = refused },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{as_expected}) },
         // create, no reply, no record: the same upsert again.
         .close_connection,                                                                                                    .{ .reply = try fixture.found(a, jobs_ns, &.{}) },
         .{ .reply = bson.literal(.{ .n = 1, .nModified = 0, .upserted = .{.{ .index = 0, ._id = "send/k1" }}, .ok = 1.0 }) },
@@ -175,4 +177,74 @@ test "a write that may have run is resolved by reading the record again" {
         "find",   "delete",        "find",          "update",
         "update", "update",        "find",
     });
+}
+
+/// A record "send/k1" of `life_text` in `state` at `revision`, whose last
+/// write left `tag`; a running one has the claim of "w2".
+fn recordDoc(a: std.mem.Allocator, life_text: []const u8, state: scheduler.State, revision: i64, tag: []const u8) !bson.RawDocument {
+    var b: bson.Builder = .init(a);
+    try b.putString("_id", "send/k1");
+    try b.putString("job", "send");
+    try b.putString("key", "k1");
+    try b.putString("life", life_text);
+    try b.putString("plan", "");
+    try b.putString("payload", "{}");
+    try b.putString("state", @tagName(state));
+    try b.putDateTime("scheduled_at", .{ .milliseconds = 1_793_000_000_000 });
+    try b.putInt32("attempt", if (state == .running) 1 else 0);
+    try b.putInt64("fence", if (state == .running) 1 else 0);
+    try b.putInt64("revision", revision);
+    try b.putString("tag", tag);
+    if (state == .running) {
+        try b.putString("owner", "w2");
+        try b.putDateTime("claimed_at", .{ .milliseconds = 1_793_000_001_000 });
+        try b.putDateTime("lease_until", .{ .milliseconds = 1_793_000_061_000 });
+    } else try b.putDateTime("run_at", .{ .milliseconds = 1_793_000_000_000 });
+    try b.putDateTime("created_at", .{ .milliseconds = 1_792_999_000_000 });
+    try b.putDateTime("updated_at", .{ .milliseconds = 1_792_999_000_000 });
+    return (try b.finish()).raw();
+}
+
+const other_life_hex = "0123456789abcdef0123456789abcdef";
+
+test "after a lost reply, update answers conflict only when its change cannot have applied" {
+    var f: Fixture = .{};
+    const a = f.a();
+    // The change applied, then a claim of another worker wrote its own tag:
+    // the same life, a revision past the one expected.
+    const claimed_after = try recordDoc(a, fixture.life_hex, .running, 4, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd-1");
+    // The key made again since: another life, at the revision and in the
+    // state that the change expected.
+    const reborn = try recordDoc(a, other_life_hex, .pending, 3, "efefefefefefefefefefefefefefefef");
+    // A claim came first: the same life at the revision expected, running.
+    const claimed_before = try recordDoc(a, fixture.life_hex, .running, 3, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd-1");
+    try f.start(&.{
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{claimed_after}) },
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{reborn}) },
+        .close_connection, .{ .reply = try fixture.found(a, jobs_ns, &.{claimed_before}) },
+    });
+    defer f.stop();
+    const update: Store.UpdateRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .expect = .{ .life = fixture.life, .revision = 3, .state = .pending }, .set = .{ .run_at = .{ .after = .zero } }, .tag = fixture.tag };
+
+    // The store cannot tell its change, written over since, from another
+    // change that came first.
+    try testing.expectError(error.OutcomeUnknown, f.store.update(io, fixture.no_deadline, &update, f.call()));
+    try expectClean(&f);
+    try afterProbe();
+    // A record of another life: the filter holds the life, so the change
+    // never lands on it.
+    switch (try f.store.update(io, fixture.no_deadline, &update, f.call())) {
+        .conflict => |now| try testing.expectEqualStrings(other_life_hex, &documents.hex(now.life)),
+        else => return error.TestUnexpectedResult,
+    }
+    try afterProbe();
+    // The revision expected: an applied change would have raised it.
+    switch (try f.store.update(io, fixture.no_deadline, &update, f.call())) {
+        .conflict => |now| {
+            try testing.expectEqual(scheduler.State.running, now.state);
+            try testing.expectEqual(@as(u64, 3), now.revision);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try f.expectCommands(&.{ "update", "find", "update", "find", "update", "find" });
 }

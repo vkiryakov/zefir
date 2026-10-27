@@ -141,8 +141,13 @@ pub fn readFailed(c: *Call, err: (mongo.Error || documents.ReadError)) StoreErro
     };
 }
 
-/// Our tag: applied. The record as expected: not applied. Else another
-/// change came first.
+/// Our tag: applied. A record of another life: never applied, as the
+/// filter holds the life. The same life at the revision expected: not
+/// applied, since the change raises it; as expected in its state too, it
+/// was refused or may still arrive. Past that revision under another tag:
+/// the change may have applied and a claim, a finish or another change
+/// written over its tag since, which the store cannot tell from another
+/// change that came first.
 fn updateLost(c: *Call, request: *const Store.UpdateRequest, id: []const u8, err: mongo.Error) StoreError!Store.UpdateResult {
     switch (Call.classOf(err)) {
         .not_sent => return c.nothing(err),
@@ -155,8 +160,11 @@ fn updateLost(c: *Call, request: *const Store.UpdateRequest, id: []const u8, err
         c.ran(err);
         return .{ .updated = request.expect.revision + 1 };
     }
-    if (now.record.revision == request.expect.revision and now.record.state == request.expect.state)
-        return if (Call.classOf(err) == .answered) c.refused(err) else c.unknown(err, null);
+    if (std.mem.eql(u8, &now.record.life, &request.expect.life)) {
+        if (now.record.revision > request.expect.revision) return c.unknown(err, null);
+        if (now.record.revision == request.expect.revision and now.record.state == request.expect.state)
+            return if (Call.classOf(err) == .answered) c.refused(err) else c.unknown(err, null);
+    }
     return .{ .conflict = try documents.recordOut(c.out, &now.record) };
 }
 
