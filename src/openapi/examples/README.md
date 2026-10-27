@@ -1,4 +1,4 @@
-# openapi
+# zefir-openapi: OpenAPI documents of zefir-http services
 
 **The OpenAPI document of your API, built by the compiler from the types
 your server runs on.** An OpenAPI document is a JSON file that describes a
@@ -67,10 +67,6 @@ controller `zefir.openapi.Docs` serves the document with a page of it.
 - [The document of the http guide's service](#the-document-of-the-http-guides-service)
 - [The Debug check](#the-debug-check)
 - [For integrators](#for-integrators)
-
-`zig build test-openapi` runs the test of the small application of this
-guide, which compares its document with its `openapi.json`, and checks this
-guide against the files it shows.
 
 ## How a document is built
 
@@ -1313,13 +1309,13 @@ the sign-in of the guide is. The checks, from left to right along the
 chain:
 
 - **A requirement needs a scheme before it.** With `requireUser` before
-  every middleware that declares a scheme:
+  every middleware that declares a scheme, the build stops:
 
 ```text
 error: zefir.openapi: TodosController.list: requireUser requires any scheme declared before it, but no middleware before it declares one; declare them in the .security_schemes of a middleware before it
 ```
 
-- **Roles need a requirement before them:**
+- **Roles need a requirement before them**, or the build stops:
 
 ```text
 error: zefir.openapi: TodosController.list: requirePermission(todos) adds the roles todos, but no middleware before it requires a scheme; put one with .security, such as .security = .any, before it
@@ -1604,15 +1600,7 @@ src/TodosV1Controller.zig:62:16: error: missing struct field: exportCsv
 
 The tests of the guide reach every route, under the Debug check, and
 compare the document with
-[src/http/examples/openapi.json](../../http/examples/openapi.json). In
-`tests/http`, `zig build schemathesis` starts the service on the network
-and runs Schemathesis against it in Docker: it sends each route but the
-stream of events requests that the document allows, and checks every
-response against the document, its status, its media type and its body.
-It also checks that every request of valid data is taken, with one answer
-more on the three routes of `/v1/todos/{id}`: 422 to an id above
-2^64 − 1, which passes the schema of a `u64` (see
-[For integrators](#for-integrators)).
+[src/http/examples/openapi.json](../../http/examples/openapi.json).
 
 ## The Debug check
 
