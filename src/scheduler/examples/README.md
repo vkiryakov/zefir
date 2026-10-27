@@ -209,15 +209,16 @@ several instances, in a database that outlives them all, see
 [MongoDB](#mongodb).
 
 **The promise is "at least once".** A job that is due runs, as long as a
-worker that knows its type runs and the store answers; one instance at a
-time runs it; and the run of an instance that died runs again elsewhere,
-while the job has attempts left. The attempt that died counts: a one-shot
-job has five by default and a repeating job one, so by default a
-repeating job skips the run its instance lost and goes on at its next
-time; `.retry.attempts` gives it more. So a run may come twice after a
-failure: by the key of the run, the systems a job writes to do its work
-once, and by the number of the claim they may refuse an owner whose claim
-was taken over; see [Several instances](#several-instances).
+worker that knows its type runs and the store answers; one claim at a
+time holds it, and a run starts only under a claim; and the run of an
+instance that died runs again elsewhere, while the job has attempts
+left. The attempt that died counts: a one-shot job has five by default
+and a repeating job one, so by default a repeating job skips the run its
+instance lost and goes on at its next time; `.retry.attempts` gives it
+more. So a run may come twice after a failure: by the key of the run,
+the systems a job writes to do its work once, and by the number of the
+claim they may refuse an owner whose claim was taken over; see
+[Several instances](#several-instances).
 
 ## Installation
 
@@ -1633,9 +1634,13 @@ down from 10:07 to 10:52: the run of 10:15 is claimed at 10:52. With
 is at 11:00. With `.{ .skip = .fromSeconds(5 * 60) }` it is 37 minutes
 late, so it does not run, and the next run is at 11:00 too.
 
-A job runs once at a time: a run that outlasts its period is followed by
-the next one at once, which is late, and goes by the same rule. No two
-runs of one job ever overlap.
+The scheduler starts no run of a job while a claim holds it: a run that
+outlasts its period is followed by the next one at once, which is late,
+and goes by the same rule. Two runs of one job overlap only when a claim
+was taken over while its run went on: a handler that ignores its cancel
+past its lease, a process stalled longer than `renew_every`, or a clock
+of the store that jumps ahead, see
+[What is promised, and what is not](#what-is-promised-and-what-is-not).
 
 Coalesce suits work that catches up by itself. The shop closes the days
 of its ledger every night, and a run after an outage closes the nights it
