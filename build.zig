@@ -2274,11 +2274,6 @@ fn addAppGuide(
     test_zefir.dependOn(&addRun(b, b.addTest(.{ .name = "app-guide-readme", .root_module = readme }), tsan).step);
 }
 
-/// The compile checks of zefir.App, from the list in
-/// src/core/app/tests/cases.zig: application code whose graph App must
-/// refuse, each file with the message it must fail with; and a large
-/// generated application that must compile. Each file imports "core"
-/// alone.
 /// zefir-scheduler compile errors: each fixture of
 /// src/scheduler/tests/cases.zig is compiled, never run, and passes only
 /// when the compilation fails with an error whose message is `expect`, as
@@ -2305,6 +2300,11 @@ fn addSchedulerCompileChecks(
     }
 }
 
+/// The compile checks of zefir.App, from the list in
+/// src/core/app/tests/cases.zig: application code whose graph App must
+/// refuse, each file with the message it must fail with; and a large
+/// generated application that must compile. Each file imports "core"
+/// alone.
 fn addAppCompileChecks(
     b: *std.Build,
     test_step: *std.Build.Step,
