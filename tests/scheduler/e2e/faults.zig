@@ -506,6 +506,92 @@ test "mongo-stall paused during polling" {
     try e2e.onZio(stallDuringPolling);
 }
 
+/// A store that notes when each claim of a worker began and ended, on the
+/// awake clock, and whether it failed: the pauses of the poll, measured
+/// where they are, in the task of the poll. The other calls pass as they
+/// are.
+const Polls = struct {
+    inner: scheduler.Store,
+    mutex: Io.Mutex = .init,
+    claims: [256]Claim = undefined,
+    /// The claims noted; those past the 256th are not.
+    len: usize = 0,
+
+    pub const name = "polls";
+
+    const Claim = struct { start: Io.Timestamp, end: Io.Timestamp, failed: bool };
+
+    fn store(p: *Polls) scheduler.Store {
+        return .init(p);
+    }
+
+    /// The claims so far, the earliest first, copied into `out`.
+    fn noted(p: *Polls, io: Io, out: []Claim) []const Claim {
+        p.mutex.lockUncancelable(io);
+        defer p.mutex.unlock(io);
+        @memcpy(out[0..p.len], p.claims[0..p.len]);
+        return out[0..p.len];
+    }
+
+    /// How many of the last claims in a row failed.
+    fn failedInARow(p: *Polls, io: Io) usize {
+        var copy: [256]Claim = undefined;
+        const claims = p.noted(io, &copy);
+        var n: usize = 0;
+        while (n < claims.len and claims[claims.len - 1 - n].failed) n += 1;
+        return n;
+    }
+
+    pub fn claim(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.ClaimRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.ClaimResult {
+        const start = Io.Clock.awake.now(io);
+        const result = p.inner.claim(io, ctx, request, options);
+        const end = Io.Clock.awake.now(io);
+        p.mutex.lockUncancelable(io);
+        defer p.mutex.unlock(io);
+        if (p.len < p.claims.len) {
+            p.claims[p.len] = .{ .start = start, .end = end, .failed = if (result) |_| false else |_| true };
+            p.len += 1;
+        }
+        return result;
+    }
+
+    pub fn now(p: *Polls, io: Io) scheduler.Instant {
+        return p.inner.now(io);
+    }
+
+    pub fn create(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.CreateRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.CreateResult {
+        return p.inner.create(io, ctx, request, options);
+    }
+
+    pub fn get(p: *Polls, io: Io, ctx: core.Context, ref: *const scheduler.Ref, options: scheduler.Store.CallOptions) scheduler.StoreError!?scheduler.Record {
+        return p.inner.get(io, ctx, ref, options);
+    }
+
+    pub fn update(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.UpdateRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.UpdateResult {
+        return p.inner.update(io, ctx, request, options);
+    }
+
+    pub fn remove(p: *Polls, io: Io, ctx: core.Context, ref: *const scheduler.Ref, options: scheduler.Store.CallOptions) scheduler.StoreError!bool {
+        return p.inner.remove(io, ctx, ref, options);
+    }
+
+    pub fn list(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.ListRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.RecordPage {
+        return p.inner.list(io, ctx, request, options);
+    }
+
+    pub fn renew(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.RenewRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.RenewResult {
+        return p.inner.renew(io, ctx, request, options);
+    }
+
+    pub fn finish(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.FinishRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.FinishResult {
+        return p.inner.finish(io, ctx, request, options);
+    }
+
+    pub fn history(p: *Polls, io: Io, ctx: core.Context, request: *const scheduler.Store.HistoryRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.RunPage {
+        return p.inner.history(io, ctx, request, options);
+    }
+};
+
 fn stallDuringPolling(io: Io) !void {
     var scene: fixture.Scene = undefined;
     try scene.open(io, e2e.servers.stall, "stall_polls");
@@ -513,17 +599,17 @@ fn stallDuringPolling(io: Io) !void {
     var node: fixture.Node = undefined;
     try node.open(io, e2e.servers.stall, scene.database);
     defer node.close();
-    // Counts the polls.
-    var counted: scheduler.testing.FaultyStore = .init(node.store.store());
+    var polls: Polls = .{ .inner = node.store.store() };
     const client: scheduler.Client = .init(testing.allocator, io, node.store.store(), .{});
     var probe: fixture.Probe = .{};
     var stalled: Stalled = .{ .probe = &probe, .hold = false };
     const options = fixture.options("polling", 4);
-    var w: scheduler.Worker(StalledJobs) = try .init(testing.allocator, io, counted.store(), .{ .stalled = &stalled }, options);
+    var w: scheduler.Worker(StalledJobs) = try .init(testing.allocator, io, polls.store(), .{ .stalled = &stalled }, options);
     defer w.deinit(io);
     try w.start(io);
+    var copy: [256]Polls.Claim = undefined;
     var limit: fixture.Limit = .of(io, 30, "the first polls");
-    while (counted.calls(io, .claim) < 3) try limit.tick(io);
+    while (polls.noted(io, &copy).len < 3) try limit.tick(io);
     // Due while the server is paused.
     const ref: scheduler.Ref = .of(Stalled, "k");
     _ = try client.schedule(io, within10s(io), Stalled, .{ .key = ref.key, .when = .{ .after = .fromSeconds(5) } }, .{});
@@ -531,29 +617,22 @@ fn stallDuringPolling(io: Io) !void {
     var paused: Pause = .{};
     defer paused.endAtLast(io);
     try paused.begin(io);
-    limit = .of(io, 30, "the first failed poll");
-    while (!w.stats().store_down) try limit.tick(io);
-    // From then on the pauses between polls grow: poll_every × 2, × 4, × 8,
-    // × 16, each less by up to a tenth, the calls themselves aside.
-    var at = Io.Clock.awake.now(io);
-    var polls = counted.calls(io, .claim);
+    limit = .of(io, 30, "five failed polls in a row");
+    while (polls.failedInARow(io) < 5) try limit.tick(io);
+    // From the end of each failed poll to the start of the next, the pause
+    // grows: poll_every × 2, × 4, × 8, × 16, each less by up to a tenth.
+    const claims = polls.noted(io, &copy);
+    var first = claims.len;
+    while (first > 0 and claims[first - 1].failed) first -= 1;
     var pause: Io.Duration = options.poll_every;
-    for (0..4) |_| {
-        limit = .of(io, 30, "the next poll");
-        while (counted.calls(io, .claim) == polls) {
-            if (Io.Clock.awake.now(io).nanoseconds >= limit.end) return error.TestTimedOut;
-            try io.sleep(.fromMilliseconds(5), .awake);
-        }
-        const now = Io.Clock.awake.now(io);
+    for (claims[first..][0..4], claims[first + 1 ..][0..4], 1..) |failed, next, k| {
         pause = .fromNanoseconds(@min(pause.nanoseconds * 2, options.max_backoff.nanoseconds));
-        const least = @divTrunc(pause.nanoseconds * 9, 10) - 30 * std.time.ns_per_ms;
-        const gap = at.durationTo(now);
+        const least = @divTrunc(pause.nanoseconds * 9, 10) - std.time.ns_per_ms;
+        const gap = failed.end.durationTo(next.start);
         if (gap.nanoseconds < least) {
-            std.debug.print("a poll {d} ms after the one before; the pause is at least {d} ms\n", .{ gap.toMilliseconds(), @divTrunc(least, std.time.ns_per_ms) });
+            std.debug.print("poll {d} after the first failed one came {d} ms after the end of the one before; the pause is at least {d} ms\n", .{ k, gap.toMilliseconds(), @divTrunc(least, std.time.ns_per_ms) });
             return error.TestUnexpectedResult;
         }
-        at = now;
-        polls = counted.calls(io, .claim);
     }
     try testing.expect(w.stats().store_down);
     try testing.expectEqual(@as(u32, 0), probe.began.load(.acquire));
