@@ -81,13 +81,14 @@ pub fn within(io: Io, duration: Io.Duration) core.Context {
     return core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), duration));
 }
 
-var names: std.atomic.Value(u32) = .init(0);
-
-/// `scheduler_<prefix>_<n>` in `buffer`: a database that no other one of
-/// the run has, n counting from 1. A run that died may have left one of
-/// the name: drop it before use.
-pub fn freshName(buffer: []u8, prefix: []const u8) error{NoSpaceLeft}![]const u8 {
-    return std.fmt.bufPrint(buffer, "scheduler_{s}_{d}", .{ prefix, names.fetchAdd(1, .monotonic) + 1 });
+/// `scheduler_<prefix>_<8 hex digits>` in `buffer`: a database that no
+/// other one has, of this run or of another. The digits are random, so
+/// that a run never meets what a run before it left: a database, or a
+/// worker in a process of its own that still polls one.
+pub fn freshName(io: Io, buffer: []u8, prefix: []const u8) error{NoSpaceLeft}![]const u8 {
+    var bytes: [4]u8 = undefined;
+    io.random(&bytes);
+    return std.fmt.bufPrint(buffer, "scheduler_{s}_{s}", .{ prefix, &std.fmt.bytesToHex(bytes, .lower) });
 }
 
 /// A client of a server for what the tests do to it themselves: drop

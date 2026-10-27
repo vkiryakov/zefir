@@ -34,8 +34,9 @@ pub fn stop(io: Io, worker: anytype) !void {
     try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }));
 }
 
-/// The database of a scenario, `scheduler_<prefix>_<n>`: fresh, and
-/// dropped at the end through a client of its own. Open it in place.
+/// The database of a scenario, `scheduler_<prefix>_<8 hex digits>`:
+/// fresh, and dropped at the end through a client of its own. Open it in
+/// place.
 pub const Scene = struct {
     admin: e2e.Admin,
     buffer: [64]u8,
@@ -44,7 +45,7 @@ pub const Scene = struct {
     pub fn open(s: *Scene, io: Io, uri: []const u8, prefix: []const u8) !void {
         try s.admin.open(io, uri);
         errdefer s.admin.close();
-        s.database = try e2e.freshName(&s.buffer, prefix);
+        s.database = try e2e.freshName(io, &s.buffer, prefix);
         try s.admin.dropDatabase(io, s.database);
     }
 

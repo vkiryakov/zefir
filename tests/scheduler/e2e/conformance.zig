@@ -22,7 +22,7 @@ const Harness = struct {
     database: []const u8 = "",
 
     pub fn setUp(h: *Harness, io: Io, gpa: std.mem.Allocator) !conformance.Setup {
-        h.database = try e2e.freshName(&h.buffer, "conformance");
+        h.database = try e2e.freshName(io, &h.buffer, "conformance");
         try h.admin.dropDatabase(io, h.database);
         // The TTL monitor wakes every 60 s by default: once a second, an
         // expired record goes within the expiry_lag below.

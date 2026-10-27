@@ -33,7 +33,7 @@ fn claimPlan(io: Io) !void {
     defer client.deinit();
     try client.connect(io, e2e.within(io, .fromSeconds(30)), null);
     var name_buffer: [64]u8 = undefined;
-    const database = try e2e.freshName(&name_buffer, "explain");
+    const database = try e2e.freshName(io, &name_buffer, "explain");
     try admin.dropDatabase(io, database);
     defer admin.dropDatabase(io, database) catch |err| std.debug.print("drop of {s}: {t}\n", .{ database, err });
     var store: mongo.SchedulerStore = try .init(testing.allocator, io, &client, .{ .database = database });
@@ -120,7 +120,7 @@ fn historyPlans(io: Io) !void {
     defer client.deinit();
     try client.connect(io, e2e.within(io, .fromSeconds(30)), null);
     var name_buffer: [64]u8 = undefined;
-    const database = try e2e.freshName(&name_buffer, "explain");
+    const database = try e2e.freshName(io, &name_buffer, "explain");
     try admin.dropDatabase(io, database);
     defer admin.dropDatabase(io, database) catch |err| std.debug.print("drop of {s}: {t}\n", .{ database, err });
     var store: mongo.SchedulerStore = try .init(testing.allocator, io, &client, .{ .database = database });
