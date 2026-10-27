@@ -2547,6 +2547,16 @@ fn addConfyGuide(
         exe.root_module.addOptions("fixtures", fixtures);
         for (program.runs, 0..) |case, i| {
             const run = addRun(b, exe, tsan);
+            // A run gets the APP_ variables of its case and none of the
+            // shell's: the programs read them, and Zig caches the variables
+            // of a run with the configuration, past an unset in the shell.
+            const env = run.getEnvMap();
+            var k = env.count();
+            while (k > 0) {
+                k -= 1;
+                const key = env.keys()[k];
+                if (std.ascii.startsWithIgnoreCase(key, "APP_")) _ = env.swapRemove(key);
+            }
             for (case.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
             for (program.files) |file| run.addFileInput(b.path(b.fmt("{s}{s}", .{ files_dir, file })));
             run.expectExitCode(case.exit);
