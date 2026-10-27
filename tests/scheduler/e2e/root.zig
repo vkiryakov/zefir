@@ -16,6 +16,11 @@ const core = @import("core");
 const bson = @import("mongo-bson");
 const mongo = @import("mongo");
 
+/// What the scenarios of workers share, and the proxy between them and
+/// mongod: the stress tests take them from here.
+pub const fixture = @import("fixture.zig");
+pub const Proxy = @import("Proxy.zig");
+
 /// The servers of docker-compose.yml.
 pub const servers = struct {
     /// mongo-plain: no authentication, test commands on.
@@ -49,8 +54,9 @@ pub fn onZio(comptime scenario: fn (Io) anyerror!void) !void {
 
 /// Runs `scenario` in a task of its own and cancels it when it takes
 /// longer than `time_limit`: a server that stops answering fails the test
-/// instead of hanging it.
-fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!void {
+/// instead of hanging it. The stress tests run their scenarios through it
+/// too.
+pub fn withinTimeLimit(io: Io, comptime scenario: fn (Io) anyerror!void) anyerror!void {
     const Race = union(enum) {
         done: anyerror!void,
         timer: Io.Cancelable!void,

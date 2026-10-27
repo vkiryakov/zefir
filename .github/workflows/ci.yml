@@ -307,7 +307,8 @@ jobs:
   # and 9.0.4, through MONGO_VERSION; ubuntu only, as mongo-e2e. It is not
   # a required check. It runs when scheduler is among the modules to test,
   # and tests/scheduler stands on mongo too: affected-modules.sh ties them,
-  # so it runs on every change to either.
+  # so it runs on every change to either. The stress tests of
+  # tests/scheduler run on a developer's machine only.
   scheduler-e2e:
     name: scheduler-e2e (${{ matrix.mongo }})
     needs: changes
