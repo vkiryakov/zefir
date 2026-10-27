@@ -27,7 +27,7 @@
   ],
   "rules": [
     "Zefir builds with Zig 0.17.0 only. Write Zig 0.17 code as the zefir guides show; code written for Zig 0.13 to 0.16 often does not compile with it.",
-    "Write main as pub fn main(init: std.process.Init) !void and take init.gpa, init.io, init.arena and init.environ_map from it, as every zefir guide does.",
+    "Write main as pub fn main(init: std.process.Init) !void (or !u8 to return an exit code) and take init.gpa, init.io, init.arena and init.environ_map from it, as the zefir guides do.",
     "In build.zig: const zefir = b.dependency(\"zefir\", .{ .target = target, .optimize = optimize }); then add each module to .imports as .{ .name = \"confy\", .module = zefir.module(\"zefir-confy\") }.",
     "Modules are published as zefir-<name>: zefir-core, -log, -confy, -validator, -rpc, -rpc-nats, -nats, -http, -mongo-bson, -mongo, -odm, -redis, -security, -openapi. Modules the README marks Planned or In progress do not exist.",
     "Import a module by its name in .imports: @import(\"confy\"), @import(\"rpc-nats\"), @import(\"mongo-bson\"). Or add only zefir.module(\"zefir\") and use @import(\"zefir\").confy, .rpc_nats, .mongo_bson, .App.",

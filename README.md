@@ -35,8 +35,8 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 - **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
 - **Not limited to what ships.** Where a module meets the outside world, it goes through an interface, a pointer to your object and its function pointers, as `std.Io` does, and an implementation of your own takes the place of zefir's: a transport of rpc (`rpc.ClientTransport` and `rpc.ServerTransport`, which every `rpc.Server` and `rpc.Client` is given: zefir ships NATS, and [your own](src/rpc-nats/examples/writing-a-transport.md) lives in a package of its own), `rpc_nats.Conn` for another NATS library, and the `std.Io.Writer` that zefir-log writes to (`.output = .{ .writer = … }`). Middleware, authenticators and credentials providers of your own join the calls of rpc the same way.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
-- **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
-- **Tested on Linux, macOS and Windows.** CI runs the tests of every module on all three.
+- **No dependencies.** Pure Zig on top of the standard library; zio, the runtime a service runs on, comes from your build, not from Zefir.
+- **Tested on Linux, macOS and Windows.** Every module's tests run on all three.
 
 ## Modules
 
@@ -62,7 +62,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-grpc`                       | gRPC interoperability                                                                                                                                                                                                         | 📋 Planned                                                                                                                                                        |
 | **Database & Persistence**         |                                                                                                                                                                                                                               |                                                                                                                                                                  |
 | `zefir-mongo`                      | Async MongoDB driver on `std.Io`: standalone mongod, SCRAM, pooling, BSON, collections; no TLS yet                                                                                                                            | 🟡 Partial (standalone mongod only: no replica set, sharded cluster or TLS) · [docs](src/mongo/examples/README.md)                                                |
-| `zefir-mongo-bson`                 | BSON, the format of MongoDB's documents: Zig values to BSON and back, raw documents, Extended JSON; shared by `zefir-mongo` and `zefir-odm`                                                                                   | ✅ Done · [docs](src/mongo/examples/README.md)                                                                                                                    |
+| `zefir-mongo-bson`                 | BSON, the format of MongoDB's documents: Zig values to BSON and back, raw documents, Extended JSON; shared by `zefir-mongo` and `zefir-odm`                                                                                   | ✅ Done · [docs](src/mongo/examples/README.md#documents-zefir-mongo-bson)                                                                                         |
 | `zefir-redis`                      | Redis and Valkey client on `std.Io`: one standalone server, RESP3, connection pooling, typed replies, pipelines, WATCH transactions, Lua scripts, streams with consumer groups, pub/sub; no TLS yet, so trusted networks only | 🟡 Partial (one standalone server only: no Sentinel, Cluster or TLS) · [docs](src/redis/examples/README.md)                                                       |
 | `zefir-odm`                        | Typed ODM for MongoDB: models as structs, queries checked at compile time, tenants on shared and own servers, connections replaced on the fly, any driver that passes its conformance suite                                   | ✅ Done · [docs](src/odm/examples/README.md)                                                                                                                      |
 | `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                                                                                                                                      | 📋 Planned                                                                                                                                                        |
@@ -456,7 +456,11 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 `--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.11.0**, fetch `#v0.11.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
 
-A service also needs [zio](https://github.com/lalinsky/zio), the runtime it runs on; zio has no release for Zig 0.17 yet, so pin the commit that the guides name in their Installation: `zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a`.
+A service also needs [zio](https://github.com/lalinsky/zio), the runtime it runs on; zio has no release for Zig 0.17 yet, so pin the commit that the guides name in their Installation, where their `build.zig` imports it too:
+
+```sh
+zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
+```
 
 Then import the modules you need in your `build.zig`:
 
