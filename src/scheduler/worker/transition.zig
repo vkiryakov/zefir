@@ -20,6 +20,10 @@
 //!   only the row goes in.
 //! - The abandoned attempt this claim took over was the last: no run; a
 //!   one-shot record is failed, a repeating one goes on to its next moment.
+//! - During the abandoned attempt this claim took over, the client moved
+//!   the record (`reschedule`) to a moment still to come: no run, the
+//!   record waits for it, attempt 0. Or it asked for a pause: no run, the
+//!   record pauses for the same run, the attempt of this claim not counted.
 //! - A repeating run later than its `.skip` threshold: no run, the next
 //!   moment after the claim.
 //! - A payload or a plan that does not read here: back in a minute, the
@@ -38,8 +42,9 @@
 //!   attempt but two, where the handler did not run and there is nothing to
 //!   tell: the return of a record that does not read here, and the return
 //!   of one claimed and not started at a stop. The row of an abandoned
-//!   attempt that the claim took over goes in whatever the claim did: that
-//!   attempt may have had effects.
+//!   attempt that the claim took over goes in whatever the claim did, with
+//!   the attempt and the moment its own claim gave it: that attempt may
+//!   have had effects, under the run key of that moment.
 //! - Every transition but the return of a record that does not read here
 //!   clears `unreadable_since`.
 
@@ -81,6 +86,12 @@ pub const Ending = union(enum) {
     skipped,
     /// Not run: the abandoned attempt this claim took over was the last.
     abandoned_last,
+    /// Not run: the client moved the record during the abandoned attempt
+    /// this claim took over, to a moment still to come.
+    abandoned_moved,
+    /// Not run: the client asked for a pause during the abandoned attempt
+    /// this claim took over.
+    abandoned_paused,
 };
 
 pub const Input = struct {
@@ -175,10 +186,18 @@ pub fn decide(input: Input) Decision {
             break :skipped movedTo(c, null);
         },
         .abandoned_last => abandoned: {
-            const started_at = if (input.took_over) |prior| prior.claimed_at else claimed_at;
-            d.last = .{ .outcome = .abandoned, .error_name = null, .attempt = r.attempt -| 1, .started_at = started_at, .finished_at = claimed_at };
+            d.last = abandonedLast(input, claimed_at);
             if (moved) break :abandoned movedTo(c, null);
             break :abandoned over(input, &d, claimed_at, .abandoned);
+        },
+        // The record of the claim holds the moment of the move.
+        .abandoned_moved => abandoned: {
+            d.last = abandonedLast(input, claimed_at);
+            break :abandoned movedTo(c, null);
+        },
+        .abandoned_paused => abandoned: {
+            d.last = abandonedLast(input, claimed_at);
+            break :abandoned if (moved) movedTo(c, null) else back(r, .zero, null);
         },
     };
     d.next = next;
@@ -205,8 +224,16 @@ fn toldOf(ending: Ending) ?Told {
         .lost => .{ .outcome = .interrupted, .error_name = "LeaseLost" },
         .removed => .{ .outcome = .interrupted, .error_name = "Cancelled" },
         .skipped => .{ .outcome = .skipped, .error_name = null },
-        .not_started, .unreadable, .abandoned_last => null,
+        .not_started, .unreadable, .abandoned_last, .abandoned_moved, .abandoned_paused => null,
     };
+}
+
+/// `last` of the abandoned attempt that this claim took over and did not
+/// follow with a run: started when its claim was made, at the attempt that
+/// claim gave it, and ended with this claim.
+fn abandonedLast(input: Input, claimed_at: Instant) LastRun {
+    const prior = input.took_over orelse return .{ .outcome = .abandoned, .error_name = null, .attempt = input.claimed.attempt -| 1, .started_at = claimed_at, .finished_at = claimed_at };
+    return .{ .outcome = .abandoned, .error_name = null, .attempt = prior.attempt, .started_at = prior.claimed_at, .finished_at = claimed_at };
 }
 
 fn ownRow(r: *const Record, told: Told, instance: []const u8, claimed_at: Instant) Run {
@@ -228,7 +255,8 @@ fn ownRow(r: *const Record, told: Told, instance: []const u8, claimed_at: Instan
 }
 
 /// The row of the attempt before this claim, whose owner was lost: the
-/// claim before, started when it was made.
+/// claim before, started when it was made, at the attempt and the moment
+/// that claim gave its run, which a move of the client since left.
 fn abandonedRow(r: *const Record, prior: Store.TookOver, claimed_at: Instant) Run {
     return .{
         .job = r.job,
@@ -236,8 +264,8 @@ fn abandonedRow(r: *const Record, prior: Store.TookOver, claimed_at: Instant) Ru
         .tenant = r.tenant,
         .life = r.life,
         .fence = r.fence -| 1,
-        .attempt = r.attempt -| 1,
-        .scheduled_at = r.scheduled_at,
+        .attempt = prior.attempt,
+        .scheduled_at = prior.scheduled_at,
         .started_at = prior.claimed_at,
         .finished_at = claimed_at,
         .outcome = .abandoned,

@@ -293,6 +293,100 @@ test "an abandoned attempt is written by the claim that takes it over" {
     try testing.expectEqual(@as(u64, 2), w.stats().taken_over);
 }
 
+/// The record of `ref` claimed by "ghost" for a second, which then dies:
+/// the record of its claim.
+fn ghostClaim(f: *Fixture, ref: scheduler.Ref) !scheduler.Record {
+    const claim: Store.ClaimRequest = .{ .owner = "ghost", .any_key = &.{}, .keyed_only = &.{ref.job}, .max = 1, .lease = .fromSeconds(1), .tag = @splat(1) };
+    const ghost = (try f.memory.store().claim(io, .root, &claim, .{ .allocator = f.arena.allocator() })).claimed;
+    if (ghost.len != 1) return error.TestUnexpectedResult;
+    return ghost[0].record;
+}
+
+test "a takeover of an attempt that the client moved runs nothing and waits for the new moment" {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var job: Ghostly = .{ .probe = &probe };
+    const ref: scheduler.Ref = .of(Ghostly, "x");
+    try f.schedule(Ghostly, "x", .{ .after = .zero });
+    const ran = try ghostClaim(&f, ref);
+    // An hour later, the client said while the ghost ran it.
+    try testing.expectEqual(scheduler.Client.Changed.changed, try f.client.reschedule(io, .root, ref, .{ .after = .fromSeconds(3600) }, .{}));
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var w: scheduler.Worker(struct { job: *Ghostly }) = try .init(testing.allocator, io, f.store(), .{ .job = &job }, quick);
+    defer w.deinit(io);
+    try w.start(io);
+    // The row of the attempt as the ghost's claim gave it, not as the move
+    // left the record: its run key names the run it was.
+    const row = try rowOf(&f, ref, .abandoned);
+    try testing.expectEqualStrings("ghost", row.instance);
+    try testing.expectEqual(ran.attempt, row.attempt);
+    try testing.expectEqual(ran.scheduled_at, row.scheduled_at);
+    const r = (try f.until(ref, .pending, 5)) orelse return error.TestUnexpectedResult;
+    try testing.expect(r.scheduled_at.unix_ms > f.memory.store().now(io).unix_ms + 50 * 60 * 1000);
+    try testing.expectEqual(@as(u32, 0), r.attempt);
+    try testing.expectEqual(scheduler.RunOutcome.abandoned, (r.last orelse return error.TestUnexpectedResult).outcome);
+    try testing.expectEqual(@as(u32, 0), probe.runs.load(.acquire));
+}
+
+test "a takeover of an attempt whose pause the client asked for runs nothing and pauses" {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var job: Ghostly = .{ .probe = &probe };
+    const ref: scheduler.Ref = .of(Ghostly, "x");
+    try f.schedule(Ghostly, "x", .{ .after = .zero });
+    const ran = try ghostClaim(&f, ref);
+    try testing.expectEqual(scheduler.Client.Changed.changed, try f.client.pause(io, .root, ref, .{}));
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var w: scheduler.Worker(struct { job: *Ghostly }) = try .init(testing.allocator, io, f.store(), .{ .job = &job }, quick);
+    defer w.deinit(io);
+    try w.start(io);
+    // Paused for the same run, the ghost's attempt counted.
+    const r = (try f.until(ref, .paused, 5)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(ran.scheduled_at, r.scheduled_at);
+    try testing.expectEqual(ran.attempt, r.attempt);
+    try testing.expectEqual(scheduler.RunOutcome.abandoned, (r.last orelse return error.TestUnexpectedResult).outcome);
+    try testing.expectEqual(ran.attempt, (try rowOf(&f, ref, .abandoned)).attempt);
+    try testing.expectEqual(@as(u32, 0), probe.runs.load(.acquire));
+    // Unpaused, it runs its next attempt.
+    try testing.expectEqual(scheduler.Client.Changed.changed, try f.client.unpause(io, .root, ref, .{}));
+    try reach(&probe.ended, 1, 5);
+    try testing.expectEqual(ran.attempt + 1, probe.attempt.load(.acquire));
+}
+
+test "a takeover of the last attempt of a job whose plan does not read here runs nothing" {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var job: Ghostly = .{ .probe = &probe };
+    const ref: scheduler.Ref = .of(Ghostly, "x");
+    // The plan of a newer version, and the one attempt of a repeating job.
+    const options: Store.CallOptions = .{ .allocator = f.arena.allocator() };
+    _ = try f.memory.store().create(io, .root, &.{ .job = ref.job, .key = ref.key, .life = @splat(5), .plan = "hourly 30 tz=Europe/Berlin", .payload = "{}", .run_at = .{ .after = .zero } }, options);
+    _ = try ghostClaim(&f, ref);
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var w: scheduler.Worker(struct { job: *Ghostly }) = try .init(testing.allocator, io, f.store(), .{ .job = &job }, quick);
+    defer w.deinit(io);
+    try w.start(io);
+    // The row goes in with the transition, which does not give the run
+    // back: its next moment, which this instance cannot compute, is for an
+    // instance that reads the plan, in a minute.
+    _ = try rowOf(&f, ref, .abandoned);
+    const r = (try f.get(ref)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(scheduler.State.pending, r.state);
+    try testing.expectEqual(@as(u32, 0), r.attempt);
+    try testing.expectEqual(scheduler.RunOutcome.abandoned, (r.last orelse return error.TestUnexpectedResult).outcome);
+    try testing.expect(r.unreadable_since != null);
+    try testing.expectEqual(@as(u32, 0), probe.runs.load(.acquire));
+}
+
 test "a payload this worker cannot read goes back for a minute without a row or last" {
     var f: Fixture = undefined;
     f.init();

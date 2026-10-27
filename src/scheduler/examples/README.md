@@ -1062,10 +1062,13 @@ $ zig build run
   repeating job, `.at` and `.after` move its next run only, `.repeat`
   changes its schedule, and `.repeat` makes a one-shot job a repeating
   one. A change during a run wins over the outcome of that run: the job
-  waits for its new time.
+  waits for its new time. When the instance of the run was lost, the
+  worker that takes the job over does not run it before that time either.
 - **`pause`** of the report of acme: a pending job waits, and keeps its
   time for `unpause`; a second pause is `.unchanged`. A running job
-  pauses when its run ends. `unpause` lets it wait for its time again:
+  pauses when its run ends; when the instance of the run was lost, the
+  worker that takes the job over pauses it without a run, for the same
+  run. `unpause` lets it wait for its time again:
   a time that passed meanwhile runs at once, and a repeating job's runs
   that passed go by its misfire policy, see [Missed runs](#missed-runs).
 - **`list`** gives the records of a filter of job, tenant and state, any
@@ -1642,7 +1645,9 @@ that ran, even one whose outcome the store refused:
 **An abandoned attempt.** When a worker claims a job whose lease ran out,
 it writes, with the row of its own run, a row `abandoned` for the claim it
 took over: the attempt of an instance that vanished, whose effects nobody
-knows. If that instance comes back after all and reports, its own row
+knows. The row has the attempt and the moment that claim gave its run,
+even when the client moved the job since, so its run key is the one that
+run had. If that instance comes back after all and reports, its own row
 replaces the row `abandoned`: one row for each claim, and the owner's
 word wins. For financial control, the attempts to check are those:
 `client.history(io, ctx, .{ .outcome = .abandoned }, page, arena, .{})`

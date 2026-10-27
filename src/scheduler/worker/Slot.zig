@@ -83,21 +83,30 @@ fn process(s: *Slot, item: Engine.Item) void {
     s.finish(entry, item.claimed, ending);
 }
 
-/// The checks before a run, in order, then the run: a stop gives the
-/// record back; a plan that does not read here, an abandoned attempt that
-/// was the last, a run of a repeating job too late for `.skip` and a
-/// payload that does not read here run nothing.
+/// The checks before a run, in order, then the run: a takeover of an
+/// abandoned attempt during which the client moved the record or asked for
+/// a pause, or that was the last, runs nothing, at a stop too; a stop gives
+/// the record back; a plan that does not read here, a run of a repeating
+/// job too late for `.skip` and a payload that does not read here run
+/// nothing.
 fn check(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, sent: Io.Timestamp) Ending {
     const e = s.engine;
     const r = &claimed.record;
     const p = &entry.policy;
     const attempts = p.attempts(r.plan);
-    const last_lost = claimed.took_over != null and r.attempt > attempts;
-    if (e.isStopping()) return if (last_lost) .abandoned_last else .not_started;
-    const plan: ?Schedule = if (r.plan.len == 0) null else Schedule.parse(r.plan, null) catch return .{ .unreadable = .schedule };
-    if (last_lost) return .abandoned_last;
     // A claimed record has its claimed_at.
     const claimed_at = r.claimed_at orelse r.scheduled_at;
+    if (claimed.took_over != null) {
+        // A change of the client during the abandoned attempt wins over it,
+        // as over the outcome of a run. Only a move makes the moment of a
+        // running record later than its claim; a move to a moment already
+        // past runs now, its attempts counted from 0.
+        if (r.scheduled_at.unix_ms > claimed_at.unix_ms) return .abandoned_moved;
+        if (r.attempt > attempts) return .abandoned_last;
+        if (r.pause_requested) return .abandoned_paused;
+    }
+    if (e.isStopping()) return .not_started;
+    const plan: ?Schedule = if (r.plan.len == 0) null else Schedule.parse(r.plan, null) catch return .{ .unreadable = .schedule };
     if (plan != null and policy.late(p.misfire, r.scheduled_at, claimed_at)) return .skipped;
     const payload = switch (entry.read(s.arena.allocator(), r.payload)) {
         .payload => |x| x,

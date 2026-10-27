@@ -146,7 +146,9 @@ pub fn cancel(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, opti
     return c.store.remove(io, ctx, &ref, .{ .allocator = arena.allocator(), .diagnostics = options.diagnostics });
 }
 
-/// A pending job pauses; a running one pauses when its run ends.
+/// A pending job pauses; a running one pauses when its run ends, or, when
+/// the instance of the run was lost, when another takes it over, without a
+/// run.
 pub fn pause(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, options: CallOptions) Error!Changed {
     var arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer arena.deinit();
@@ -164,7 +166,9 @@ pub fn unpause(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, opt
 /// A one-shot job moves. For a repeating job `.at` and `.after` move its
 /// next run, and `.repeat` changes its schedule; `.repeat` makes a one-shot
 /// job a repeating one. `when` is checked as `schedule` checks it. A
-/// change during a run wins over the outcome of that run.
+/// change during a run wins over the outcome of that run, and over a run
+/// whose instance was lost: the instance that takes it over does not run
+/// it before the new time.
 pub fn reschedule(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, when: When, options: CallOptions) Error!Changed {
     var arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer arena.deinit();

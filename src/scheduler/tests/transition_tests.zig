@@ -29,7 +29,8 @@ const tomorrow: Instant = .fromUtc(2026, 10, 25, 3, 30, 0, .h24);
 /// claim took over.
 const owner = "shop/00112233445566778899aabbccddeeff";
 const previous = "shop/ffeeddccbbaa99887766554433221100";
-const taken: Store.TookOver = .{ .owner = previous, .claimed_at = .fromUtc(2026, 10, 24, 3, 29, 0, .h24), .attempt = 1, .scheduled_at = scheduled };
+/// When the claim that a takeover took over was made.
+const taken_at: Instant = .fromUtc(2026, 10, 24, 3, 29, 0, .h24);
 
 const one_shot = "";
 const daily = "daily 03:30:00";
@@ -80,6 +81,12 @@ fn claimAt(plan: []const u8, attempt: u32) Record {
     r.attempt = attempt;
     r.fence = attempt;
     return r;
+}
+
+/// The claim that the claim of `r` took over, with nothing moved between
+/// them: the attempt before, the same moment.
+fn tookOver(r: *const Record) Store.TookOver {
+    return .{ .owner = previous, .claimed_at = taken_at, .attempt = r.attempt -| 1, .scheduled_at = r.scheduled_at };
 }
 
 /// What a decision takes besides the record and the ending.
@@ -146,7 +153,7 @@ fn abandoned(r: *const Record) Run {
     var run = row(r, .abandoned, null);
     run.fence = r.fence - 1;
     run.attempt = r.attempt - 1;
-    run.started_at = taken.claimed_at;
+    run.started_at = taken_at;
     run.instance = previous;
     return run;
 }
@@ -327,22 +334,22 @@ test "a takeover adds the abandoned row of the attempt before, started at its cl
     // The run goes as usual; its finish carries the row of the attempt
     // whose owner was lost, first.
     const r = claimAt(one_shot, 2);
-    var d = decide(&r, .succeeded, .{ .took_over = taken });
+    var d = decide(&r, .succeeded, .{ .took_over = tookOver(&r) });
     try expectRows(&.{ abandoned(&r), row(&r, .succeeded, null) }, &d);
     try testing.expectEqual(@as(Next, .delete), d.next);
     try testing.expectEqualDeep(last(&r, .succeeded, null), d.last);
     const repeating = claimAt(daily, 2);
-    d = decide(&repeating, .{ .failed = error.PaymentDeclined }, .{ .took_over = taken });
+    d = decide(&repeating, .{ .failed = error.PaymentDeclined }, .{ .took_over = tookOver(&repeating) });
     try expectRows(&.{ abandoned(&repeating), row(&repeating, .failed, "PaymentDeclined") }, &d);
     try testing.expectEqual(nextRun(.{ .at = tomorrow }), d.next);
 
     // The abandoned attempt may have had effects, so its row goes in even
     // when this claim does not run: a return without a row of its own.
-    d = decide(&r, .not_started, .{ .took_over = taken });
+    d = decide(&r, .not_started, .{ .took_over = tookOver(&r) });
     try expectRows(&.{abandoned(&r)}, &d);
     try testing.expectEqual(back(&r), d.next);
     try testing.expectEqual(@as(?LastRun, null), d.last);
-    d = decide(&r, .{ .unreadable = .payload }, .{ .took_over = taken });
+    d = decide(&r, .{ .unreadable = .payload }, .{ .took_over = tookOver(&r) });
     try expectRows(&.{abandoned(&r)}, &d);
     try testing.expectEqual(@as(?LastRun, null), d.last);
 }
@@ -350,22 +357,22 @@ test "a takeover adds the abandoned row of the attempt before, started at its cl
 test "the abandoned attempt was the last: one-shot done(failed), recurring next moment, last abandoned" {
     // Five attempts by default: the sixth claim took over the fifth.
     const r = claimAt(one_shot, 6);
-    const shown: ?LastRun = .{ .outcome = .abandoned, .error_name = null, .attempt = 5, .started_at = taken.claimed_at, .finished_at = claimed };
-    var d = decide(&r, .abandoned_last, .{ .took_over = taken });
+    const shown: ?LastRun = .{ .outcome = .abandoned, .error_name = null, .attempt = 5, .started_at = taken_at, .finished_at = claimed };
+    var d = decide(&r, .abandoned_last, .{ .took_over = tookOver(&r) });
     try testing.expectEqual(finished(.failed, kept_failed), d.next);
     try testing.expectEqualDeep(shown, d.last);
     try expectRows(&.{abandoned(&r)}, &d);
     try testing.expect(d.event == .gave_up);
     var gone = base;
     gone.when_done.failed = .none;
-    d = decide(&r, .abandoned_last, .{ .took_over = taken, .policy = &gone });
+    d = decide(&r, .abandoned_last, .{ .took_over = tookOver(&r), .policy = &gone });
     try testing.expectEqual(@as(Next, .delete), d.next);
 
     // One attempt of a repeating record: its next moment, attempt 0.
     const repeating = claimAt(daily, 2);
-    d = decide(&repeating, .abandoned_last, .{ .took_over = taken });
+    d = decide(&repeating, .abandoned_last, .{ .took_over = tookOver(&repeating) });
     try testing.expectEqual(nextRun(.{ .at = tomorrow }), d.next);
-    try testing.expectEqualDeep(@as(?LastRun, .{ .outcome = .abandoned, .error_name = null, .attempt = 1, .started_at = taken.claimed_at, .finished_at = claimed }), d.last);
+    try testing.expectEqualDeep(@as(?LastRun, .{ .outcome = .abandoned, .error_name = null, .attempt = 1, .started_at = taken_at, .finished_at = claimed }), d.last);
     try expectRows(&.{abandoned(&repeating)}, &d);
     try testing.expect(d.event == .none);
 }
@@ -383,7 +390,7 @@ test "skipped: a skipped row, last skipped, the next moment after the claim" {
     try expectRows(&.{row(&r, .skipped, null)}, &d);
     try testing.expect(d.event == .skipped);
     // A takeover of an abandoned attempt that came too late: both rows.
-    d = decide(&r, .skipped, .{ .policy = &skipping, .took_over = taken });
+    d = decide(&r, .skipped, .{ .policy = &skipping, .took_over = tookOver(&r) });
     try expectRows(&.{ abandoned(&r), row(&r, .skipped, null) }, &d);
 }
 
@@ -502,31 +509,84 @@ test "changed during the run: the new moment or the new plan, attempt 0, the out
 }
 
 test "pause_requested turns wait(pending) into wait(paused)" {
-    // Asked for before this claim (a takeover keeps it) or during the run
-    // (the record of a `changed` finish).
-    var asked = claim(daily);
-    asked.pause_requested = true;
-    var d = decide(&asked, .succeeded, .{});
-    try testing.expectEqual(Next{ .wait = .{ .state = .paused, .run_at = .{ .at = tomorrow }, .scheduled_at = null, .attempt = 0 } }, d.next);
+    // Asked for during the run: the record of a `changed` finish.
     const r = claim(daily);
-    d = decide(&r, .succeeded, .{ .current = &asked });
+    var asked = r;
+    asked.pause_requested = true;
+    asked.revision = 4;
+    var d = decide(&r, .succeeded, .{ .current = &asked });
     try testing.expectEqual(Next{ .wait = .{ .state = .paused, .run_at = .{ .at = tomorrow }, .scheduled_at = null, .attempt = 0 } }, d.next);
-    // Taken back during the run: pending.
-    d = decide(&asked, .succeeded, .{ .current = &r });
-    try testing.expectEqual(nextRun(.{ .at = tomorrow }), d.next);
 
     // A retry, a return and an unreadable record pause the same way.
-    var one = claimAt(one_shot, 2);
-    one.pause_requested = true;
-    d = decide(&one, .{ .failed = error.PaymentDeclined }, .{});
+    const one = claimAt(one_shot, 2);
+    var one_asked = one;
+    one_asked.pause_requested = true;
+    one_asked.revision = 4;
+    d = decide(&one, .{ .failed = error.PaymentDeclined }, .{ .current = &one_asked });
     try testing.expect(d.next == .wait and d.next.wait.state == .paused);
-    d = decide(&one, .{ .interrupted = .shutdown }, .{});
+    d = decide(&one, .{ .interrupted = .shutdown }, .{ .current = &one_asked });
     try testing.expectEqual(Next{ .wait = .{ .state = .paused, .run_at = .{ .after = .zero }, .scheduled_at = scheduled, .attempt = 1 } }, d.next);
-    d = decide(&one, .{ .unreadable = .payload }, .{});
+    d = decide(&one, .{ .unreadable = .payload }, .{ .current = &one_asked });
     try testing.expect(d.next == .wait and d.next.wait.state == .paused);
     // A finished record has nothing to pause.
-    d = decide(&one, .succeeded, .{});
+    d = decide(&one, .succeeded, .{ .current = &one_asked });
     try testing.expectEqual(@as(Next, .delete), d.next);
+}
+
+test "asked for during the abandoned attempt a claim took over, a pause holds without a run" {
+    // Not run: paused for the same run, the attempt of this claim not
+    // counted, `last` and the row of the abandoned attempt.
+    for ([_][]const u8{ one_shot, daily }) |plan| {
+        var r = claimAt(plan, 2);
+        r.pause_requested = true;
+        var d = decide(&r, .abandoned_paused, .{ .took_over = tookOver(&r) });
+        try testing.expectEqual(Next{ .wait = .{ .state = .paused, .run_at = .{ .after = .zero }, .scheduled_at = scheduled, .attempt = 1 } }, d.next);
+        try testing.expectEqualDeep(@as(?LastRun, .{ .outcome = .abandoned, .error_name = null, .attempt = 1, .started_at = taken_at, .finished_at = claimed }), d.last);
+        try expectRows(&.{abandoned(&r)}, &d);
+        try testing.expect(d.event == .none);
+        // Taken back meanwhile: pending, due at once.
+        var back_again = r;
+        back_again.pause_requested = false;
+        back_again.revision = 4;
+        d = decide(&r, .abandoned_paused, .{ .took_over = tookOver(&r), .current = &back_again });
+        try testing.expectEqual(back(&r), d.next);
+        // Moved meanwhile: the new moment, still paused.
+        var moved = r;
+        moved.attempt = 0;
+        moved.scheduled_at = .fromUtc(2026, 10, 30, 0, 0, 0, .h24);
+        moved.revision = 4;
+        d = decide(&r, .abandoned_paused, .{ .took_over = tookOver(&r), .current = &moved });
+        try testing.expectEqual(Next{ .wait = .{ .state = .paused, .run_at = .{ .at = moved.scheduled_at }, .scheduled_at = null, .attempt = 0 } }, d.next);
+    }
+}
+
+test "moved during the abandoned attempt a claim took over: no run, the new moment, the row as its claim gave it" {
+    // The client moved the fifth attempt to the 30th; its owner was lost,
+    // and the takeover made the record attempt 1, fence 6.
+    for ([_][]const u8{ one_shot, daily }) |plan| {
+        const fifth = claimAt(plan, 5);
+        const prior: Store.TookOver = .{ .owner = previous, .claimed_at = taken_at, .attempt = 5, .scheduled_at = scheduled };
+        var r = fifth;
+        r.attempt = 1;
+        r.fence = 6;
+        r.scheduled_at = .fromUtc(2026, 10, 30, 0, 0, 0, .h24);
+        r.revision = 4;
+        var d = decide(&r, .abandoned_moved, .{ .took_over = prior });
+        try testing.expectEqual(nextRun(.{ .at = r.scheduled_at }), d.next);
+        try testing.expectEqualDeep(@as(?LastRun, .{ .outcome = .abandoned, .error_name = null, .attempt = 5, .started_at = taken_at, .finished_at = claimed }), d.last);
+        // The row of the attempt as its claim gave it: attempt 5 of the run
+        // of `scheduled`, whose run key it names.
+        var row_of_fifth = abandoned(&r);
+        row_of_fifth.attempt = 5;
+        row_of_fifth.scheduled_at = scheduled;
+        try expectRows(&.{row_of_fifth}, &d);
+        try testing.expect(d.event == .none);
+        // Asked for a pause too: paused at the new moment.
+        var asked = r;
+        asked.pause_requested = true;
+        d = decide(&asked, .abandoned_moved, .{ .took_over = prior });
+        try testing.expectEqual(Next{ .wait = .{ .state = .paused, .run_at = .{ .at = r.scheduled_at }, .scheduled_at = null, .attempt = 0 } }, d.next);
+    }
 }
 
 test "no next moment within 9 years: failed with NoNextRun" {
@@ -545,17 +605,17 @@ test "history .none writes no rows; keep_for and forever pass their keep" {
     const r = claimAt(daily, 2);
     var none = base;
     none.history = .none;
-    var d = decide(&r, .succeeded, .{ .policy = &none, .took_over = taken });
+    var d = decide(&r, .succeeded, .{ .policy = &none, .took_over = tookOver(&r) });
     try expectRows(&.{}, &d);
     try testing.expect(d.keep == .none);
     // `last` does not depend on the history.
     try testing.expectEqualDeep(last(&r, .succeeded, null), d.last);
-    d = decide(&r, .succeeded, .{ .took_over = taken });
+    d = decide(&r, .succeeded, .{ .took_over = tookOver(&r) });
     try testing.expectEqual(base.history, d.keep);
     try testing.expectEqual(@as(usize, 2), d.runs().len);
     var always = base;
     always.history = .forever;
-    d = decide(&r, .succeeded, .{ .policy = &always, .took_over = taken });
+    d = decide(&r, .succeeded, .{ .policy = &always, .took_over = tookOver(&r) });
     try testing.expect(d.keep == .forever);
     try testing.expectEqual(@as(usize, 2), d.runs().len);
 }
@@ -573,6 +633,8 @@ test "every transition but an unreadable return clears unreadable_since" {
         .{ .r = &repeating, .ending = .succeeded },
         .{ .r = &repeating, .ending = .skipped, .policy = &skipping },
         .{ .r = &repeating, .ending = .abandoned_last },
+        .{ .r = &repeating, .ending = .abandoned_moved },
+        .{ .r = &one, .ending = .abandoned_paused },
         .{ .r = &one, .ending = .{ .failed = error.PaymentDeclined } },
         .{ .r = &one, .ending = .{ .interrupted = .lease_unconfirmed } },
         .{ .r = &one, .ending = .not_started },
