@@ -12,6 +12,8 @@
 //!   find and `findOneAnd*`, aggregate, count and distinct, indexes,
 //!   collections and any command, with documents as raw BSON, built with
 //!   `bson.Builder`, or written from structs and literals.
+//! - `mongo.WriteConcern` — when the server acknowledges a write: the
+//!   `write_concern` of the options of the writes and of `findOneAnd*`.
 //! - `mongo.Error`, `mongo.outcome`, `mongo.Diagnostics` — what can go
 //!   wrong in a call, whether the server may have run it, and the details
 //!   for logs.
@@ -43,6 +45,7 @@ pub const Cursor = @import("Cursor.zig");
 
 pub const Database = @import("crud/Database.zig");
 pub const Collection = @import("crud/Collection.zig");
+pub const WriteConcern = @import("crud/options.zig").WriteConcern;
 
 /// zefir-mongo under the driver contract of zefir-odm.
 pub const OdmDriver = @import("OdmDriver.zig");
@@ -86,6 +89,7 @@ test {
     _ = @import("crud/database_tests.zig");
     _ = @import("crud/forms_tests.zig");
     _ = @import("crud/write_errors_tests.zig");
+    _ = @import("crud/write_concern_tests.zig");
     _ = @import("uri.zig");
     _ = @import("uri_tests.zig");
     _ = @import("OwnedOptions.zig");

@@ -86,6 +86,7 @@ const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
 const OperationContext = requests.OperationContext;
 const WriteResult = client_results.WriteResult;
+const WriteConcern = options_.WriteConcern;
 const Collection = @This();
 
 db: Database,
@@ -127,7 +128,7 @@ pub fn insertOne(c: Collection, io: Io, op: OperationContext, doc: anytype, opti
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
+    const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment, .write_concern = options.write_concern }, options.diagnostics);
     const inserts: Inserts = .{ .io = io, .ids = c.db.ids, .arena = a, .diagnostics = options.diagnostics, .one = true };
     const items = [_]bson.RawDocument{try inserts.prepare(0, doc)};
     return c.runWrite(io, op, .{ .kind = .insert, .body = body, .items = &items }, .{
@@ -147,7 +148,7 @@ pub fn insertMany(c: Collection, io: Io, op: OperationContext, docs: anytype, op
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
+    const body = try c.writeBody(a, "insert", .{ .bypass_document_validation = options.bypass_document_validation, .comment = options.comment, .write_concern = options.write_concern }, options.diagnostics);
     const inserts: Inserts = .{ .io = io, .ids = c.db.ids, .arena = a, .diagnostics = options.diagnostics, .one = false };
     const items = try document.mapItems(a, docs, inserts, Inserts.prepare);
     if (items.len == 0) return invalid(options.diagnostics, "insertMany has no documents: it needs at least one", .{});
@@ -186,7 +187,7 @@ pub fn replaceOne(c: Collection, io: Io, op: OperationContext, filter: anytype, 
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.writeBody(a, "update", .{ .let = options.let, .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
+    const body = try c.writeBody(a, "update", .{ .let = options.let, .bypass_document_validation = options.bypass_document_validation, .comment = options.comment, .write_concern = options.write_concern }, options.diagnostics);
     const statement = try updateStatement(a, .{
         .q = try argument(a, filter, "the filter", options.diagnostics),
         .u = .{ .document = try replacementOf(a, replacement, options.diagnostics) },
@@ -220,7 +221,7 @@ fn updateWith(c: Collection, io: Io, op: OperationContext, filter: anytype, upda
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.writeBody(a, "update", .{ .let = options.let, .bypass_document_validation = options.bypass_document_validation, .comment = options.comment }, options.diagnostics);
+    const body = try c.writeBody(a, "update", .{ .let = options.let, .bypass_document_validation = options.bypass_document_validation, .comment = options.comment, .write_concern = options.write_concern }, options.diagnostics);
     const statement = try updateStatement(a, .{
         .q = try argument(a, filter, "the filter", options.diagnostics),
         .u = try changeOf(a, update, options.diagnostics),
@@ -243,7 +244,7 @@ fn deleteWith(c: Collection, io: Io, op: OperationContext, filter: anytype, limi
     var scratch: std.heap.ArenaAllocator = .init(options.allocator);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const body = try c.writeBody(a, "delete", .{ .let = options.let, .comment = options.comment }, options.diagnostics);
+    const body = try c.writeBody(a, "delete", .{ .let = options.let, .comment = options.comment, .write_concern = options.write_concern }, options.diagnostics);
     var w: Writer = .init(a, options.diagnostics);
     try w.document("q", try argument(a, filter, "the filter", options.diagnostics), "the filter");
     try w.int32("limit", limit);
@@ -419,6 +420,7 @@ pub fn findOneAndUpdate(c: Collection, io: Io, op: OperationContext, filter: any
         .hint = options.hint,
         .let = options.let,
         .comment = options.comment,
+        .write_concern = options.write_concern,
     }, options.diagnostics);
     return c.findAndModify(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
 }
@@ -445,6 +447,7 @@ pub fn findOneAndReplace(c: Collection, io: Io, op: OperationContext, filter: an
         .hint = options.hint,
         .let = options.let,
         .comment = options.comment,
+        .write_concern = options.write_concern,
     }, options.diagnostics);
     return c.findAndModify(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
 }
@@ -466,6 +469,7 @@ pub fn findOneAndDelete(c: Collection, io: Io, op: OperationContext, filter: any
         .hint = options.hint,
         .let = options.let,
         .comment = options.comment,
+        .write_concern = options.write_concern,
     }, options.diagnostics);
     return c.findAndModify(io, op, body, options.allocator, options.diagnostics, options.failure_reply);
 }
@@ -487,6 +491,7 @@ const Modify = struct {
     hint: ?Hint = null,
     let: ?bson.RawDocument = null,
     comment: ?bson.Value = null,
+    write_concern: ?WriteConcern = null,
 };
 
 fn findAndModifyBody(c: Collection, a: Allocator, m: Modify, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
@@ -507,6 +512,7 @@ fn findAndModifyBody(c: Collection, a: Allocator, m: Modify, diagnostics: ?*Diag
     if (m.hint) |hint| try w.hint(hint);
     if (m.let) |let| try w.document("let", let, "let");
     if (m.comment) |value| try w.value("comment", value, "the comment");
+    if (m.write_concern) |concern| try w.writeConcern(concern);
     return w.finish();
 }
 
@@ -918,16 +924,18 @@ const Body = struct {
     let: ?bson.RawDocument = null,
     bypass_document_validation: bool = false,
     comment: ?bson.Value = null,
+    write_concern: ?WriteConcern = null,
 };
 
 /// The body of a write without its items: `{<command>: <collection>,
-/// let?, bypassDocumentValidation?, comment?}`.
+/// let?, bypassDocumentValidation?, comment?, writeConcern?}`.
 fn writeBody(c: Collection, a: Allocator, command: []const u8, body: Body, diagnostics: ?*Diagnostics) Error!bson.RawDocument {
     var w: Writer = .init(a, diagnostics);
     try w.string(command, c.name);
     if (body.let) |let| try w.document("let", let, "let");
     if (body.bypass_document_validation) try w.boolean("bypassDocumentValidation", true);
     if (body.comment) |value| try w.value("comment", value, "the comment");
+    if (body.write_concern) |concern| try w.writeConcern(concern);
     return w.finish();
 }
 

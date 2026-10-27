@@ -8,7 +8,9 @@ const Allocator = std.mem.Allocator;
 const bson = @import("mongo-bson");
 const errors = @import("../errors.zig");
 const document = @import("document.zig");
-const Hint = @import("options.zig").Hint;
+const options = @import("options.zig");
+const Hint = options.Hint;
+const WriteConcern = options.WriteConcern;
 const Error = errors.Error;
 const Diagnostics = errors.Diagnostics;
 
@@ -105,6 +107,18 @@ pub const Writer = struct {
             .name => |name| try w.string("hint", name),
             .keys => |keys| try w.document("hint", keys, "the hint"),
         }
+    }
+
+    /// `writeConcern`: `{w: 1 | "majority", j: true}`, `j` only with
+    /// `journal`.
+    pub fn writeConcern(w: *Writer, concern: WriteConcern) Error!void {
+        try w.beginDocument("writeConcern");
+        switch (concern.w) {
+            .one => try w.int32("w", 1),
+            .majority => try w.string("w", "majority"),
+        }
+        if (concern.journal) try w.boolean("j", true);
+        try w.end();
     }
 
     /// A value of any BSON type but the deprecated ones; a string must be

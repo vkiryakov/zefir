@@ -278,7 +278,7 @@ test "retryWrites and retryReads: false is taken, true is Unsupported, since v0.
 }
 
 test "options that v0.1 cannot honour are Unsupported, with what to do instead" {
-    const write_concern = "v0.1 takes no write concern from the connection string: put writeConcern in the command, or leave the server's default";
+    const write_concern = "v0.1 takes no write concern from the connection string: put write_concern in the options of the operation";
     const proxy = "v0.1 connects without a proxy";
     const srv = "v0.1 does not look up SRV records";
     const cases = [_]struct { []const u8, []const u8 }{
