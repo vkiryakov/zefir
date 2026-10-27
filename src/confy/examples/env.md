@@ -4,6 +4,8 @@ The environment of the running process is how deployments configure a program:
 containers, CI jobs and service managers all set variables. List `.osEnv()`
 last, and every variable overrides whatever the files say.
 
+Read the environment with `.osEnv()` and a prefix:
+
 ```zig
 .environ = init.environ_map,
 .env_prefix = "APP_",
@@ -65,6 +67,8 @@ pub fn main(init: std.process.Init) !void {
 $ zig build run
 info: zefir-demo listens on port 8080
 ```
+
+A variable overrides the default of its field:
 
 ```text
 $ APP_HTTP_PORT=9090 zig build run
@@ -171,12 +175,16 @@ error(confy): 1 configuration problem:
 
 ### Shell
 
+For one run, or for the rest of the shell session:
+
 ```sh
 APP_HTTP_PORT=9090 ./app        # for one run
 export APP_HTTP_PORT=9090       # for the rest of the session
 ```
 
 ### Docker Compose
+
+In a Compose file, under `environment`:
 
 ```yaml
 services:
@@ -191,6 +199,8 @@ services:
 Quote numbers and booleans in YAML, so they reach the program as written.
 
 ### Kubernetes
+
+In a Kubernetes container, with the password from a Secret:
 
 ```yaml
 containers:
@@ -207,6 +217,8 @@ containers:
 ```
 
 ### systemd
+
+In a systemd unit:
 
 ```ini
 [Service]

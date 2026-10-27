@@ -26,6 +26,8 @@ it does anything, with one line per problem that says what to fix and where.
 >   the names of your fields, and nothing else.
 > - **Other field types.** Arrays, pointers other than `[]const` slices, and
 >   unions are a compile error.
+> - **A `u128` above 2^127-1 as a JSON number** is a problem; write it as a
+>   JSON string: `"id": "340282366920938463463374607431768211455"`.
 
 ## Contents
 
@@ -47,6 +49,8 @@ Guides for each source: [JSON](json.md) · [INI](ini.md) · [.env](dotenv.md) ·
 [Environment](env.md) · [Several sources](several_sources.md)
 
 ## How it works
+
+Every load goes through these steps:
 
 ```mermaid
 flowchart LR
@@ -73,7 +77,7 @@ flowchart LR
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`:
+Add Zefir to your `build.zig.zon`; confy ships since v0.1.0:
 
 ```sh
 zig fetch --save git+https://github.com/vkiryakov/zefir#dev
@@ -105,6 +109,9 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
     b.step("run", "Run the app").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{ .root_module = exe.root_module });
+    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
 }
 ```
 
@@ -432,6 +439,8 @@ Sources are listed in `Options.sources` and apply in that order; see
 
 ### `loadOrExit`
 
+In `main`, with the arena of `std.process.Init`:
+
 ```zig
 confy.loadOrExit(init.arena.allocator(), &config, .{
     .io = init.io,
@@ -445,6 +454,10 @@ Fills `config`, or logs every problem with `std.log.err` and exits with status 1
 Use it in `main`, where a broken configuration means the program can't start.
 
 ### `load`
+
+In a test, with `std.testing.allocator` and `environ`, a
+`std.process.Environ.Map` that the test fills; [Testing](#testing) shows a
+whole test:
 
 ```zig
 try confy.load(std.testing.allocator, &config, .{
@@ -462,9 +475,6 @@ Fills `config`, or returns an error and leaves `config` untouched:
 | --------------------- | ----------------------------------------------------------------- |
 | `error.InvalidConfig` | the configuration has problems; they are in `options.diagnostics` |
 | `error.OutOfMemory`   | an allocation failed; nothing is leaked                           |
-
-This one is a test: `environ` is a `std.process.Environ.Map` that the test
-fills, and [Testing](#testing) shows a whole test.
 
 ### Options
 
@@ -636,7 +646,8 @@ db: struct {
 
 `load` takes any directory and any variables, so a test can build its own
 configuration. This one checks the `Config` of
-[confy in a minute](#confy-in-a-minute):
+[confy in a minute](#confy-in-a-minute), so it goes in `src/main.zig` next to
+`Config`, and `zig build test` runs it:
 
 ```zig
 test "a port out of range is reported" {
