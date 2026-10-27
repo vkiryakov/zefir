@@ -253,7 +253,8 @@ runs it.
 > [!TIP]
 > nats is also part of the umbrella module: with `zefir.module("zefir")`
 > imported as `zefir`, it is `@import("zefir").nats`. nats itself imports
-> nothing from Zefir, and zio only from your build.
+> nothing from Zefir, and no zio: your program imports zio and gives the
+> client `rt.io()`.
 
 You need a NATS server to talk to. With Docker:
 
@@ -444,6 +445,8 @@ how other services hear it.
 
 ### Publishing
 
+Publish an event to a subject:
+
 ```zig
 try client.publish("orders.created", "{\"id\":1001}");
 ```
@@ -490,6 +493,8 @@ checked against the server's own limit, and the server closes the
 connection if it is over the account's.
 
 ### Subscribing
+
+Subscribe to a subject and take its messages until the subscription ends:
 
 ```zig
 const sub = try client.subscribe("orders.*", .{});
@@ -992,6 +997,9 @@ fn servePrices(client: *nats.Client, quotes: *nats.Subscription, pricing_log: lo
 }
 ```
 
+Against the server from [Installation](#installation), the pricing
+service and the checkout print:
+
 ```text
 $ zig build run
 2026-10-27T20:48:48.462Z INFO  [pricing] Quote sent sku=coffee-beans cents=1299
@@ -1256,6 +1264,8 @@ fn serveStock(io: std.Io, client: *nats.Client, requests: *nats.Subscription, wa
     }
 }
 ```
+
+Against the server from [Installation](#installation), the shop prints:
 
 ```text
 $ zig build run
@@ -2147,8 +2157,9 @@ the `std.Io` it is given, and zio runs them as coroutines, each with a
 small stack, on its executors, next to the tasks of your service: a
 service may have thousands of tasks waiting in a client at once. Create
 one runtime for the whole application in `main`, and give its `io` to
-every part of it, as [the whole service](#a-whole-service-on-zio) below
-does:
+the clients and to the tasks of the service (confy and the logger take
+`init.io`, which any thread may use), as
+[the whole service](#a-whole-service-on-zio) below does:
 
 ```zig
 // One runtime for the application, with an executor per CPU core. The
