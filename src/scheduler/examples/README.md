@@ -94,8 +94,9 @@ app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, r
   worker, a lease keeps it while it runs, and when an instance dies, its
   leases run out and the others take its jobs.
 - **At least once, said plainly.** After a failure a run may come twice:
-  each run has a key that is the same for all its attempts, and each claim
-  a number, for the systems that a job writes to.
+  each run has a key, the same for all its attempts, by which the systems
+  a job writes to do its work once, and each claim a number, by which they
+  refuse an owner whose claim was taken over.
 - **Failures planned for.** Retries with growing pauses, errors that end
   them, timeouts, a history of the attempts, and failed jobs kept to retry
   by hand.
@@ -210,8 +211,9 @@ several instances, in a database that outlives them all, see
 **The promise is "at least once".** A job that is due runs, as long as a
 worker that knows its type runs and the store answers; one instance at a
 time runs it; and a job whose instance died runs again elsewhere. So a
-run may come twice after a failure, and a job keeps the systems it writes
-to safe from that, by the key of its run or the number of its claim; see
+run may come twice after a failure: by the key of the run, the systems a
+job writes to do its work once, and by the number of the claim they may
+refuse an owner whose claim was taken over; see
 [Several instances](#several-instances).
 
 ## Installation
@@ -1343,7 +1345,9 @@ $ zig build run
   until it ends.
 - **`retry`** gives order 2 back its attempts once the customer has a new
   card: due at once, `attempt` from 1 again, the same run key, so a
-  billing service that saw the first attempt knows the run.
+  billing service that saw the first attempt knows the run. A gateway
+  that keeps its answer for a key would give the old refusal again: see
+  [Safe to run twice](#safe-to-run-twice) for such a receiver.
 - **The history** keeps a row for each claim, here because the job asks
   for it: `fence` counts the claims of the record, and `attempt` the
   attempts of its run. The rows of order 2 show its failed claim and the
@@ -1444,8 +1448,9 @@ wakes.
   the process stops longer than `renew_every`, as a virtual machine
   paused by its cloud does. A handler makes its effects safe to repeat,
   below.
-- **Fencing by itself.** The fence grows with each claim, but protects a
-  system only if that system checks it, below.
+- **Fencing by itself.** The fence grows with each claim, but keeps a
+  late owner out of a system only if that system checks it, and makes no
+  repeat harmless, below.
 - **An exact time.** A job starts no sooner than its time by the store's
   clock, and usually within `poll_every` after it when a slot is free.
 - **An order.** Each claim takes the oldest due jobs first, but among
@@ -1458,13 +1463,16 @@ wakes.
 
 ### Safe to run twice
 
-A job keeps the systems it writes to safe from a run that comes twice in
-one of two ways, and the shop's `Invoices.zig` shows both.
+A run that comes twice must do its work once, and the run key is how.
+The life and the fence of a claim do something else, which a system may
+want too: they refuse the writes of an owner whose claim was taken over.
+The shop's `Invoices.zig` shows both.
 
-**By the run key.** `ctx.info().run_key` is `"<job>/<key>/<scheduled_at
-in ms>"`, the same for every attempt of a run. A system that remembers
-the keys it served does nothing the second time; a payment gateway that
-takes an idempotency key takes this one. The billing service of the shop:
+**The run key: the work of a run once.** `ctx.info().run_key` is
+`"<job>/<key>/<scheduled_at in ms>"`, the same for every attempt of a
+run, whichever instance makes it. A system that remembers the keys it
+served does nothing the second time; a payment gateway that takes an
+idempotency key takes this one. The billing service of the shop:
 
 ```zig
 /// Sends the invoice of `order_id`, unless the invoice of `run_key`
@@ -1478,20 +1486,37 @@ pub fn send(b: *Billing, io: std.Io, run_key: []const u8, order_id: u64) !void {
 }
 ```
 
-**By the life and the fence.** A system that refuses a late owner keeps,
-for each life of a record, the highest fence that wrote to it, and refuses
-a smaller one. The fence alone would not do: a job cancelled and
-scheduled again with the same key is a new life, whose claims count from
-1 again, and its first claim must not look late. The ledger of the shop:
+A receiver that keeps its first answer for a key, a refusal too, as some
+payment gateways do, needs care: a `retry` of a failed job keeps its run
+key, see [Failures and retries](#failures-and-retries), and such a
+receiver answers the retry with the refusal it kept. A job that must
+reach it again is scheduled again instead: a failed job leaves its key
+free, and the new job's runs have run keys of their own.
+
+**The life and the fence: no write from a late owner.** An owner whose
+claim was taken over, and whose handler goes on anyway, may still write
+after the claim that took it over. A system whose writes must come from
+the claim that holds the job keeps, for each life of a record, the
+highest fence that wrote to it, and refuses a smaller one. That makes no
+repeat harmless: the claim that takes over has the greater fence, and
+its run of the same work passes, so a system that adds up, as a ledger
+does, needs the run key as well. The fence alone would not do: a job
+cancelled and scheduled again with the same key is a new life, whose
+claims count from 1 again, and its first claim must not look late. The
+ledger of the shop does both:
 
 ```zig
-/// Closes `days` days for the claim `fence` of the record of `life`.
-pub fn closeDays(l: *Ledger, io: std.Io, life: scheduler.Life, fence: u64, days: u32) !void {
+/// Closes `days` days for the run `run_key`, which the claim `fence` of
+/// the record of `life` posts: nothing when the run closed them before,
+/// and error.StaleClaim when a newer claim of the record posted.
+pub fn closeDays(l: *Ledger, io: std.Io, run_key: []const u8, life: scheduler.Life, fence: u64, days: u32) !void {
     try l.mutex.lock(io);
     defer l.mutex.unlock(io);
     const newest = try l.fences.getOrPut(l.gpa, life);
     if (newest.found_existing and fence < newest.value_ptr.*) return error.StaleClaim;
     newest.value_ptr.* = fence;
+    if (l.closed.contains(run_key)) return;
+    try l.closed.insert(run_key);
     l.days_closed += days;
 }
 ```
@@ -1596,7 +1621,7 @@ missed too:
 pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {
     const info = ctx.info();
     // One run for the nights it missed too: misfire is .coalesce.
-    try self.ledger.closeDays(ctx.io(), info.life, info.fence, 1 + info.missed);
+    try self.ledger.closeDays(ctx.io(), info.run_key, info.life, info.fence, 1 + info.missed);
 }
 ```
 
@@ -2656,16 +2681,19 @@ a worker that waits for a time. `scheduler.testing` has the parts:
   reached the store. `now` never fails.
 
 The jobs under test are those of the shop's invoices. `Invoices.zig`
-holds them, and the two systems they write to, each safe from a run that
-comes twice, in one of the two ways there are, see
-[Several instances](#several-instances):
+holds them, and the two systems they write to, each of which does the
+work of a run once, by its run key; the ledger also refuses an owner
+whose claim was taken over, see [Safe to run twice](#safe-to-run-twice):
 
 ```zig
 //! The jobs of the invoices of a shop, which jobs_test.zig tests, and the
 //! two systems they write to. A job runs at least once, so a run may come
-//! twice, and each system keeps itself safe from that in one of the two
-//! ways there are: the billing service remembers the run keys it served,
-//! and the ledger the newest claim of each record that posted to it.
+//! twice, and each system does the work of a run once, by its run key,
+//! which is the same for every attempt of the run. The ledger also keeps
+//! an owner whose claim was taken over, and who goes on anyway, from
+//! posting after the claim that took it over, by the life of the record
+//! and the number of the claim; that alone would not stop a repeat, since
+//! the claim that takes over has the greater number.
 
 const std = @import("std");
 const scheduler = @import("scheduler");
@@ -2743,29 +2771,43 @@ pub const SendInvoice = struct {
     }
 };
 
-/// The ledger of the shop: it takes the post of a claim of a job only if
-/// no newer claim of the same record posted before. An owner whose claim
-/// was taken over, and who goes on anyway, is refused.
+/// The ledger of the shop. It closes the days of a run once, by its run
+/// key, so the same run again, as after a crash of the instance that ran
+/// it before it wrote the outcome, closes nothing more. And it refuses the
+/// post of a claim older than one that posted for the same record: an
+/// owner whose claim was taken over, and who goes on anyway, writes
+/// nothing after the claim that took it over.
 pub const Ledger = struct {
     gpa: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
+    /// The run keys of the runs that closed days.
+    closed: std.BufSet,
     /// The newest claim that posted, for each life of a record: the fence
     /// alone would not do, since a record made again with the same key
     /// counts its claims from 1 again.
     fences: std.AutoHashMapUnmanaged(scheduler.Life, u64) = .empty,
     days_closed: u32 = 0,
 
+    pub fn init(gpa: std.mem.Allocator) Ledger {
+        return .{ .gpa = gpa, .closed = .init(gpa) };
+    }
+
     pub fn deinit(l: *Ledger) void {
+        l.closed.deinit();
         l.fences.deinit(l.gpa);
     }
 
-    /// Closes `days` days for the claim `fence` of the record of `life`.
-    pub fn closeDays(l: *Ledger, io: std.Io, life: scheduler.Life, fence: u64, days: u32) !void {
+    /// Closes `days` days for the run `run_key`, which the claim `fence` of
+    /// the record of `life` posts: nothing when the run closed them before,
+    /// and error.StaleClaim when a newer claim of the record posted.
+    pub fn closeDays(l: *Ledger, io: std.Io, run_key: []const u8, life: scheduler.Life, fence: u64, days: u32) !void {
         try l.mutex.lock(io);
         defer l.mutex.unlock(io);
         const newest = try l.fences.getOrPut(l.gpa, life);
         if (newest.found_existing and fence < newest.value_ptr.*) return error.StaleClaim;
         newest.value_ptr.* = fence;
+        if (l.closed.contains(run_key)) return;
+        try l.closed.insert(run_key);
         l.days_closed += days;
     }
 };
@@ -2784,7 +2826,7 @@ pub const CloseDay = struct {
     pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {
         const info = ctx.info();
         // One run for the nights it missed too: misfire is .coalesce.
-        try self.ledger.closeDays(ctx.io(), info.life, info.fence, 1 + info.missed);
+        try self.ledger.closeDays(ctx.io(), info.run_key, info.life, info.fence, 1 + info.missed);
     }
 };
 
@@ -2891,21 +2933,37 @@ test "the invoice of an order that is gone fails with an error of give_up_on" {
     try testing.expectEqual(0, billing.count(io));
 }
 
-test "the ledger refuses the post of a claim that a newer one took over" {
-    var ledger: Invoices.Ledger = .{ .gpa = testing.allocator };
+test "the ledger closes the night of a run once, whichever claim posts it" {
+    var ledger: Invoices.Ledger = .init(testing.allocator);
     defer ledger.deinit();
     var close: Invoices.CloseDay = .{ .ledger = &ledger };
     const life: scheduler.Life = @splat(7);
-    const run_key = "close-day//1793055600000";
-    // Claim 2 closes the day; claim 1, whose lease ran out and which went
+    const night = "close-day//1793055600000";
+    // Claim 1 closes the night, and its instance dies before it writes the
+    // outcome. Claim 2 takes the job over and runs the same night again,
+    // with the same run key and a greater fence: it closes nothing more.
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", night, life, 1));
+    var again = runInfo("close-day", "", night, life, 2);
+    again.attempt = 2;
+    try scheduler.testing.call(io, testing.allocator, &close, {}, again);
+    try testing.expectEqual(1, ledger.days_closed);
+}
+
+test "the ledger refuses the post of a claim that a newer one took over" {
+    var ledger: Invoices.Ledger = .init(testing.allocator);
+    defer ledger.deinit();
+    var close: Invoices.CloseDay = .{ .ledger = &ledger };
+    const life: scheduler.Life = @splat(7);
+    // Claim 2 closes the night; claim 1, whose lease ran out and which went
     // on anyway, comes late and is refused.
-    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, life, 2));
-    try testing.expectError(error.StaleClaim, scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, life, 1)));
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", "close-day//1793055600000", life, 2));
+    try testing.expectError(error.StaleClaim, scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", "close-day//1793055600000", life, 1)));
     // The record of the key made again is a new life, whose claims count
-    // from 1 again.
-    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, @splat(8), 1));
-    // A run that stands for two nights it missed closes three days.
-    var late = runInfo("close-day", "", run_key, @splat(8), 2);
+    // from 1 again: its first claim closes the next night.
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", "close-day//1793142000000", @splat(8), 1));
+    // The run of the night after that, claimed two nights late, stands for
+    // those two too: it closes three days.
+    var late = runInfo("close-day", "", "close-day//1793228400000", @splat(8), 2);
     late.missed = 2;
     try scheduler.testing.call(io, testing.allocator, &close, {}, late);
     try testing.expectEqual(5, ledger.days_closed);
@@ -2992,7 +3050,7 @@ test "a declaration that left the code is parked until it is removed" {
     const client: scheduler.Client = .init(testing.allocator, io, memory.store(), .{});
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var ledger: Invoices.Ledger = .{ .gpa = testing.allocator };
+    var ledger: Invoices.Ledger = .init(testing.allocator);
     defer ledger.deinit();
 
     // Version 1 of the shop declares the close of the day: its start
@@ -3033,9 +3091,12 @@ test "a declaration that left the code is parked until it is removed" {
   another. The error of an order that is gone comes back as it is: the
   `give_up_on` of `SendInvoice` is the worker's business, see
   [Failures and retries](#failures-and-retries).
-- **The ledger** refuses the late claim of a record and takes the first
-  claim of a new life; a run that stands for missed nights closes them
-  too, see [Missed runs](#missed-runs).
+- **The ledger** closes the night of a run once, whichever claim posts
+  it: the claim that took the job over has the greater fence, and the run
+  key is what turns its post away. It refuses the post of a claim that a
+  newer one took over, and takes the first claim of a new life; a run
+  that stands for missed nights closes them too, see
+  [Missed runs](#missed-runs).
 - **A worker in a test** polls every 100 ms, so that the test ends
   sooner, and every wait is a loop on the clock: a run on a slow machine
   takes longer, and still passes. A test stops its worker with `shutdown`

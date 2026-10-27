@@ -15,8 +15,11 @@
 //! jobs in memory (each instance on its own, nothing survives a restart),
 //! `mongo.SchedulerStore` of zefir-mongo in MongoDB. The promise is "at
 //! least once": after a failure a job may run twice, so a handler keeps
-//! its effects idempotent by the run key and the claim number that its
-//! context gives it.
+//! its effects idempotent by the run key that its context gives it, the
+//! same for every attempt of a run. The life of the record and the number
+//! of the claim, which the context gives too, let a system refuse the
+//! writes of an owner whose claim was taken over; they make no repeat
+//! harmless.
 //!
 //! How a service uses it:
 //!

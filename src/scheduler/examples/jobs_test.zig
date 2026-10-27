@@ -79,21 +79,37 @@ test "the invoice of an order that is gone fails with an error of give_up_on" {
     try testing.expectEqual(0, billing.count(io));
 }
 
-test "the ledger refuses the post of a claim that a newer one took over" {
-    var ledger: Invoices.Ledger = .{ .gpa = testing.allocator };
+test "the ledger closes the night of a run once, whichever claim posts it" {
+    var ledger: Invoices.Ledger = .init(testing.allocator);
     defer ledger.deinit();
     var close: Invoices.CloseDay = .{ .ledger = &ledger };
     const life: scheduler.Life = @splat(7);
-    const run_key = "close-day//1793055600000";
-    // Claim 2 closes the day; claim 1, whose lease ran out and which went
+    const night = "close-day//1793055600000";
+    // Claim 1 closes the night, and its instance dies before it writes the
+    // outcome. Claim 2 takes the job over and runs the same night again,
+    // with the same run key and a greater fence: it closes nothing more.
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", night, life, 1));
+    var again = runInfo("close-day", "", night, life, 2);
+    again.attempt = 2;
+    try scheduler.testing.call(io, testing.allocator, &close, {}, again);
+    try testing.expectEqual(1, ledger.days_closed);
+}
+
+test "the ledger refuses the post of a claim that a newer one took over" {
+    var ledger: Invoices.Ledger = .init(testing.allocator);
+    defer ledger.deinit();
+    var close: Invoices.CloseDay = .{ .ledger = &ledger };
+    const life: scheduler.Life = @splat(7);
+    // Claim 2 closes the night; claim 1, whose lease ran out and which went
     // on anyway, comes late and is refused.
-    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, life, 2));
-    try testing.expectError(error.StaleClaim, scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, life, 1)));
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", "close-day//1793055600000", life, 2));
+    try testing.expectError(error.StaleClaim, scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", "close-day//1793055600000", life, 1)));
     // The record of the key made again is a new life, whose claims count
-    // from 1 again.
-    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, @splat(8), 1));
-    // A run that stands for two nights it missed closes three days.
-    var late = runInfo("close-day", "", run_key, @splat(8), 2);
+    // from 1 again: its first claim closes the next night.
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", "close-day//1793142000000", @splat(8), 1));
+    // The run of the night after that, claimed two nights late, stands for
+    // those two too: it closes three days.
+    var late = runInfo("close-day", "", "close-day//1793228400000", @splat(8), 2);
     late.missed = 2;
     try scheduler.testing.call(io, testing.allocator, &close, {}, late);
     try testing.expectEqual(5, ledger.days_closed);
@@ -180,7 +196,7 @@ test "a declaration that left the code is parked until it is removed" {
     const client: scheduler.Client = .init(testing.allocator, io, memory.store(), .{});
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var ledger: Invoices.Ledger = .{ .gpa = testing.allocator };
+    var ledger: Invoices.Ledger = .init(testing.allocator);
     defer ledger.deinit();
 
     // Version 1 of the shop declares the close of the day: its start

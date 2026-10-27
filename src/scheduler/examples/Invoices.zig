@@ -1,8 +1,11 @@
 //! The jobs of the invoices of a shop, which jobs_test.zig tests, and the
 //! two systems they write to. A job runs at least once, so a run may come
-//! twice, and each system keeps itself safe from that in one of the two
-//! ways there are: the billing service remembers the run keys it served,
-//! and the ledger the newest claim of each record that posted to it.
+//! twice, and each system does the work of a run once, by its run key,
+//! which is the same for every attempt of the run. The ledger also keeps
+//! an owner whose claim was taken over, and who goes on anyway, from
+//! posting after the claim that took it over, by the life of the record
+//! and the number of the claim; that alone would not stop a repeat, since
+//! the claim that takes over has the greater number.
 
 const std = @import("std");
 const scheduler = @import("scheduler");
@@ -80,29 +83,43 @@ pub const SendInvoice = struct {
     }
 };
 
-/// The ledger of the shop: it takes the post of a claim of a job only if
-/// no newer claim of the same record posted before. An owner whose claim
-/// was taken over, and who goes on anyway, is refused.
+/// The ledger of the shop. It closes the days of a run once, by its run
+/// key, so the same run again, as after a crash of the instance that ran
+/// it before it wrote the outcome, closes nothing more. And it refuses the
+/// post of a claim older than one that posted for the same record: an
+/// owner whose claim was taken over, and who goes on anyway, writes
+/// nothing after the claim that took it over.
 pub const Ledger = struct {
     gpa: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
+    /// The run keys of the runs that closed days.
+    closed: std.BufSet,
     /// The newest claim that posted, for each life of a record: the fence
     /// alone would not do, since a record made again with the same key
     /// counts its claims from 1 again.
     fences: std.AutoHashMapUnmanaged(scheduler.Life, u64) = .empty,
     days_closed: u32 = 0,
 
+    pub fn init(gpa: std.mem.Allocator) Ledger {
+        return .{ .gpa = gpa, .closed = .init(gpa) };
+    }
+
     pub fn deinit(l: *Ledger) void {
+        l.closed.deinit();
         l.fences.deinit(l.gpa);
     }
 
-    /// Closes `days` days for the claim `fence` of the record of `life`.
-    pub fn closeDays(l: *Ledger, io: std.Io, life: scheduler.Life, fence: u64, days: u32) !void {
+    /// Closes `days` days for the run `run_key`, which the claim `fence` of
+    /// the record of `life` posts: nothing when the run closed them before,
+    /// and error.StaleClaim when a newer claim of the record posted.
+    pub fn closeDays(l: *Ledger, io: std.Io, run_key: []const u8, life: scheduler.Life, fence: u64, days: u32) !void {
         try l.mutex.lock(io);
         defer l.mutex.unlock(io);
         const newest = try l.fences.getOrPut(l.gpa, life);
         if (newest.found_existing and fence < newest.value_ptr.*) return error.StaleClaim;
         newest.value_ptr.* = fence;
+        if (l.closed.contains(run_key)) return;
+        try l.closed.insert(run_key);
         l.days_closed += days;
     }
 };
@@ -121,7 +138,7 @@ pub const CloseDay = struct {
     pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {
         const info = ctx.info();
         // One run for the nights it missed too: misfire is .coalesce.
-        try self.ledger.closeDays(ctx.io(), info.life, info.fence, 1 + info.missed);
+        try self.ledger.closeDays(ctx.io(), info.run_key, info.life, info.fence, 1 + info.missed);
     }
 };
 
