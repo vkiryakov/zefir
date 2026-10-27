@@ -290,7 +290,8 @@ pub fn remove(s: Store, io: Io, ctx: core.Context, ref: *const Ref, options: Cal
     return s.vtable.remove(s.ptr, io, ctx, ref, options);
 }
 
-/// The records of the filter in the order (job, key), a page at a time.
+/// The records of the filter, a page at a time: those of a job together,
+/// their keys in order; which job comes first is the store's choice.
 pub fn list(s: Store, io: Io, ctx: core.Context, request: *const ListRequest, options: CallOptions) StoreError!record.RecordPage {
     return s.vtable.list(s.ptr, io, ctx, request, options);
 }

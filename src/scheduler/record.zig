@@ -51,7 +51,8 @@ pub const HistoryFilter = struct {
 /// One page of a list: `after` is the `next` of the page before, a text
 /// of the store; null starts at the beginning.
 pub const Page = struct { after: ?[]const u8 = null, limit: u32 = 100 };
-/// Records in the order (job, key); `next` is null after the last page.
+/// Records, those of a job together and their keys in order; which job
+/// comes first is the store's choice. `next` is null after the last page.
 pub const RecordPage = struct { records: []const Record, next: ?[]const u8 };
 /// Rows of the history, the newest first; `next` is null after the last
 /// page.

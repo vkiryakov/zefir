@@ -183,8 +183,9 @@ pub fn get(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, arena: 
     return c.store.get(io, ctx, &ref, .{ .allocator = arena, .diagnostics = options.diagnostics });
 }
 
-/// The records of `filter` in the order (job, key), a page at a time;
-/// their strings are in `arena`. A record of a job type that no instance
+/// The records of `filter`, a page at a time: those of a job together,
+/// their keys in order; which job comes first is the store's choice.
+/// Their strings are in `arena`. A record of a job type that no instance
 /// knows shows here too.
 pub fn list(c: *const Client, io: Io, ctx: core.Context, filter: record.ListFilter, page: record.Page, arena: Allocator, options: CallOptions) Error!record.RecordPage {
     return c.store.list(io, ctx, &.{ .filter = filter, .page = page }, .{ .allocator = arena, .diagnostics = options.diagnostics });
