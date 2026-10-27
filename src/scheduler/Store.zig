@@ -69,7 +69,16 @@
 //!    record again by `tag`, `life`, `owner` and `fence`; else it answers
 //!    `error.OutcomeUnknown`. A definite answer it is not sure of breaks
 //!    the contract. It sends again only what changes nothing the second
-//!    time: an insert of the same life, a write on the same condition.
+//!    time: a write on the same condition. The insert of a `create` whose
+//!    reading again finds no live record and none of its life is not such
+//!    a write: a claim may have run that life meanwhile and its finish
+//!    removed it, and the insert would make it again. It goes again only
+//!    while no claim can have taken the record: the `run_at` of the
+//!    request (the moment of `.at`, or the store's now when the call began
+//!    and `.after`) is a minute or more past the deadline of the call, on
+//!    the store's clock; nearer, or without a deadline, the create answers
+//!    `error.OutcomeUnknown`. A `remove` between the two inserts is lost
+//!    all the same: it answered true, and the job is there again.
 //! 8. Durability. A definite success survives a restart of the store
 //!    (MongoDB: the journal on disk, `j: true`); `MemoryStore` is the
 //!    exception, and says so.
