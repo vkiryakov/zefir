@@ -1079,9 +1079,9 @@ $ zig build run
   time for `unpause`; a second pause is `.unchanged`. A running job
   pauses when its run ends; when the instance of the run was lost, the
   worker that takes the job over pauses it without a run, for the same
-  run. `unpause` lets it wait for its time again:
-  a time that passed meanwhile runs at once, and a repeating job's runs
-  that passed go by its misfire policy, see [Missed runs](#missed-runs).
+  run. `unpause` lets it wait for its time again: a time that passed
+  meanwhile runs at once, and a repeating job's runs that passed go by
+  its misfire policy, see [Missed runs](#missed-runs).
 - **`list`** gives the records of a filter of job, tenant and state, any
   of them null, two to a page here: `next` of a page is where the next one
   starts, and null after the last. The records of a job come together,
@@ -1128,9 +1128,9 @@ writes its outcome. A change of the client meets that run so:
 | Change | What happens |
 |---|---|
 | `cancel` | the record goes at once; the owner learns it at its next renewal, within `renew_every`, cancels the run and writes a row `interrupted`, `Cancelled`, if the job keeps a history. A job scheduled again with the key meanwhile is another life, which the old run never touches |
-| `pause` | the run goes on to its end; then the job pauses instead of waiting for its next time |
+| `pause` | the run goes on to its end; then the job pauses instead of waiting for its next time. When the instance of the run is lost, the worker that takes the job over pauses it without a run |
 | `unpause` | a pause asked during the run is taken back |
-| `reschedule` | the run goes on; then the job waits for the new time, `attempt` 0, and the outcome of the run shows only in `last` |
+| `reschedule` | the run goes on; then the job waits for the new time, `attempt` 0, and the outcome of the run shows only in `last` and the history. When the instance of the run is lost, the worker that takes the job over does not run it before the new time |
 | `retry` | `.unchanged`: the job is not failed |
 
 </details>
@@ -1404,9 +1404,10 @@ one-shot job ends `failed`, and a repeating job, which has one attempt
 unless `.retry.attempts` says more, goes on at its next time, so the run
 that was lost is skipped. A reschedule or a pause that came during the
 lost run wins over it, as over the outcome of a run: the job waits for
-its new time, or pauses, without a run. A worker that lives but cannot
-reach the store stops its run first, and a claim that takes the job over
-counts its attempt all the same:
+its new time, and runs as its first attempt once that time has come, or
+pauses without a run. A worker that lives but cannot reach the store
+stops its run first, and a claim that takes the job over counts its
+attempt all the same:
 
 ```mermaid
 sequenceDiagram
@@ -1681,7 +1682,8 @@ counters `coalesced` and `skipped` count them.
 ## History and retention
 
 A job that asks for it, with `history`, gets a row in the history of the
-store for each claim:
+store for each claim that runs it, skips its run, or is lost with its
+instance:
 
 | `history` | Rows |
 |---|---|
@@ -1708,9 +1710,9 @@ that ran, even one whose outcome the store refused:
 **An abandoned attempt.** When a worker claims a job whose lease ran out,
 it writes a row `abandoned` for the claim it took over, before the row of
 its own run when it runs the job: the attempt of an instance that
-vanished, whose effects nobody knows. The row has the attempt and the moment that claim gave its run,
-even when the client moved the job since, so its run key is the one that
-run had. If that instance comes back after all and reports, its own row
+vanished, whose effects nobody knows. The row has the attempt and the
+moment that claim gave its run, even when the client moved the job
+since, so its run key is the one that run had. If that instance comes back after all and reports, its own row
 replaces the row `abandoned`: one row for each claim, and the owner's
 word wins. For financial control, the attempts to check are those:
 `client.history(io, ctx, .{ .outcome = .abandoned }, page, arena, .{})`
@@ -1726,9 +1728,8 @@ const history = try client.history(io, .root, .{ .job = "charge-card", .key = ke
 for (history.runs) |run| app.info("Run", .{ .key = key, .fence = run.fence, .attempt = run.attempt, .outcome = run.outcome, .error_name = run.error_name });
 ```
 
-**The record of the job** shows its last run in `last`: its outcome,
-error, attempt and times; a job that keeps no history shows its last
-failure there.
+**The record of the job** shows its last run in `last`, whether the job
+keeps a history or not: its outcome, error, attempt and times.
 
 **Jobs that no instance can read.** A worker that cannot read the payload
 or the schedule of a job it claimed, since another version of the service
@@ -2606,10 +2607,12 @@ try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake 
    gives the job back with the attempt it had, so the stop costs no
    attempt; the history gets a row `interrupted`, `Shutdown`.
 4. `shutdown` returns once the worker stopped, and no later than 250 ms
-   before its deadline, unless a call of the store holds it, see below. A
-   deadline already past cancels the runs at once, and `shutdown` returns
-   at once; the jobs whose return the store did not take in time come
-   back when their leases end, with an attempt counted.
+   before its deadline, unless a call of the store holds it, see below.
+   The outcomes of a stop, the returns of its jobs among them, go to the
+   store until 500 ms before the deadline; a job whose return the store
+   did not take by then, as with a deadline nearer than that or already
+   past, comes back when its lease ends, with an attempt counted. A
+   deadline already past makes `shutdown` return at once.
 
 `error.ShutdownTimeout` means that the worker had not stopped 250 ms
 before the deadline because a handler did not end after its cancel,
@@ -2619,8 +2622,8 @@ returned: one on its way when the stop began ends by its own
 `store_timeout`. A deadline already past gives it too. The worker stays
 `draining`, and `deinit` would wait without a limit for a handler that
 does not end: end the process, as for a server of http that does not
-stop. The worker logs a warning for a handler that ends more
-than a second after its cancel, and for a stop that missed its deadline.
+stop. The worker logs a warning for a handler that ends more than a
+second after its cancel, and for a stop that missed its deadline.
 
 The worker does not close its store or the client of MongoDB: they
 outlive it, and under zefir.App they stop after it, see
@@ -2683,7 +2686,7 @@ show, so keep personal data out of them. What a worker writes:
 | Level | Lines |
 |---|---|
 | info | its start, `1 job type, 10 workers, instance shop/7f3a…`; a declared job written, `close-day: declared, daily 23:00:00`, or its schedule changed by the code; `stopping` and `stopped`; a failed attempt with a retry ahead, `charge-card/order-1: attempt 1 failed (GatewayDown); it runs again after a pause`; a late run that stood for the runs it missed, or was skipped; a run cancelled at the end of the grace of a stop |
-| warn | a failure of the store, its first and then once a minute, `the store fails: claim: error.Unavailable: …`, `the store still fails, 12 tries: …`, and its end, `the store answers claim again after 1.451s`; a job that ended `failed`; a run past its timeout; a lease that could not be confirmed, or was taken over, and a run whose job was cancelled; a claim of another instance's job whose lease ran out; a job this instance cannot read; a parked declaration at the start; a handler that ended more than a second after its cancel; a stop that missed its deadline; `MemoryStore` dropping its oldest finished jobs or rows |
+| warn | a failure of the store, its first and then once a minute, `the store fails: claim: error.Unavailable: …`, `the store still fails, 12 tries: …`, and its end, `the store answers claim again after 1.451s`; a job that ended `failed`; a run past its timeout; a lease that could not be confirmed, or was taken over, and a run whose job was cancelled; a claim of another instance's job whose lease ran out; a job this instance cannot read; a parked declaration at the start; a handler that ended more than a second after its cancel; an outcome that the store refused or would not take, or that could not be written before a stop or among changes of the client; a declared record that cannot be written; a stop that missed its deadline; `MemoryStore` dropping its oldest finished jobs or rows |
 | debug | each claim and each outcome |
 
 `worker.stats()` takes a snapshot of the counters of the worker, from its
@@ -2720,9 +2723,10 @@ a worker that waits for a time. `scheduler.testing` has the parts:
 - **`testing.FaultyStore`** wraps any store and fails it on demand:
   `failNext(io, op, err, times)` fails the next calls of an operation
   with a store's error, `stallNext(io, op, duration)` makes the next one
-  hang until its deadline, `loseNextReply(io, op)` lets the store make the
-  change and loses its reply, and `calls(io, op)` counts the calls that
-  reached the store. `now` never fails.
+  wait `duration` first, or until its deadline, which ends it with
+  `OutcomeUnknown` and the store untouched, `loseNextReply(io, op)` lets
+  the store make the change and loses its reply, and `calls(io, op)`
+  counts the calls that reached the store. `now` never fails.
 
 The jobs under test are those of the shop's invoices. `Invoices.zig`
 holds them, and the two systems they write to, each of which does the
@@ -3153,14 +3157,17 @@ test "a declaration that left the code is parked until it is removed" {
 - **A store that fails.** The worker warns at the first failure and once
   more when the store answers again, so the test lowers
   `std.testing.log_level` to `.err` around it; the test runner would
-  print the warnings, and they are what the test expects.
-  The worker waits out the three failures with growing pauses, runs the
-  job, and its counters show them.
+  print the warnings, and they are what the test expects. The worker
+  waits out the three failures with growing pauses, runs the job, and its
+  counters show them.
 - **A lost reply.** `error.Unavailable` is of the class
   `scheduler.outcome` calls `.not_applied`: nothing changed, and the call
   may be made again. `error.OutcomeUnknown` is `.unknown`: the store may
   have made the job. The same request again tells, since the key of a job
-  is taken once: `.existing` means the first call made it.
+  is taken once: `.existing` means the first call made it. It tells while
+  the job cannot have run yet: one due at once may have run and gone
+  meanwhile, and the same request then makes it again, a run that comes
+  twice.
 - **A rollout.** Version 1 declares the close of the day; version 2 closes
   the day of each tenant instead, with a job by key of the same name, and
   declares only the morning reminder. Its start finds the record of the
@@ -3211,10 +3218,9 @@ state, as MongoDB's field `wake_at` does. A claim that takes over a
 running record gives the claim before in `took_over`: its owner, when it
 was made, and the attempt and the moment it gave its run, which the store
 keeps with that claim, since a change of the client during the run moves
-them in the record. A record whose key is `""`, the
-record of a declaration, goes only to a claim that names its job in
-`any_key`; one that names it in `keyed_only` takes its records with keys
-only.
+them in the record. A record whose key is `""`, the record of a
+declaration, goes only to a claim that names its job in `any_key`; one
+that names it in `keyed_only` takes its records with keys only.
 
 ### The rules
 
