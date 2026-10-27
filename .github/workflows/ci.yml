@@ -299,6 +299,46 @@ jobs:
         if: always()
         run: docker compose --profile mongo down
 
+  # The end-to-end tests of zefir-scheduler against mongod in Docker: the
+  # conformance suite on mongo.SchedulerStore, also through a proxy that
+  # loses replies, the plan of a claim, and workers in several instances,
+  # one of them killed, through faults of the network and of the servers.
+  # On mongod 7.0.45, where the $expr with $$NOW of a claim takes no index,
+  # and 9.0.4, through MONGO_VERSION; ubuntu only, as mongo-e2e. It is not
+  # a required check. It runs when scheduler is among the modules to test,
+  # and tests/scheduler stands on mongo too: affected-modules.sh ties them,
+  # so it runs on every change to either.
+  scheduler-e2e:
+    name: scheduler-e2e (${{ matrix.mongo }})
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' scheduler ')
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mongo: ["7.0.45", "9.0.4"]
+    runs-on: ubuntu-latest
+    env:
+      MONGO_VERSION: ${{ matrix.mongo }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # The three services of the tests only.
+      - name: Start the mongod servers
+        run: docker compose --profile mongo up --detach --wait mongo-plain mongo-stall mongo-restart
+      - name: Run the end-to-end tests
+        working-directory: tests/scheduler
+        timeout-minutes: 20
+        run: zig build e2e --summary all
+      # Why a server did not start or a test failed: what mongod said.
+      # After the tests, so that it runs when either step fails.
+      - name: Show the logs of the mongod servers
+        if: failure()
+        run: docker compose --profile mongo logs --no-color --tail 200 mongo-plain mongo-stall mongo-restart
+      - name: Stop the mongod servers
+        if: always()
+        run: docker compose --profile mongo down
+
   # The end-to-end tests of redis against Redis and Valkey in Docker, on
   # each server the client is tested with, through REDIS_IMAGE; ubuntu
   # only, as nats-e2e. It is not a required check. It runs when redis is
