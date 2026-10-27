@@ -160,6 +160,11 @@ fn findUser(ctx: core.Context, io: std.Io, id: u64) ![]const u8 {
 }
 ```
 
+```text
+$ zig build run
+info: user 42 is Ada
+```
+
 Cancel the token when the client goes away, and every check below fails with `error.Cancelled`; once the deadline passes, they fail with `error.DeadlineExceeded`. `core.w3c` reads and writes the W3C `traceparent` and `tracestate` headers, and none of these primitives allocates, reads a clock or does I/O; `zefir.App`, the root of an application, which core also holds, is the one exception. **[Read the core guide →](src/core/examples/README.md)** · **[Read the App guide →](src/core/examples/app/README.md)**
 
 ## log in a minute

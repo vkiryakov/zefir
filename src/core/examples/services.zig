@@ -1,6 +1,6 @@
 //! Context propagation through three services without a network:
 //! Gateway → User Service (same process) → Billing Service (over a simulated
-//! wire). Run by `zig build test`; it fails if an invariant breaks.
+//! wire). It returns an error if an invariant breaks.
 //!
 //! In process, the context itself travels: the child shares the token and
 //! the deadline. Over the wire only the W3C headers and a millisecond budget
@@ -8,6 +8,11 @@
 
 const std = @import("std");
 const core = @import("core");
+
+/// What the gateway gives a request.
+const request_budget: std.Io.Duration = .fromSeconds(2);
+/// What User Service gives a call to Billing, at most.
+const billing_timeout: std.Io.Duration = .fromMilliseconds(500);
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -21,34 +26,39 @@ pub fn main(init: std.process.Init) !void {
     const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     const tracestate = "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE";
     var token: core.CancellationToken = .init;
-    var recorder: Recorder = .{ .incoming_state = tracestate };
+    var tracer: Tracer = .{ .incoming_state = tracestate };
 
     var incoming = try core.w3c.parseTraceparent(traceparent);
     incoming.state = core.w3c.parseTracestate(tracestate) catch .empty;
 
     const now = std.Io.Clock.awake.now(io);
     const ctx = core.Context.root
-        .withTrace(incoming.child(newSpanId(io)))
-        .withDeadline(.after(now, .fromMilliseconds(300)))
+        .withTrace(incoming.child(try tracer.newSpanId()))
+        .withDeadline(.after(now, request_budget))
         .withCancellation(&token);
-    recorder.record("gateway", ctx, incoming.span_id, now);
+    try tracer.record("gateway", ctx, incoming.span_id, now);
 
-    try userService(ctx, io, &recorder);
-    for (recorder.hops[0..recorder.len]) |hop| {
-        try out.print("{s:<8} trace {f} span {f} parent {f} budget {f} vendor entries {d}\n", .{
-            hop.service, hop.trace_id, hop.span_id, hop.parent_span_id, hop.budget, hop.vendor_entries,
+    try userService(ctx, io, &tracer);
+    for (tracer.hops[0..tracer.len]) |hop| {
+        try out.print("{s:<8} trace {f} span {f} parent {f} vendor entries {d} ", .{
+            hop.service, hop.trace_id, hop.span_id, hop.parent_span_id, hop.vendor_entries,
         });
+        if (hop.budget) |budget| {
+            try out.print("budget {f}\n", .{budget});
+        } else {
+            try out.print("budget of its caller\n", .{});
+        }
     }
-    try checkTrail(recorder, incoming);
+    try checkTrail(tracer, incoming);
 
     // A job that must outlive the request gets its own context from root.
     var job_token: core.CancellationToken = .init;
-    const job = auditJobContext(ctx, io, &job_token);
+    const job = try auditJobContext(ctx, io, &tracer, &job_token);
 
     // The client went away: cancelling the request reaches User Service
     // through the shared token, but not the detached job.
     token.cancel();
-    if (userService(ctx, io, &recorder)) |_| {
+    if (userService(ctx, io, &tracer)) |_| {
         return error.ExpectedCancellation;
     } else |err| switch (err) {
         error.Cancelled => try out.print("after cancel: {t}\n", .{err}),
@@ -60,12 +70,14 @@ pub fn main(init: std.process.Init) !void {
     if (job.deadline.?.expires.nanoseconds <= ctx.deadline.?.expires.nanoseconds) return error.JobInheritedDeadline;
 }
 
-fn userService(ctx: core.Context, io: std.Io, recorder: *Recorder) !void {
-    const now = std.Io.Clock.awake.now(io);
-    try ctx.check(now);
-    const child = ctx.withTrace(ctx.trace.?.child(newSpanId(io)));
-    recorder.record("user", child, ctx.trace.?.span_id, now);
-    try callBilling(child, io, recorder);
+fn userService(ctx: core.Context, io: std.Io, tracer: *Tracer) !void {
+    try ctx.check(std.Io.Clock.awake.now(io));
+    // A span of its own in the request's trace; the token and the deadline
+    // stay those of the request.
+    const trace = ctx.trace orelse return error.NoTrace;
+    const child = ctx.withTrace(trace.child(try tracer.newSpanId()));
+    try tracer.record("user", child, trace.span_id, null);
+    try callBilling(child, io, tracer);
 }
 
 /// What crosses the wire. The message owns its bytes, as a received network
@@ -79,29 +91,33 @@ const Message = struct {
 
 /// The client side of the call: headers and the remaining budget, never the
 /// local clock's timestamps.
-fn callBilling(ctx: core.Context, io: std.Io, recorder: *Recorder) !void {
+fn callBilling(ctx: core.Context, io: std.Io, tracer: *Tracer) !void {
     const now = std.Io.Clock.awake.now(io);
-    try ctx.check(now);
+    // The call's own timeout. The context keeps the earlier deadline, so the
+    // call never outlives the request.
+    const call = ctx.withDeadline(.after(now, billing_timeout));
+    try call.check(now);
+    const trace = call.trace orelse return error.NoTrace;
 
     var message: Message = .{};
-    _ = core.w3c.formatTraceparent(ctx.trace.?, &message.traceparent);
-    const state = ctx.trace.?.state.header;
+    _ = core.w3c.formatTraceparent(trace, &message.traceparent);
+    const state = trace.state;
     // Over its size limit this example drops the tracestate whole. W3C asks a
     // transport to remove whole entries instead (entries over 128 characters
     // first, then from the right); build that with `state.iterator()`.
-    if (state.len <= message.tracestate.len) {
-        @memcpy(message.tracestate[0..state.len], state);
-        message.tracestate_len = state.len;
+    if (state.header.len <= message.tracestate.len) {
+        @memcpy(message.tracestate[0..state.header.len], state.header);
+        message.tracestate_len = state.header.len;
     }
-    const remaining_ms = ctx.remaining(now).?.toMilliseconds();
+    const remaining_ms = call.remaining(now).?.toMilliseconds();
     if (remaining_ms < 1) return error.DeadlineExceeded;
     message.budget_ms = std.math.cast(u32, remaining_ms) orelse std.math.maxInt(u32);
 
-    try billingService(io, &message, recorder);
+    try billingService(io, &message, tracer);
 }
 
 /// The server side: its own call scope, token and deadline.
-fn billingService(io: std.Io, message: *const Message, recorder: *Recorder) !void {
+fn billingService(io: std.Io, message: *const Message, tracer: *Tracer) !void {
     var token: core.CancellationToken = .init;
     const now = std.Io.Clock.awake.now(io);
 
@@ -109,17 +125,18 @@ fn billingService(io: std.Io, message: *const Message, recorder: *Recorder) !voi
     parent.state = core.w3c.parseTracestate(message.tracestate[0..message.tracestate_len]) catch .empty;
 
     const ctx = core.Context.root
-        .withTrace(parent.child(newSpanId(io)))
+        .withTrace(parent.child(try tracer.newSpanId()))
         .withDeadline(.after(now, .fromMilliseconds(message.budget_ms)))
         .withCancellation(&token);
     try ctx.check(now);
-    recorder.record("billing", ctx, parent.span_id, now);
+    try tracer.record("billing", ctx, parent.span_id, now);
 }
 
 /// A background job that keeps running after the request: it starts from
 /// root, owns its token and deadline, and copies only values from the request.
-fn auditJobContext(request: core.Context, io: std.Io, job_token: *const core.CancellationToken) core.Context {
-    var trace = request.trace.?.child(newSpanId(io));
+fn auditJobContext(request: core.Context, io: std.Io, tracer: *Tracer, job_token: *const core.CancellationToken) !core.Context {
+    const request_trace = request.trace orelse return error.NoTrace;
+    var trace = request_trace.child(try tracer.newSpanId());
     trace.state = .empty; // the request's tracestate bytes end with the request
     return core.Context.root
         .withTrace(trace)
@@ -127,64 +144,83 @@ fn auditJobContext(request: core.Context, io: std.Io, job_token: *const core.Can
         .withCancellation(job_token);
 }
 
-fn newSpanId(io: std.Io) core.SpanId {
-    while (true) {
-        var bytes: [8]u8 = undefined;
-        io.random(&bytes);
-        return core.SpanId.fromBytes(bytes) catch continue;
-    }
-}
-
 const Hop = struct {
     service: []const u8,
     trace_id: core.TraceId,
     span_id: core.SpanId,
     parent_span_id: core.SpanId,
-    budget: std.Io.Duration,
+    deadline: core.Deadline,
+    /// The budget of a deadline that the service set itself, at the moment
+    /// it set it; null when it works under its caller's deadline.
+    budget: ?std.Io.Duration,
     sampled: bool,
     vendor_entries: usize,
     /// Whether the tracestate matched the incoming header byte for byte.
     state_intact: bool,
 };
 
-/// Stands in for a tracer: every service records what its context says.
-/// It compares the tracestate while the bytes are alive: Billing's copy
-/// belongs to its call scope and ends with it.
-const Recorder = struct {
+/// Stands in for a tracer: it hands out span ids, and every service records
+/// what its context says. A tracer draws span ids at random, with
+/// `io.random`; this one hands out fixed ones, so that every run prints the
+/// same. It compares the tracestate while the bytes are alive: Billing's
+/// copy belongs to its call scope and ends with it.
+const Tracer = struct {
     incoming_state: []const u8,
     hops: [3]Hop = undefined,
     len: usize = 0,
+    spans: usize = 0,
 
-    fn record(recorder: *Recorder, service: []const u8, ctx: core.Context, parent_span_id: core.SpanId, now: std.Io.Timestamp) void {
-        const trace = ctx.trace.?;
+    const span_ids = [_][]const u8{ "b7ad6b7169203331", "53995c3f42cd8ad8", "e457b5a2e4d86bd1", "8d2fb3c1e6a04f95" };
+
+    fn newSpanId(tracer: *Tracer) !core.SpanId {
+        if (tracer.spans == span_ids.len) return error.OutOfSpanIds;
+        tracer.spans += 1;
+        return core.SpanId.parseHex(span_ids[tracer.spans - 1]);
+    }
+
+    /// `deadline_set_at`: when the service set its own deadline; null when
+    /// it works under its caller's.
+    fn record(tracer: *Tracer, service: []const u8, ctx: core.Context, parent_span_id: core.SpanId, deadline_set_at: ?std.Io.Timestamp) !void {
+        if (tracer.len == tracer.hops.len) return error.TooManyHops;
+        const trace = ctx.trace orelse return error.NoTrace;
+        const deadline = ctx.deadline orelse return error.NoDeadline;
         var entries: usize = 0;
         var it = trace.state.iterator();
         while (it.next()) |_| entries += 1;
-        recorder.hops[recorder.len] = .{
+        tracer.hops[tracer.len] = .{
             .service = service,
             .trace_id = trace.trace_id,
             .span_id = trace.span_id,
             .parent_span_id = parent_span_id,
-            .budget = ctx.remaining(now).?,
+            .deadline = deadline,
+            .budget = if (deadline_set_at) |set_at| deadline.remaining(set_at) else null,
             .sampled = trace.flags.sampled,
             .vendor_entries = entries,
-            .state_intact = std.mem.eql(u8, trace.state.header, recorder.incoming_state),
+            .state_intact = std.mem.eql(u8, trace.state.header, tracer.incoming_state),
         };
-        recorder.len += 1;
+        tracer.len += 1;
     }
 };
 
-fn checkTrail(recorder: Recorder, incoming: core.TraceContext) !void {
-    const hops = recorder.hops[0..recorder.len];
+fn checkTrail(tracer: Tracer, incoming: core.TraceContext) !void {
+    const hops = tracer.hops[0..tracer.len];
     if (hops.len != 3) return error.MissingHop;
     var parent = incoming.span_id;
-    for (hops, 0..) |hop, i| {
+    for (hops) |hop| {
         if (!std.mem.eql(u8, &hop.trace_id.bytes, &incoming.trace_id.bytes)) return error.TraceChanged;
         if (!std.mem.eql(u8, &hop.parent_span_id.bytes, &parent.bytes)) return error.WrongParent;
         if (std.mem.eql(u8, &hop.span_id.bytes, &parent.bytes)) return error.SpanReused;
         if (!hop.state_intact) return error.VendorStateLost;
         if (!hop.sampled) return error.SamplingLost;
-        if (i > 0 and hop.budget.nanoseconds > hops[i - 1].budget.nanoseconds) return error.BudgetGrew;
         parent = hop.span_id;
     }
+    // In process the request's deadline travels as it is; over the wire
+    // Billing gets the budget of the call, never more than the request's.
+    const gateway = hops[0];
+    const user = hops[1];
+    const billing = hops[2];
+    if (user.budget != null or user.deadline.expires.nanoseconds != gateway.deadline.expires.nanoseconds) return error.DeadlineNotShared;
+    const request = gateway.budget orelse return error.NoBudget;
+    const call = billing.budget orelse return error.NoBudget;
+    if (call.nanoseconds > billing_timeout.nanoseconds or call.nanoseconds > request.nanoseconds) return error.BudgetGrew;
 }
