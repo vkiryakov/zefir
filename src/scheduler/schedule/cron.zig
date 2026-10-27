@@ -1,12 +1,14 @@
 //! Cron expressions of v1, in UTC: 5 fields (minute, hour, day of the
 //! month, month, day of the week) or 6 with the second first. A field is
-//! `*`, `a`, `a-b`, `a,b,…`, `*/n` or `a-b/n`; the month and the day of the
-//! week take the names JAN–DEC and SUN–SAT in any case, and Sunday is 0 and
-//! 7. The macros are @yearly, @annually, @monthly, @weekly, @daily,
-//! @midnight and @hourly. When neither the day of the month nor the day of
-//! the week is exactly `*`, a day that matches either one comes; when one
-//! is `*`, the other decides. `*/2` restricts its field, as in robfig/cron
-//! and kelektiv/node-cron, unlike Vixie cron, which reads it as `*`.
+//! `*`, `a`, `a-b`, `a,b,…`, `*/n` or `a-b/n`, a range going up from `a`
+//! to `b`; the month and the day of the week take the names JAN–DEC and
+//! SUN–SAT in any case, and Sunday is 0 and 7. The macros are @yearly,
+//! @annually, @monthly, @weekly, @daily, @midnight and @hourly. When
+//! neither the day of the month nor the day of the week is exactly `*`, a
+//! day that matches either one comes; when one is exactly `*`, the other
+//! decides. Only `*` itself counts so: with `*/2`, or `*/1`, either field
+//! may match, so `0 0 */2 * MON` comes on the odd days of the month and on
+//! Mondays, and `0 0 1 * */1` every day.
 //!
 //! One parser serves the compile time and the run time, so the texts of
 //! its refusals are the same in both. `next` searches field by field with

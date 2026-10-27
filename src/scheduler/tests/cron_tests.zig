@@ -211,6 +211,8 @@ test "next follows the rules of the dialect" {
     try expectNext("2026-10-30T00:00:00.000Z", .cron(runtime(&buffer, "0 0 13 * 5")), t0);
     // */2 restricts the day of the month, so either day matches: the 25th.
     try expectNext("2026-10-25T00:00:00.000Z", .cron(runtime(&buffer, "0 0 */2 * 1")), t0);
+    // */1 is no * either: the 1st or any day of the week, so every day.
+    try expectNext("2026-10-25T00:00:00.000Z", .cron(runtime(&buffer, "0 0 1 * */1")), t0);
     // A day the next month lacks is skipped.
     try expectNext("2026-12-31T00:00:00.000Z", .cron(runtime(&buffer, "0 0 31 * *")), .fromUtc(2026, 10, 31, 0, 0, 0, .h24));
     // Six fields: the second first; strictly after the moment.
