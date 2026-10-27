@@ -81,6 +81,11 @@ pub const Fixture = struct {
 /// bodies compare whole.
 pub const no_deadline: core.Context = .root;
 
+/// A context whose deadline is `d` from now; the client sends `maxTimeMS`.
+pub fn within(d: Io.Duration) core.Context {
+    return core.Context.root.withDeadline(.after(Io.Clock.awake.now(testing.io), d));
+}
+
 /// Fails unless `actual` is `expected` byte for byte; prints both as
 /// Extended JSON.
 pub fn expectDoc(expected: bson.RawDocument, actual: bson.RawDocument) !void {

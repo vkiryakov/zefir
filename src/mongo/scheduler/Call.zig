@@ -9,7 +9,9 @@
 //! reads the record again by the mark its write left. Applied, it gives the
 //! normal result; not applied, an answered write is `error.Refused`, with
 //! the server's code, and one without a reply may still arrive, so it is
-//! `error.OutcomeUnknown` unless sending it again changes nothing.
+//! `error.OutcomeUnknown` unless sending it again changes nothing (rule 7
+//! of the contract): a renewal, or the upsert of a create while no claim
+//! can have taken its record.
 
 const std = @import("std");
 const Io = std.Io;

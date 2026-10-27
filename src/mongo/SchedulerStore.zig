@@ -35,6 +35,14 @@
 //!   again by the mark the write left; where that cannot tell, the call is
 //!   `error.OutcomeUnknown`. Reads (`get`, `list`, `history`) change
 //!   nothing, so their errors are those of a call that did nothing.
+//! - A `create` whose reading again finds neither its job nor a live job
+//!   of the key sends its upsert once more only when the job is due a
+//!   minute or more after the deadline of the call, on the server's clock:
+//!   sooner, a claim may have run the job meanwhile and its finish removed
+//!   it, and the upsert would make it again. Due sooner, or without a
+//!   deadline, the call is `error.OutcomeUnknown`. A cancel of the job
+//!   between the two upserts is lost all the same: it answered true, and
+//!   the job is there again.
 //! - `list` gives the jobs in the order of their `_id`, `"<job>/<key>"`:
 //!   the jobs of one name together, their keys in order.
 //! - The texts of `scheduler.Diagnostics` hold the server's message or the

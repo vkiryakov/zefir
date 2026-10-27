@@ -14,6 +14,7 @@ const Store = scheduler.Store;
 const StoreError = Store.StoreError;
 const State = scheduler.State;
 const Record = scheduler.Record;
+const Instant = scheduler.Instant;
 
 /// Creates the record in one upsert whose pipeline keeps a live record as
 /// it is and replaces a finished one, so that the three cases are atomic.
@@ -27,7 +28,8 @@ pub fn create(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     if (request.tenant) |tenant| if (!documents.validText(tenant, 128)) return c.invalid("create: a tenant is 1–128 bytes of UTF-8 without NUL", .{});
     const id = (try c.id(.{ .job = request.job, .key = request.key })).?;
     const stage = createStage(c.a(), request) catch |err| return c.built(err);
-    const result = upsert(&c, id, stage) catch |err| return createLost(&c, id, stage, request, err);
+    const run_at = earliest(&c, request.run_at);
+    const result = upsert(&c, id, stage) catch |err| return createLost(&c, id, stage, request, run_at, err);
     return createdBy(result);
 }
 
@@ -40,9 +42,12 @@ fn createdBy(result: mongo.Collection.UpdateResult) Store.CreateResult {
     return if (result.modified > 0) .replaced else .existing;
 }
 
-/// A record of our life is ours; a live one of another is `existing`; else
-/// an upsert without a reply goes once more, as it makes only our life.
-fn createLost(c: *Call, id: []const u8, stage: bson.RawDocument, request: *const Store.CreateRequest, err: mongo.Error) StoreError!Store.CreateResult {
+/// A record of our life is ours; a live one of another is `existing`.
+/// Else an answered write did not run; one without a reply may have made
+/// our life, which a claim and its finish may have removed since, so the
+/// upsert goes once more only while no claim can have taken the record
+/// (rule 7 of the contract); else the outcome is unknown.
+fn createLost(c: *Call, id: []const u8, stage: bson.RawDocument, request: *const Store.CreateRequest, run_at: Instant, err: mongo.Error) StoreError!Store.CreateResult {
     switch (Call.classOf(err)) {
         .not_sent => return c.nothing(err),
         .memory => return error.OutOfMemory,
@@ -57,11 +62,33 @@ fn createLost(c: *Call, id: []const u8, stage: bson.RawDocument, request: *const
         if (live(now.record.state)) return .existing;
     }
     if (Call.classOf(err) == .answered) return c.refused(err);
+    if (!beforeAnyClaim(c, run_at)) return c.unknown(err, null);
     const again = upsert(c, id, stage) catch |e| return c.unknown(err, e);
     if (createdBy(again) != .existing) return createdBy(again);
     // The first upsert may have come in between.
     const now = (c.read(id, &md) catch |e| return c.unknown(err, e)) orelse return c.unknown(err, null);
     return if (std.mem.eql(u8, &now.record.life, &request.life)) .created else .existing;
+}
+
+/// When a record of `moment` is due at the earliest, on the store's clock:
+/// the moment of `.at`, or `.after` from now, before the server takes its
+/// own now for the upsert.
+fn earliest(c: *Call, moment: Store.Moment) Instant {
+    return switch (moment) {
+        .at => |at| at,
+        .after => |d| c.store.clock.now(c.io).add(d),
+    };
+}
+
+/// Whether no claim can take a record due at `run_at` before the call is
+/// over: `run_at` is a minute or more past the deadline of the call, on
+/// the store's clock. The minute covers the error of the estimate of that
+/// clock and an upsert that the server runs a little after the deadline.
+/// Without a deadline, no.
+fn beforeAnyClaim(c: *Call, run_at: Instant) bool {
+    const left = c.ctx.remaining(Io.Clock.awake.now(c.io)) orelse return false;
+    const deadline = c.store.clock.now(c.io).add(left);
+    return run_at.unix_ms >= deadline.add(.fromSeconds(60)).unix_ms;
 }
 
 fn live(state: State) bool {

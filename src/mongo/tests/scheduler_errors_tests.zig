@@ -101,7 +101,7 @@ test "a write that may have run is resolved by reading the record again" {
         .{ .reply = concern },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{ours}) },
         // update, refused: the record as expected, so it did not run.
         .{ .reply = refused },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{as_expected}) },
-        // create, no reply, no record: the same upsert again.
+        // create, no reply, no record, due in an hour: the same upsert again.
         .close_connection,                                                                                                    .{ .reply = try fixture.found(a, jobs_ns, &.{}) },
         .{ .reply = bson.literal(.{ .n = 1, .nModified = 0, .upserted = .{.{ .index = 0, ._id = "send/k1" }}, .ok = 1.0 }) },
         // create, a unique key error: a live record of another life.
@@ -140,8 +140,8 @@ test "a write that may have run is resolved by reading the record again" {
     try testing.expectEqual(@as(?i32, 2), f.diagnostics.code);
     try expectClean(&f);
 
-    const create: Store.CreateRequest = .{ .job = "send", .key = "k1", .life = fixture.life, .plan = "", .payload = payload, .run_at = .{ .after = .zero } };
-    try testing.expectEqual(Store.CreateResult.created, try f.store.create(io, fixture.no_deadline, &create, f.call()));
+    const create: Store.CreateRequest = .{ .job = "send", .key = "k1", .life = fixture.life, .plan = "", .payload = payload, .run_at = .{ .after = .fromSeconds(3600) } };
+    try testing.expectEqual(Store.CreateResult.created, try f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
     try afterProbe();
     try testing.expectEqual(Store.CreateResult.existing, try f.store.create(io, fixture.no_deadline, &create, f.call()));
     const renew: Store.RenewRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .life = fixture.life, .owner = "w1", .fence = 1, .lease = .fromSeconds(60) };
@@ -247,4 +247,46 @@ test "after a lost reply, update answers conflict only when its change cannot ha
         else => return error.TestUnexpectedResult,
     }
     try f.expectCommands(&.{ "update", "find", "update", "find", "update", "find" });
+}
+
+test "after a lost reply, create sends its upsert again only while no claim can have taken the record" {
+    var f: Fixture = .{};
+    const a = f.a();
+    const nothing = try fixture.found(a, jobs_ns, &.{});
+    const upserted = bson.literal(.{ .n = 1, .nModified = 0, .upserted = .{.{ .index = 0, ._id = "send/k1" }}, .ok = 1.0 });
+    // Each upsert loses its reply, and the record is not there when read
+    // again.
+    try f.start(&.{
+        .close_connection,      .{ .reply = nothing },
+        .close_connection,      .{ .reply = nothing },
+        .close_connection,      .{ .reply = nothing },
+        .close_connection,      .{ .reply = nothing },
+        .{ .reply = upserted },
+    });
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var create: Store.CreateRequest = .{ .job = "send", .key = "k1", .life = fixture.life, .plan = "", .payload = payload, .run_at = .{ .after = .zero } };
+
+    // Due at once: a claim may have run the life and its finish removed
+    // it, and the upsert would make it again.
+    try testing.expectError(error.OutcomeUnknown, f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
+    try testing.expectEqual(@as(usize, 2), f.served.script.received(io));
+    try expectClean(&f);
+    try afterProbe();
+    // Without a deadline, no moment is sure to come before every claim.
+    create.run_at = .{ .after = .fromSeconds(3600) };
+    try testing.expectError(error.OutcomeUnknown, f.store.create(io, fixture.no_deadline, &create, f.call()));
+    try testing.expectEqual(@as(usize, 4), f.served.script.received(io));
+    try afterProbe();
+    // Due 30 s from now, less than a minute past the deadline 10 s away.
+    create.run_at = .{ .at = f.store.now(io).add(.fromSeconds(30)) };
+    try testing.expectError(error.OutcomeUnknown, f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
+    try testing.expectEqual(@as(usize, 6), f.served.script.received(io));
+    try afterProbe();
+    // Due in two hours: no claim can take it before the call is over.
+    create.run_at = .{ .at = f.store.now(io).add(.fromSeconds(7200)) };
+    try testing.expectEqual(Store.CreateResult.created, try f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
+    try f.expectCommands(&.{ "update", "find", "update", "find", "update", "find", "update", "find", "update" });
 }
