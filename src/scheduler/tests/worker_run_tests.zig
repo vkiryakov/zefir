@@ -103,9 +103,10 @@ test "an unconfirmed lease cancels the run before anyone can take it over" {
     defer w.deinit(io);
     try w.start(io);
     try reach(&probe.ended, 1, 6);
-    // The local deadline: the claim, plus lease − renew_every, 2 s.
+    // The local deadline: the claim, plus lease − renew_every, 2 s; not
+    // the first renewal that failed, 1 s after the claim.
     const held = probe.stopped.load(.acquire) - probe.started.load(.acquire);
-    try testing.expect(held >= 1500 and held < 3000);
+    try testing.expect(held >= 1300 and held < 3000);
     try testing.expectEqualDeep(@as(?[]const u8, "LeaseUnconfirmed"), (try rowOf(&f, .of(Kept, "x"), .interrupted)).error_name);
     // Back with the attempt not counted: the next claim is attempt 1 again.
     try reach(&probe.runs, 2, 5);

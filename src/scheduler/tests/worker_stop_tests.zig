@@ -49,7 +49,7 @@ test "requestStop returns jobs claimed and not started, and lets runs end within
     var f: Fixture = undefined;
     f.init();
     defer f.deinit();
-    var probe: Probe = .{ .hold = .fromMilliseconds(800) };
+    var probe: Probe = .{ .hold = .fromMilliseconds(2000) };
     var queued_probe: Probe = .{};
     var held: Held = .{ .probe = &probe };
     var queued: Queued = .{ .probe = &queued_probe };
@@ -60,12 +60,12 @@ test "requestStop returns jobs claimed and not started, and lets runs end within
     defer w.deinit(io);
     try w.start(io);
     try reach(&probe.runs, 1, 5);
-    // The next claim hangs for 2 s, the stop comes meanwhile, and the
-    // claim takes two jobs after it.
-    f.faulty.stallNext(io, .claim, .fromSeconds(2));
+    // The next claim, due within 100 ms, hangs for 4 s; the stop comes
+    // meanwhile, and the claim takes two jobs after it.
+    f.faulty.stallNext(io, .claim, .fromSeconds(4));
     try f.schedule(Queued, "a", .{ .after = .zero });
     try f.schedule(Queued, "b", .{ .after = .zero });
-    try io.sleep(.fromMilliseconds(500), .awake);
+    try io.sleep(.fromMilliseconds(1500), .awake);
     w.requestStop(io);
     try w.wait(io);
     try testing.expectEqual(@as(?scheduler.State, .succeeded), try stateOf(&f, .of(Held, "r")));

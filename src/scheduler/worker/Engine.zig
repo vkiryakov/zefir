@@ -256,7 +256,7 @@ pub fn start(e: *Engine, io: Io, entries: []const Entry) StartError!void {
     if (stop) e.wakeAll(io);
 }
 
-/// The records of the declared jobs (А32: none, no call of the store): a
+/// The records of the declared jobs (none: no call of the store): a
 /// job with `.repeat` gets its record, or the code's plan in the one
 /// there; a job known without `.repeat` whose record is there finds it
 /// parked, and it stays so.

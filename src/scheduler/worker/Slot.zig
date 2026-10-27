@@ -110,11 +110,11 @@ fn check(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, se
 
 /// Runs the handler in a task of its own and waits for its end, renewing
 /// the lease every `renew_every` from the last confirmed claim or renewal
-/// (`sent`, then each renewal's send time, on the boot clock). The local
-/// deadline of the lease, its last confirmation plus `lease` −
-/// `renew_every` (А5), the timeout of the job, the end of the grace of a
-/// stop, a lease taken over and a removed record cancel the run: the
-/// token, then the task.
+/// (`sent`, then each renewal's send time). The local deadline of the
+/// lease, its last confirmation plus `lease` − `renew_every` on the boot
+/// clock, which goes on while the machine sleeps; the timeout of the job;
+/// the end of the grace of a stop; a lease taken over and a removed record
+/// cancel the run: the token, then the task.
 fn run(s: *Slot, entry: *const Engine.Entry, r: *const record.Record, payload: *const anyopaque, attempts: u32, missed: u32, sent: Io.Timestamp) Ending {
     const e = s.engine;
     const io = e.io;
@@ -167,7 +167,12 @@ fn run(s: *Slot, entry: *const Engine.Entry, r: *const record.Record, payload: *
         s.token.cancel();
         _ = e.cancelling.fetchAdd(1, .acq_rel);
         defer _ = e.cancelling.fetchSub(1, .acq_rel);
-        break :cancelled future.cancel(io);
+        const asked = Io.Clock.awake.now(io);
+        const ended = future.cancel(io);
+        // A handler that reaches no point of cancellation holds its slot.
+        const took = asked.durationTo(Io.Clock.awake.now(io));
+        if (took.nanoseconds >= std.time.ns_per_s) log.warn("{s}/{s}: the handler ended only {f} after its cancel, and held its slot meanwhile", .{ r.job, r.key, took });
+        break :cancelled ended;
     };
     const c = &e.counters;
     if (stop) |why| {
@@ -250,6 +255,9 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
     const r = &claimed.record;
     var current: ?record.Record = null;
     var changes: u32 = 0;
+    // A try whose reply was lost may have been applied: the next one then
+    // finds the claim gone.
+    var unknown = false;
     while (true) {
         const d = transition.decide(.{
             .policy = &entry.policy,
@@ -279,7 +287,8 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
         };
         var diag: Diagnostics = .{};
         const options: Store.CallOptions = .{ .allocator = s.arena.allocator(), .diagnostics = &diag };
-        const result = e.tally(io, "finish", e.store.finish(io, e.callContext(io), &request, options), &diag) catch {
+        const result = e.tally(io, "finish", e.store.finish(io, e.callContext(io), &request, options), &diag) catch |err| {
+            if (Store.outcome(err) == .unknown) unknown = true;
             if (s.pause(io)) continue;
             log.warn("{s}/{s}: the outcome of the run could not be written before the stop; the job goes back when its lease ends", .{ r.job, r.key });
             return;
@@ -287,8 +296,11 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
         switch (result) {
             .done => return s.account(r, &d),
             .lost => {
-                if (ending != .lost and ending != .removed)
+                if (unknown) {
+                    log.debug("{s}/{s}: an earlier try of the outcome went through, or the claim is gone", .{ r.job, r.key });
+                } else if (ending != .lost and ending != .removed) {
                     log.warn("{s}/{s}: the store refused the outcome of the run: the claim was taken over or the record removed meanwhile", .{ r.job, r.key });
+                }
                 return;
             },
             .changed => |now| {
