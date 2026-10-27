@@ -22,14 +22,14 @@
 //! defer broker.deinit();
 //!
 //! var server_side: mailbox.Server = .init(&broker);
-//! var server = try rpc.Server.init(gpa, .{ .transport = server_side.serverTransport(), .handlers = .{&users} });
+//! var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = server_side.serverTransport() });
 //! defer server.deinit(io);
 //! try server.start(io);
 //!
 //! var client_side: mailbox.Client = try .init(&broker, .{});
 //! defer client_side.deinit(io); // also after a connect that failed
 //! try client_side.connect(io);
-//! var client = try rpc.Client.init(gpa, .{ .transport = client_side.clientTransport() });
+//! var client = try rpc.Client.init(gpa, .{}, .{ .transport = client_side.clientTransport() });
 //! defer client.deinit();
 //! ```
 //!
