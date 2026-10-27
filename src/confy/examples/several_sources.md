@@ -1,4 +1,4 @@
-# Several sources
+# zefir-confy: several sources
 
 Real programs read their configuration from more than one place: defaults in
 the repository, a file per environment, secrets kept on the machine, and the
@@ -55,15 +55,13 @@ field:
 ### Objects merge key by key
 
 A later source changes only the keys it sets. Everything else in the same
-object keeps its earlier value:
-
-**`config/base.json`**
+object keeps its earlier value. With this `config/base.json`:
 
 ```json
 { "db": { "url": "postgres://localhost:5432/app", "pool": { "size": 4 } } }
 ```
 
-**`config/production.ini`**
+and this `config/production.ini`:
 
 ```ini
 [db.pool]
@@ -148,9 +146,7 @@ confy.loadOrExit(arena, &config, .{
 
 Settings shared by every environment, what differs in production, secrets, and
 the environment on top. The files are in a `sources` directory, which `.dir`
-points at.
-
-**`sources/base.json`**
+points at. First what every environment shares, `sources/base.json`:
 
 ```json
 {
@@ -167,7 +163,7 @@ points at.
 }
 ```
 
-**`sources/production.ini`**
+What differs in production, `sources/production.ini`:
 
 ```ini
 log_level = warn
@@ -185,14 +181,14 @@ replica_url = postgres://replica.internal:5432/app
 pool.size = 16
 ```
 
-**`sources/.env`**
+The secrets of this machine, and a port of its own, `sources/.env`:
 
 ```sh
 APP_DB_PASSWORD=change-me
 APP_HTTP_PORT=8443
 ```
 
-**`main.zig`**
+And `several_sources.zig`, a whole program that reads them all:
 
 ```zig
 const std = @import("std");
@@ -238,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
         },
     }) catch |err| switch (err) {
         error.InvalidConfig => {
-            std.debug.print("{f}\n", .{&diag});
+            std.debug.print("{f}\n", .{&diag}); // a header and one line per problem
             std.process.exit(1);
         },
         error.OutOfMemory => return err,
@@ -248,6 +244,13 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("{s} listens on port {d}", .{ config.name, config.http.port });
 }
 ```
+
+```text
+$ zig build run
+info: zefir-demo listens on port 8443
+```
+
+It loads:
 
 | Field                  | Value                                                      | Comes from                                 |
 | ---------------------- | ---------------------------------------------------------- | ------------------------------------------ |
@@ -263,16 +266,21 @@ pub fn main(init: std.process.Init) !void {
 | `db.pool.size`         | `16`                                                       | production.ini, over base.json             |
 | `db.pool.max_idle`     | `2`                                                        | the default                                |
 
-Now play with the layers:
+Now play with the layers. The environment beats `.env`:
 
-| You do                                           | You get                                          |
-| ------------------------------------------------ | ------------------------------------------------ |
-| run with `APP_HTTP_PORT=9090`                    | `http.port = 9090`: the environment beats `.env` |
-| run with `APP_LOG_LEVEL=debug`                   | `log_level = .debug`: over production.ini        |
-| add `APP_HTTP_PORT=7000` to `sources/.env.local` | `http.port = 7000`: `.env.local` beats `.env`    |
-| both of the above                                | `http.port = 9090`: the environment still wins   |
-| remove `APP_DB_PASSWORD` from `sources/.env`     | problem: `db.password: missing (...)`            |
-| add `"debug": true` to `sources/base.json`       | `debug = true`                                   |
+```text
+$ APP_HTTP_PORT=9090 zig build run
+info: zefir-demo listens on port 9090
+```
+
+| You do                                              | You get                                          |
+| --------------------------------------------------- | ------------------------------------------------ |
+| run with `APP_HTTP_PORT=9090`                       | `http.port = 9090`: the environment beats `.env` |
+| run with `APP_LOG_LEVEL=debug`                      | `log_level = .debug`: over production.ini        |
+| add `APP_HTTP_PORT=7000` to `sources/.env.local`    | `http.port = 7000`: `.env.local` beats `.env`    |
+| `APP_HTTP_PORT=9090` with that `sources/.env.local` | `http.port = 9090`: the environment still wins   |
+| remove `APP_DB_PASSWORD` from `sources/.env`        | problem: `db.password: missing (...)`            |
+| add `"debug": true` to `sources/base.json`          | `debug = true`                                   |
 
 ## Recipes
 
@@ -287,12 +295,22 @@ what it needs. No files at all.
 
 ### A file per environment
 
-Pick the file from a variable, so one binary runs everywhere:
+Pick the file from a variable, so one binary runs everywhere. The variable is
+a setting like any other, so confy reads it first, in a struct of its own:
 
 ```zig
 const arena = init.arena.allocator();
-const environment = init.environ_map.get("APP_ENV") orelse "development";
-const env_file = try std.fmt.allocPrint(arena, "config/{s}.ini", .{environment});
+
+// APP_ENV names the environment; confy reads it as any setting.
+const Environment = struct { env: enum { development, staging, production } = .development };
+var environment: Environment = undefined;
+confy.loadOrExit(arena, &environment, .{
+    .io = init.io,
+    .environ = init.environ_map,
+    .env_prefix = "APP_",
+    .sources = &.{.osEnv()},
+});
+const env_file = try std.fmt.allocPrint(arena, "config/{t}.ini", .{environment.env});
 
 confy.loadOrExit(arena, &config, .{
     .io = init.io,
@@ -302,8 +320,10 @@ confy.loadOrExit(arena, &config, .{
 });
 ```
 
-An INI file must exist, so a typo in `APP_ENV` is caught at once:
-`config/stagign.ini: cannot read file (file not found)`.
+A typo in `APP_ENV` stops the first load:
+`environment: APP_ENV: invalid (expected one of: development, staging, production)`.
+An INI file must exist, so an environment without its file stops the second:
+`config/staging.ini: cannot read file (file not found)`.
 
 ### Secrets out of the repository
 

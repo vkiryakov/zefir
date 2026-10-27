@@ -1,4 +1,4 @@
-# Environment variables
+# zefir-confy: environment variables
 
 The environment of the running process is how deployments configure a program:
 containers, CI jobs and service managers all set variables. List `.osEnv()`
@@ -26,9 +26,7 @@ last, and every variable overrides whatever the files say.
 ## At a glance
 
 A struct where every field has a default runs without any variables, and each
-variable overrides one field:
-
-**`main.zig`**
+variable overrides one field. `environment.zig`, a whole program:
 
 ```zig
 const std = @import("std");
@@ -63,6 +61,18 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+```text
+$ zig build run
+info: zefir-demo listens on port 8080
+```
+
+```text
+$ APP_HTTP_PORT=9090 zig build run
+info: zefir-demo listens on port 9090
+```
+
+The same program, built and run as `./app`:
+
 | You run                                                      | You get                                         |
 | ------------------------------------------------------------ | ----------------------------------------------- |
 | `./app`                                                      | every field at its default                      |
@@ -80,8 +90,9 @@ pub fn main(init: std.process.Init) !void {
 | `.env_prefix` | put in front of every variable name, such as `"APP_"` |
 
 `.osEnv()` reads from `.environ`, so the two go together. Without `.environ`,
-`load` stops the program with
-`confy: the .osEnv() source needs Options.environ`.
+`load` panics with `confy: the .osEnv() source needs Options.environ`: that is
+a mistake in the program, not in its configuration, so it is no problem of
+`Diagnostics`.
 
 > [!WARNING]
 > Always set a prefix. The environment is shared with the shell and every other
@@ -141,8 +152,8 @@ variable; put it in a [JSON](json.md#lists-of-objects) file.
 
 ## Required fields
 
-A field without a default must come from some source. When none sets it, the
-problem names the variable to set:
+A field without a default, such as `name: []const u8`, must come from some
+source. When none sets it, the problem names the variable to set:
 
 ```text
 error(confy): 1 configuration problem:
@@ -152,7 +163,8 @@ error(confy): 1 configuration problem:
 When files are listed too, the hint names both places:
 
 ```text
-db.url: missing (set APP_DB_URL, or "db.url" in a config file)
+error(confy): 1 configuration problem:
+  db.url: missing (set APP_DB_URL, or "db.url" in a config file)
 ```
 
 ## Setting variables
@@ -240,11 +252,11 @@ test "the port comes from the environment" {
 
 ## Problems
 
-```sh
-APP_DEBUG=maybe APP_HTTP_PORT=http ./app
-```
+Two values that don't fit, given to the program of
+[At a glance](#at-a-glance):
 
 ```text
+$ APP_DEBUG=maybe APP_HTTP_PORT=http zig build run
 error(confy): 2 configuration problems:
   environment: APP_DEBUG: invalid (expected true or false)
   environment: APP_HTTP_PORT: invalid (expected an integer 0..65535)

@@ -8,6 +8,7 @@ const rpc_guide = @import("src/rpc/examples/cases.zig");
 const log_guide = @import("src/log/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
+const confy_guide = @import("src/confy/examples/cases.zig");
 const jwt_cases = @import("src/security/jwt/tests/cases.zig");
 const security_guide = @import("src/security/examples/cases.zig");
 const openapi_cases = @import("src/openapi/tests/cases.zig");
@@ -317,6 +318,9 @@ pub fn build(b: *std.Build) void {
     // The guide of zefir.App: the tests of its shop, which imports the
     // umbrella module, and a program whose server does not stop.
     addAppGuide(b, test_zefir, zefir, target, optimize, tsan);
+    // The guide of zefir-confy: the tests of its pages, the code that must
+    // not compile, and its programs, which read the files of their pages.
+    addConfyGuide(b, test_confy, confy, target, optimize, tsan);
 
     addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize, openapi_app);
     addOpenapiGoldens(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
@@ -2402,6 +2406,89 @@ fn addOpenapiCompileChecks(
         });
         t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
         test_step.dependOn(&t.step);
+    }
+}
+
+/// The examples of the guide of zefir-confy, src/confy/examples/README.md
+/// and its pages, as cases.zig there lists them: the tests of the pages;
+/// the code that must not compile, each file with its message; and the
+/// programs, run once per run of cases.zig with its variables, through
+/// example_main.zig, which exits with code 3 on a panic instead of aborting
+/// and with code 4 past its time limit. A program that reads files works in
+/// their directory under testdata/: it gets the absolute path from the
+/// build (`fixtures`) and goes there itself, so the run starts where every
+/// run does (see addOpenapiGoldens); the files are inputs of its runs. Each
+/// run must exit with the code of its case.
+fn addConfyGuide(
+    b: *std.Build,
+    test_confy: *std.Build.Step,
+    confy: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/confy/examples/";
+    const imports: []const std.Build.Module.Import = &.{.{ .name = "confy", .module = confy }};
+    for (confy_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("confy-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_confy.dependOn(&addRun(b, tests, tsan).step);
+    }
+    // Each file is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, from its
+    // start: `error: ` in front of it, as in addHttpCompileChecks.
+    for (confy_guide.compile_errors) |code| {
+        const t = b.addTest(.{
+            .name = b.fmt("confy-guide-{s}", .{code.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "compile_errors/{s}.zig", .{code.name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{code.expect}) };
+        test_confy.dependOn(&t.step);
+    }
+
+    for (confy_guide.programs) |program| {
+        const files_dir = if (program.dir) |name| b.fmt(dir ++ "testdata/{s}/", .{name}) else "";
+        const fixtures = b.addOptions();
+        fixtures.addOption([]const u8, "dir", if (program.dir == null) "" else b.root.joinString(b.allocator, files_dir) catch @panic("OOM"));
+        const exe = b.addExecutable(.{
+            .name = b.fmt("confy-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        exe.root_module.addOptions("fixtures", fixtures);
+        for (program.runs) |case| {
+            const run = addRun(b, exe, tsan);
+            for (case.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
+            for (program.files) |file| run.addFileInput(b.path(b.fmt("{s}{s}", .{ files_dir, file })));
+            run.expectExitCode(case.exit);
+            // std.log writes to stderr; the log of a run is not the build's.
+            _ = run.captureStdErr(.{});
+            test_confy.dependOn(&run.step);
+        }
     }
 }
 

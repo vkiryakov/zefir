@@ -1,36 +1,37 @@
-# confy
+# zefir-confy: typed configuration for Zig services
 
 **Typed configuration for Zig.** Declare a struct, list where the values come
 from — JSON and INI files, `.env` files, environment variables — and confy fills
 the struct, checks every value against its field's type, and reports every
 problem at once, each pointing at the file and line it came from.
 
-```zig
-const Config = struct {
-    log_level: enum { debug, info, warn, err } = .info,
-    http: struct {
-        port: u16 = 8080,
-    },
-    db: struct {
-        url: []const u8,
-        password: confy.Secret,
-    },
-};
+A service keeps its defaults in a `config.json` committed with its code. A
+developer keeps the database password in a `.env` file that never leaves
+their machine, and in production the deployment sets `APP_` variables that
+override both. confy reads the three layers into one struct at the start of
+`main`, and a port of 90000 or a forgotten password stops the service before
+it does anything, with one line per problem that says what to fix and where.
 
-var config: Config = undefined;
-confy.loadOrExit(init.arena.allocator(), &config, .{
-    .io = init.io,
-    .environ = init.environ_map,
-    .env_prefix = "APP_",
-    .sources = &.{ .json("config.json"), .env(".env"), .osEnv() },
-});
-```
+> [!IMPORTANT]
+> **Not implemented yet (TODO):**
+>
+> - **Variable expansion.** `${HOME}` in a value stays as written.
+> - **Multi-line values** in `.env` files.
+> - **Comments after an INI value.** A comment goes on a line of its own.
+> - **Lists of structs outside JSON.** INI files, `.env` files and the
+>   environment cannot hold them.
+> - **`null` outside JSON.** INI files, `.env` files and the environment can
+>   only leave a field unset.
+> - **Misspelled variable names** are ignored, not reported: confy looks up
+>   the names of your fields, and nothing else.
+> - **Other field types.** Arrays, pointers other than `[]const` slices, and
+>   unions are a compile error.
 
 ## Contents
 
 - [How it works](#how-it-works)
 - [Installation](#installation)
-- [Getting started](#getting-started)
+- [confy in a minute](#confy-in-a-minute)
 - [The configuration struct](#the-configuration-struct)
 - [Field types](#field-types)
 - [Keys and variable names](#keys-and-variable-names)
@@ -83,33 +84,39 @@ This guide is on the `dev` branch, so the command fetches its latest commit; `--
 Then import the `zefir-confy` module in `build.zig`:
 
 ```zig
-const zefir = b.dependency("zefir", .{
-    .target = target,
-    .optimize = optimize,
-});
+// build.zig
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-        },
-    }),
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the app").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
 > confy is also part of the umbrella module: with `zefir.module("zefir")`
 > imported as `zefir`, it is `@import("zefir").confy`. Both are the same module.
 
-## Getting started
+## confy in a minute
 
-Put the defaults in a file next to your program, the password in `.env`:
-
-**`config.json`**
+A service that listens on a port and talks to a database. Its defaults go in
+`config.json`, next to `build.zig`. confy reads relative paths from the working
+directory, so run `zig build run` there:
 
 ```json
 {
@@ -118,15 +125,14 @@ Put the defaults in a file next to your program, the password in `.env`:
 }
 ```
 
-**`.env`**
+The password goes in `.env`, which stays out of version control:
 
 ```sh
 APP_DB_PASSWORD=change-me
 ```
 
-Declare the configuration and load it at the start of `main`:
-
-**`src/main.zig`**
+The program, `minute.zig` (`src/main.zig` in the build above), declares the
+configuration as a struct and loads it at the start of `main`:
 
 ```zig
 const std = @import("std");
@@ -153,20 +159,20 @@ pub fn main(init: std.process.Init) !void {
         .sources = &.{ .json("config.json"), .env(".env"), .osEnv() },
     });
 
-    std.log.info("listening on port {d}, database {s}", .{ config.http.port, config.db.url });
+    std.log.info("listening on port {d}, database {s}, password {f}", .{ config.http.port, config.db.url, config.db.password });
 }
 ```
 
 ```text
 $ zig build run
-info: listening on port 8080, database postgres://localhost:5432/app
+info: listening on port 8080, database postgres://localhost:5432/app, password [REDACTED]
 ```
 
 The environment comes last, so it overrides the files:
 
 ```text
 $ APP_HTTP_PORT=9090 zig build run
-info: listening on port 9090, database postgres://localhost:5432/app
+info: listening on port 9090, database postgres://localhost:5432/app, password [REDACTED]
 ```
 
 A value that doesn't fit its field stops the program before it does anything:
@@ -176,6 +182,13 @@ $ APP_HTTP_PORT=90000 zig build run
 error(confy): 1 configuration problem:
   environment: APP_HTTP_PORT: invalid (expected an integer 0..65535)
 ```
+
+- `log_level` and `http.timeout_s` have defaults, so no source has to set
+  them; every other field must come from somewhere.
+- The password is a `confy.Secret`: the program can use it, and `{f}` prints
+  it as `[REDACTED]`.
+- `loadOrExit` logs every problem with `std.log.err` and exits with status 1.
+  Nothing after it runs with a broken configuration.
 
 ## The configuration struct
 
@@ -193,10 +206,12 @@ db: struct {
 ```
 
 When none does, loading fails, and the problem says where the value can go —
-only the kinds of sources you actually use are mentioned:
+only the kinds of sources you actually use are mentioned. With a JSON file and
+the environment:
 
 ```text
-db.url: missing (set APP_DB_URL, or "db.url" in a config file)
+error(confy): 1 configuration problem:
+  db.url: missing (set APP_DB_URL, or "db.url" in a config file)
 ```
 
 ### Defaults
@@ -348,11 +363,16 @@ valid names: `log_level: invalid (expected one of: debug, info, warn, err)`.
   problems that state the range.
 - JSON also accepts strings where numbers, bools and enums are expected:
   `"port": "8080"` works.
-- Any other field type — pointers, arrays, unions — is a compile error:
+- A JSON number holds an integer up to 2^127-1, the largest `i128`. A larger
+  `u128` goes in a JSON string, `"id": "340282366920938463463374607431768211455"`;
+  as a number it is a problem.
 
-  ```text
-  error: confy: fields of type [4]u8 are not supported; use bool, an integer, a float, an enum, []const u8, confy.Secret, a []const slice of these, a struct, or an optional of any of them
-  ```
+Any other field type — pointers, arrays, unions — is a compile error. A field
+`address: [4]u8` stops the build with:
+
+```text
+error: confy: fields of type [4]u8 are not supported; use bool, an integer, a float, an enum, []const u8, confy.Secret, a []const slice of these, a struct, or an optional of any of them
+```
 
 ## Keys and variable names
 
@@ -369,18 +389,22 @@ spells the path its own way:
 - JSON keys and INI keys are field names, exactly, including case.
 - A variable name is `env_prefix`, then the field names upper-cased and joined
   with `_`. The prefix is put in front as is: `"APP_"`, not `"APP"`.
-- Two fields that would get the same variable name are a compile error:
+- Two fields that would get the same variable name are a compile error.
 
-  ```zig
-  const Config = struct {
-      db_port: u16,
-      db: struct { port: u16 },
-  };
-  ```
+Here `db_port` and `db.port` would both be `DB_PORT`:
 
-  ```text
-  error: confy: fields 'db_port' and 'db.port' both map to the environment variable DB_PORT
-  ```
+```zig
+const Config = struct {
+    db_port: u16,
+    db: struct { port: u16 }, // compile error: both fields map to DB_PORT
+};
+```
+
+The build stops with:
+
+```text
+error: confy: fields 'db_port' and 'db.port' both map to the environment variable DB_PORT
+```
 
 ## Sources
 
@@ -409,7 +433,12 @@ Sources are listed in `Options.sources` and apply in that order; see
 ### `loadOrExit`
 
 ```zig
-confy.loadOrExit(allocator, &config, options);
+confy.loadOrExit(init.arena.allocator(), &config, .{
+    .io = init.io,
+    .environ = init.environ_map,
+    .env_prefix = "APP_",
+    .sources = &.{ .json("config.json"), .env(".env"), .osEnv() },
+});
 ```
 
 Fills `config`, or logs every problem with `std.log.err` and exits with status 1.
@@ -418,7 +447,13 @@ Use it in `main`, where a broken configuration means the program can't start.
 ### `load`
 
 ```zig
-try confy.load(allocator, &config, options);
+try confy.load(std.testing.allocator, &config, .{
+    .io = std.testing.io,
+    .environ = &environ,
+    .env_prefix = "APP_",
+    .sources = &.{.osEnv()},
+});
+defer confy.free(std.testing.allocator, config);
 ```
 
 Fills `config`, or returns an error and leaves `config` untouched:
@@ -427,6 +462,9 @@ Fills `config`, or returns an error and leaves `config` untouched:
 | --------------------- | ----------------------------------------------------------------- |
 | `error.InvalidConfig` | the configuration has problems; they are in `options.diagnostics` |
 | `error.OutOfMemory`   | an allocation failed; nothing is leaked                           |
+
+This one is a test: `environ` is a `std.process.Environ.Map` that the test
+fills, and [Testing](#testing) shows a whole test.
 
 ### Options
 
@@ -450,13 +488,8 @@ Strings and lists in the result are allocated with the allocator you pass:
 - **An arena** — `init.arena.allocator()` in `main` — releases everything with
   the arena. Nothing to free.
 - **A general purpose allocator** — release the result with
-  `confy.free(allocator, config)`. It overwrites every `confy.Secret` with zeros
-  before freeing it.
-
-```zig
-try confy.load(gpa, &config, options);
-defer confy.free(gpa, config);
-```
+  `confy.free(allocator, config)`, as the test above does. It overwrites every
+  `confy.Secret` with zeros before freeing it.
 
 ## Validation
 
@@ -481,8 +514,12 @@ const Config = struct {
 };
 ```
 
+With `APP_DB_POOL_MAX_IDLE=8`, the pool would keep more idle connections than
+it has:
+
 ```text
-invalid (validate() returned error.MaxIdleAbovePoolSize)
+error(confy): 1 configuration problem:
+  invalid (validate() returned error.MaxIdleAbovePoolSize)
 ```
 
 - confy calls `validate` once the struct's fields have loaded without problems,
@@ -497,14 +534,31 @@ invalid (validate() returned error.MaxIdleAbovePoolSize)
 ## Problems and diagnostics
 
 Every problem is a line: where the value came from, which field or variable,
-what kind of problem, and what was expected.
+what kind of problem, and what was expected. Give the program of
+[confy in a minute](#confy-in-a-minute) this `config.json`:
+
+```json
+{
+  "http": { "port": 80800 },
+  "db": { "ulr": "postgres://localhost:5432/app" }
+}
+```
+
+and this `.env`:
+
+```sh
+APP_DB_PASSWORD=change-me
+APP_LOG_LEVEL=verbose
+```
+
+and it stops with all four problems:
 
 ```text
 error(confy): 4 configuration problems:
-  config.json:4: http.port: invalid (expected an integer 0..65535)
-  .env:2: APP_DEBUG: invalid (expected true or false)
+  .env:2: APP_LOG_LEVEL: invalid (expected one of: debug, info, warn, err)
+  config.json:2: http.port: invalid (expected an integer 0..65535)
   db.url: missing (set APP_DB_URL, or "db.url" in a config file)
-  config.json:2: nmae: unknown key (did you mean "name"?)
+  config.json:3: db.ulr: unknown key (did you mean "url"?)
 ```
 
 | Kind            | When                                                       | Example                                                            |
@@ -516,16 +570,28 @@ error(confy): 4 configuration problems:
 | `syntax`        | a line or file that can't be parsed                        | `.env:6: syntax error (expected KEY=value)`                        |
 | `unreadable`    | a file that can't be read                                  | `config.json: cannot read file (file not found)`                   |
 
-With `load`, pass a `confy.Diagnostics` to receive them:
+With `load`, pass a `confy.Diagnostics` to receive them. The program of
+[Several sources](several_sources.md#a-complete-example) prints them itself,
+then exits:
 
 ```zig
-var diag: confy.Diagnostics = .init(gpa);
+var diag: confy.Diagnostics = .init(init.gpa);
 defer diag.deinit();
 
-confy.load(gpa, &config, .{
+var config: Config = undefined;
+confy.load(init.gpa, &config, .{
     .io = init.io,
+    .environ = init.environ_map,
+    .env_prefix = "APP_",
+    .dir = dir,
     .diagnostics = &diag,
-    .sources = &.{.json("config.json")},
+    .sources = &.{
+        .json("base.json"),
+        .ini("production.ini"),
+        .env(".env"),
+        .env(".env.local"),
+        .osEnv(),
+    },
 }) catch |err| switch (err) {
     error.InvalidConfig => {
         std.debug.print("{f}\n", .{&diag}); // a header and one line per problem
@@ -535,16 +601,15 @@ confy.load(gpa, &config, .{
 };
 ```
 
-Each problem is also data:
+Each problem is also data: its `kind`, the `path` of the field, its `origin`
+(the file and line, or the variable, that the value came from) and its
+`detail`, what was expected. The test in [Testing](#testing) reads one:
 
 ```zig
-for (diag.problems.items) |problem| {
-    // problem.kind:   .missing, .invalid, .unknown_key, .duplicate_key, .syntax or .unreadable
-    // problem.path:   the field, such as "db.pool.size"
-    // problem.origin: the file and line, or the variable, the value came from
-    // problem.detail: what was expected
-    _ = problem;
-}
+const problem = diag.problems.items[0];
+try std.testing.expectEqual(.invalid, problem.kind);
+try std.testing.expectEqualStrings("http.port", problem.path);
+try std.testing.expectEqualStrings("expected an integer 0..65535", problem.detail);
 ```
 
 > [!NOTE]
@@ -570,7 +635,8 @@ db: struct {
 ## Testing
 
 `load` takes any directory and any variables, so a test can build its own
-configuration:
+configuration. This one checks the `Config` of
+[confy in a minute](#confy-in-a-minute):
 
 ```zig
 test "a port out of range is reported" {
@@ -598,7 +664,11 @@ test "a port out of range is reported" {
         .diagnostics = &diag,
         .sources = &.{ .json("config.json"), .osEnv() },
     }));
-    try std.testing.expectEqualStrings("http.port", diag.problems.items[0].path);
+    try std.testing.expectEqual(1, diag.problems.items.len);
+    const problem = diag.problems.items[0];
+    try std.testing.expectEqual(.invalid, problem.kind);
+    try std.testing.expectEqualStrings("http.port", problem.path);
+    try std.testing.expectEqualStrings("expected an integer 0..65535", problem.detail);
 }
 ```
 

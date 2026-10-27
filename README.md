@@ -88,6 +88,21 @@ Take any module on its own, or all the finished ones at once through the umbrell
 
 ## confy in a minute
 
+A service that listens on a port and talks to a database. Its defaults go in `config.json`, next to `build.zig`:
+
+```json
+{
+  "http": { "port": 8080 },
+  "db": { "url": "postgres://localhost:5432/app" }
+}
+```
+
+The password goes in `.env`, which stays out of version control:
+
+```sh
+APP_DB_PASSWORD=change-me
+```
+
 Declare the configuration and load it at the start of `main`:
 
 ```zig
@@ -115,25 +130,31 @@ pub fn main(init: std.process.Init) !void {
         .sources = &.{ .json("config.json"), .env(".env"), .osEnv() },
     });
 
-    std.log.info("listening on port {d}, database {s}", .{ config.http.port, config.db.url });
+    std.log.info("listening on port {d}, database {s}, password {f}", .{ config.http.port, config.db.url, config.db.password });
 }
 ```
 
-With `http.port` and `db.url` in `config.json`, and `APP_DB_PASSWORD` in `.env`:
-
 ```text
 $ zig build run
-info: listening on port 8080, database postgres://localhost:5432/app
+info: listening on port 8080, database postgres://localhost:5432/app, password [REDACTED]
+```
 
+The environment comes last, so it overrides the files:
+
+```text
 $ APP_HTTP_PORT=9090 zig build run
-info: listening on port 9090, database postgres://localhost:5432/app
+info: listening on port 9090, database postgres://localhost:5432/app, password [REDACTED]
+```
 
+A value that doesn't fit its field stops the program before it does anything:
+
+```text
 $ APP_HTTP_PORT=90000 zig build run
 error(confy): 1 configuration problem:
   environment: APP_HTTP_PORT: invalid (expected an integer 0..65535)
 ```
 
-The environment overrides the files, a bad value stops the program before it does anything, and `confy.Secret` prints as `[REDACTED]`. **[Read the confy guide →](src/confy/examples/README.md)**
+`confy.Secret` prints as `[REDACTED]`, and every problem of the configuration comes at once, each pointing at the file and line, or the variable, it came from. **[Read the confy guide →](src/confy/examples/README.md)**
 
 ## core in a minute
 
