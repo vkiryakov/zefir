@@ -545,8 +545,8 @@ pub fn build(b: *std.Build) void {
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
     // exits with code 3 instead of aborting. They get their own Debug copies
-    // of mongo and the modules it imports, odm's below among them, whatever
-    // -Doptimize says.
+    // of mongo and the modules it imports, odm's and scheduler's below among
+    // them, whatever -Doptimize says.
     const panic_mongo_bson = b.createModule(.{
         .root_source_file = b.path("src/mongo-bson/root.zig"),
         .target = target,
@@ -583,6 +583,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = panic_core },
             .{ .name = "mongo-bson", .module = panic_mongo_bson },
             .{ .name = "odm", .module = panic_odm },
+            .{ .name = "scheduler", .module = panic_scheduler },
         },
     });
     panic_mongo.addOptions("build_options", version_options);

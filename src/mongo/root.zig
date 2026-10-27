@@ -23,6 +23,10 @@
 //! - `mongo.OdmDriver` — the reference driver of zefir-odm: zefir-mongo
 //!   under odm's driver contract, whose `driver()` goes to
 //!   `odm.Registry.init`.
+//! - `mongo.SchedulerStore` — the store of zefir-scheduler in MongoDB, for
+//!   a service of several instances: zefir-mongo under scheduler's store
+//!   contract, whose `store()` goes to `scheduler.Client` and
+//!   `scheduler.Worker`.
 //! - `mongo.testing` — a scripted server on loopback, for tests of code on
 //!   zefir-mongo without MongoDB: the client connects to it as to a
 //!   mongod.
@@ -49,6 +53,8 @@ pub const WriteConcern = @import("crud/options.zig").WriteConcern;
 
 /// zefir-mongo under the driver contract of zefir-odm.
 pub const OdmDriver = @import("OdmDriver.zig");
+/// zefir-mongo under the store contract of zefir-scheduler.
+pub const SchedulerStore = @import("SchedulerStore.zig");
 
 pub const Error = errors.Error;
 pub const Outcome = errors.Outcome;
@@ -118,4 +124,6 @@ test {
     _ = @import("tests/rules_tests.zig");
     _ = @import("tests/odm_driver_tests.zig");
     _ = @import("tests/odm_conformance.zig");
+    _ = SchedulerStore;
+    _ = @import("tests/scheduler_store_tests.zig");
 }
