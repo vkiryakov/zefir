@@ -1,4 +1,4 @@
-# redis
+# zefir-redis: a Redis and Valkey client for Zig
 
 > [!WARNING]
 > **No TLS yet: use it only in a network you trust.** zefir-redis speaks
@@ -130,14 +130,16 @@ const profile = (try client.run(io, op, cmd.hgetall(Profile, "user:42"), .{ .all
 - [Logs](#logs)
 - [Tests without Redis](#tests-without-redis)
 
-Programs that `zig build e2e` in `tests/redis` builds and runs against
-Redis and Valkey, checking what they print against this guide: [quick start](quick_start.zig) · [connecting](connect.zig) ·
-[the best customers](leaders.zig) · [checkout](checkout.zig) · [a limit on
-requests](limits.zig) · [shipping](orders.zig) ·
-[notifications](notifications.zig) · [errors](errors.zig). Tests that
-`zig build test-redis` runs without a server: [pipelines](pipeline_test.zig)
-· [deadlines](deadlines_test.zig) · [tests of an
-application](profiles_test.zig).
+Every program of this guide is shown whole, with what it printed against
+Redis: [quick start](#quick-start) ·
+[connecting](#what-can-go-wrong-at-the-start) ·
+[the best customers](#the-best-customers-and-the-sessions-of-one) ·
+[checkout](#transactions-and-watch) · [a limit on requests](#scripts) ·
+[shipping](#streams-and-consumer-groups) · [notifications](#pubsub) ·
+[errors](#errors-and-what-is-safe-to-retry). So is every test, and the
+tests need no server: [pipelines](#pipelines) ·
+[deadlines](#deadlines-and-cancellation) · [tests of an
+application](#tests-without-redis).
 
 ## How Redis keeps data
 
@@ -251,26 +253,32 @@ use Zefir's confy for settings, log for records and core for deadlines:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "redis", .module = zefir.module("zefir-redis") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "redis", .module = zefir.module("zefir-redis") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -292,10 +300,10 @@ same.
 
 ## Quick start
 
-The sessions, the page views and the profiles of the shop. The program
-connects, signs a customer in with a session that expires, counts the
-views of the home page with a pipeline, keeps the customer's profile in a
-hash, and signs the customer out:
+The sessions, the page views and the profiles of the shop. The program,
+`quick_start.zig`, connects, signs a customer in with a session that
+expires, counts the views of the home page with a pipeline, keeps the
+customer's profile in a hash, and signs the customer out:
 
 ```zig
 //! The quick start of the guide: the sessions, the page views and the
@@ -1164,8 +1172,8 @@ The rules:
 - A blocking command holds the commands after it; give a pipeline one at
   most, and last, see [Blocking commands](#blocking-commands-and-the-reliable-queue).
 
-The tests show each case, against a server that the test scripts (see
-[Tests without Redis](#tests-without-redis)):
+The tests of `pipeline_test.zig` show each case, against a server that the
+test scripts (see [Tests without Redis](#tests-without-redis)):
 
 ```zig
 //! Pipelines against `redis.testing.FakeServer`: commands of several types
@@ -2331,9 +2339,9 @@ and a trace. `.of(ctx)` makes one.
   deadline, see [Blocking commands](#blocking-commands-and-the-reliable-queue).
 
 One deadline covers all the calls made under it: in the handler of a
-request, every call takes what is left of the request's time. Tests
-against a server whose replies wait as long as the test says show each
-case:
+request, every call takes what is left of the request's time. The tests
+of `deadlines_test.zig`, against a server whose replies wait as long as
+the test says, show each case:
 
 ```zig
 //! Deadlines and cancellation, against `redis.testing.FakeServer`, whose
@@ -2678,7 +2686,8 @@ your code talks to it through a `redis.Client`, as to any Redis.
   With it a test checks what your code sent, and that it sent nothing
   twice.
 
-The profiles of the shop's customers, as an application keeps them:
+The profiles of the shop's customers, as an application keeps them, in
+`Profiles.zig`:
 
 ```zig
 //! The profiles of the shop's customers, as the application keeps them: a
@@ -2733,7 +2742,7 @@ fn key(buffer: *[32]u8, id: u64) []const u8 {
 }
 ```
 
-And their tests:
+And their tests, `profiles_test.zig`:
 
 ```zig
 //! Tests of the profiles of the shop without Redis. Each runs `Profiles`
@@ -2828,6 +2837,7 @@ test "a profile is saved as a field of the hash for each field of the struct but
 - The server comes before the client, and `defer client.deinit()` before
   `defer client.close(io)`, so that their `defer`s close the client first
   and stop the server last.
-- The build of zefir runs these tests, and those of
-  [pipelines](#pipelines) and of [deadlines](#deadlines-and-cancellation),
-  in `zig build test-redis`.
+- These tests need no Redis, and neither do those of
+  [pipelines](#pipelines) and of [deadlines](#deadlines-and-cancellation):
+  they run wherever the other tests of your project run, with nothing to
+  start first.
