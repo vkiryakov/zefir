@@ -37,7 +37,11 @@
 //! `scheduled_at` with `attempt` 0. A claim is known by `(life, owner,
 //! fence)`, which `renew` and `finish` carry: the run of a removed record
 //! never renews or finishes a new record with the same key, even of the
-//! same owner and fence. Every transition of `finish` clears
+//! same owner and fence. A change of the client holds on `(life, revision,
+//! state)`, which `update` expects: only a change of the client raises
+//! `revision`, and a new life starts again at revision 0 and pending, so
+//! the life keeps a change read on a removed record from landing on a new
+//! record with the same key. Every transition of `finish` clears
 //! `pause_requested`: the pause it asked for is done.
 //!
 //! The rules:
@@ -279,7 +283,7 @@ pub fn get(s: Store, io: Io, ctx: core.Context, ref: *const Ref, options: CallOp
     return s.vtable.get(s.ptr, io, ctx, ref, options);
 }
 
-/// `request.set`, when the record's revision and state are those of
+/// `request.set`, when the record's life, revision and state are those of
 /// `request.expect`.
 pub fn update(s: Store, io: Io, ctx: core.Context, request: *const UpdateRequest, options: CallOptions) StoreError!UpdateResult {
     return s.vtable.update(s.ptr, io, ctx, request, options);
@@ -364,7 +368,9 @@ pub const Patch = struct {
 
 pub const UpdateRequest = struct {
     ref: Ref,
-    expect: struct { revision: u64, state: State },
+    /// The record as the change read it: a record of another life, made
+    /// again with the key since, is not changed.
+    expect: struct { life: Life, revision: u64, state: State },
     set: Patch,
     tag: Tag,
 };
@@ -372,7 +378,8 @@ pub const UpdateRequest = struct {
 pub const UpdateResult = union(enum) {
     /// The new revision.
     updated: u64,
-    /// The record has another revision or state: here it is now.
+    /// The change was not applied: the record is of another life, or has
+    /// another revision or state. Here it is now.
     conflict: Record,
     not_found,
 };

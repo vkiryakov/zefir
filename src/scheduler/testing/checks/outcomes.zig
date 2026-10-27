@@ -217,7 +217,7 @@ pub fn s16(r: *Runner) Error!void {
     for (contexts, expected) |context, err| {
         try expectRefused(r, s.create(io, context(r), &.{ .job = job, .key = "new", .life = r.newLife(), .plan = "", .payload = "{}", .run_at = .{ .after = .zero } }, r.call()), err, "create");
         try expectRefused(r, s.get(io, context(r), &.{ .job = job, .key = "due" }, r.call()), err, "get");
-        try expectRefused(r, s.update(io, context(r), &.{ .ref = Runner.refOf(due), .expect = .{ .revision = due.revision, .state = .pending }, .set = .{ .state = .paused }, .tag = r.newTag() }, r.call()), err, "update");
+        try expectRefused(r, s.update(io, context(r), &.{ .ref = Runner.refOf(due), .expect = .{ .life = due.life, .revision = due.revision, .state = .pending }, .set = .{ .state = .paused }, .tag = r.newTag() }, r.call()), err, "update");
         try expectRefused(r, s.remove(io, context(r), &.{ .job = job, .key = "due" }, r.call()), err, "remove");
         try expectRefused(r, s.list(io, context(r), &.{ .filter = .{}, .page = .{} }, r.call()), err, "list");
         try expectRefused(r, s.claim(io, context(r), &.{ .owner = "s16-w2", .any_key = &.{job}, .keyed_only = &.{}, .max = 10, .lease = r.ms(60_000), .tag = r.newTag() }, r.call()), err, "claim");
@@ -275,7 +275,7 @@ pub fn s17(r: *Runner) Error!void {
     // update: updated, the revision one more, never conflict or not_found;
     // applied whole or not at all.
     try lose(r, .update);
-    const update: Store.UpdateRequest = .{ .ref = Runner.refOf(live), .expect = .{ .revision = live.revision, .state = live.state }, .set = .{ .pause_requested = true }, .tag = r.newTag() };
+    const update: Store.UpdateRequest = .{ .ref = Runner.refOf(live), .expect = .{ .life = live.life, .revision = live.revision, .state = live.state }, .set = .{ .pause_requested = true }, .tag = r.newTag() };
     if (try answer(r, r.store().update(io, r.ctx(), &update, r.call()), "update")) |result| switch (result) {
         .updated => |revision| try r.expect(revision == live.revision +% 1, "update with its reply lost answered revision {d}, not {d}", .{ revision, live.revision +% 1 }),
         else => return r.fail("update with its reply lost answered {t}, not updated", .{result}),
@@ -493,19 +493,13 @@ const Mixer = struct {
             .running => if (random.boolean()) .{ .pause_requested = true } else .{ .run_at = later },
             .succeeded, .failed => if (random.boolean()) .{ .reset = true } else .{ .reset = true, .state = .paused },
         };
-        const request: Store.UpdateRequest = .{ .ref = slot.*, .expect = .{ .revision = now.revision, .state = now.state }, .set = set, .tag = @splat(m.index) };
+        const request: Store.UpdateRequest = .{ .ref = slot.*, .expect = .{ .life = now.life, .revision = now.revision, .state = now.state }, .set = set, .tag = @splat(m.index) };
         switch (try s.update(m.r.io, m.r.ctx(), &request, m.options())) {
             .updated => |revision| {
                 if (revision != now.revision +% 1) m.fail("update raised the revision by other than 1");
-                // An update holds on the revision and state, not on the
-                // life: a new life of the key, created since the get, may be
-                // the one paused. A life never comes back to its key, so a
-                // get that still finds it shows the pause was of it.
-                if (set.state == .paused) {
-                    const after = (try s.get(m.r.io, m.r.ctx(), slot, m.options())) orelse return;
-                    m.see(after);
-                    if (std.mem.eql(u8, &after.life, &now.life)) try m.quiets.append(m.r.gpa, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
-                }
+                // An update holds on the life too: the pause is of the life
+                // read.
+                if (set.state == .paused) try m.quiets.append(m.r.gpa, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
             },
             .conflict => |rec| m.see(rec),
             .not_found => {},

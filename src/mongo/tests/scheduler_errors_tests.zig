@@ -132,7 +132,7 @@ test "a write that may have run is resolved by reading the record again" {
     const level = testing.log_level;
     testing.log_level = .err;
     defer testing.log_level = level;
-    const update: Store.UpdateRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .expect = .{ .revision = 0, .state = .pending }, .set = .{ .pause_requested = true }, .tag = fixture.tag };
+    const update: Store.UpdateRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .expect = .{ .life = fixture.life, .revision = 0, .state = .pending }, .set = .{ .pause_requested = true }, .tag = fixture.tag };
     try testing.expectEqual(Store.UpdateResult{ .updated = 1 }, try f.store.update(io, fixture.no_deadline, &update, f.call()));
     try testing.expectError(error.Refused, f.store.update(io, fixture.no_deadline, &update, f.call()));
     try testing.expectEqual(@as(?i32, 2), f.diagnostics.code);

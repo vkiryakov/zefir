@@ -172,7 +172,7 @@ test "loseNextReply applies the change and answers OutcomeUnknown" {
 
     // A lost claim claimed all the same. Its result is dropped whole: the
     // caller's allocator, which checks for leaks, gives none of it.
-    _ = try f.memory.store().update(io, .root, &.{ .ref = ref, .expect = .{ .revision = 0, .state = .pending }, .set = .{ .run_at = .{ .after = .fromSeconds(-1) } }, .tag = @splat(0) }, f.options(null));
+    _ = try f.memory.store().update(io, .root, &.{ .ref = ref, .expect = .{ .life = @splat(1), .revision = 0, .state = .pending }, .set = .{ .run_at = .{ .after = .fromSeconds(-1) } }, .tag = @splat(0) }, f.options(null));
     f.faulty.loseNextReply(io, .claim);
     const claim: Store.ClaimRequest = .{ .owner = "w1", .any_key = &.{}, .keyed_only = &.{"send-invoice"}, .max = 1, .lease = .fromSeconds(60), .tag = @splat(0) };
     try testing.expectError(error.OutcomeUnknown, f.store().claim(io, .root, &claim, .{ .allocator = testing.allocator }));

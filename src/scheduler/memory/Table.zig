@@ -354,7 +354,9 @@ pub fn update(t: *Table, now: Instant, request: *const Store.UpdateRequest, a: A
     if (set.state) |state| if (state != .pending and state != .paused)
         return refuse(d, "update: a patch makes a record pending or paused, not {t}", .{state});
     const e = t.find(request.ref) orelse return .not_found;
-    if (e.rec.revision != request.expect.revision or e.rec.state != request.expect.state) return .{ .conflict = try recordOut(a, &e.rec) };
+    const expect = request.expect;
+    if (!std.mem.eql(u8, &e.rec.life, &expect.life) or e.rec.revision != expect.revision or e.rec.state != expect.state)
+        return .{ .conflict = try recordOut(a, &e.rec) };
     if (e.rec.state == .running and (set.state != null or set.reset))
         return refuse(d, "update: a running record changes its state only by its claim", .{});
 

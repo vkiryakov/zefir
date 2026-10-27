@@ -287,7 +287,7 @@ const Busy = struct {
     pub fn update(b: *Busy, _: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) StoreError!Store.UpdateResult {
         b.updates += 1;
         const r = (try b.inner.get(io, ctx, &request.ref, options)) orelse return .not_found;
-        const first: Store.UpdateRequest = .{ .ref = request.ref, .expect = .{ .revision = r.revision, .state = r.state }, .set = .{ .pause_requested = r.pause_requested }, .tag = @splat(0) };
+        const first: Store.UpdateRequest = .{ .ref = request.ref, .expect = .{ .life = r.life, .revision = r.revision, .state = r.state }, .set = .{ .pause_requested = r.pause_requested }, .tag = @splat(0) };
         if (try b.inner.update(io, ctx, &first, options) != .updated) return error.Corrupt;
         return b.inner.update(io, ctx, request, options);
     }
@@ -327,6 +327,67 @@ test "Contended after exactly 8 lost updates" {
     const r = (try memory.store().get(io, .root, &order, .{ .allocator = arena.allocator() })) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(scheduler.State.pending, r.state);
     try testing.expectEqual(@as(u64, 8), r.revision);
+}
+
+/// A MemoryStore whose update, once `armed`, first finds the job cancelled
+/// and its key scheduled again: a record of a new life, pending at revision
+/// 0, as a record read just after its create is.
+const Reborn = struct {
+    memory: scheduler.MemoryStore,
+    vtable: Store.VTable,
+    armed: bool = false,
+
+    /// Made in place: the store points at its fields.
+    fn init(r: *Reborn) void {
+        r.* = .{ .memory = .init(testing.allocator, io, .{}), .vtable = undefined };
+        r.vtable = r.memory.store().vtable.*;
+        r.vtable.update = update;
+    }
+
+    fn deinit(r: *Reborn) void {
+        r.memory.deinit();
+    }
+
+    fn store(r: *Reborn) Store {
+        return .{ .ptr = &r.memory, .vtable = &r.vtable };
+    }
+
+    const life: scheduler.Life = @splat(7);
+
+    fn update(ptr: *anyopaque, _: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) StoreError!Store.UpdateResult {
+        const memory: *scheduler.MemoryStore = @ptrCast(@alignCast(ptr));
+        const r: *Reborn = @fieldParentPtr("memory", memory);
+        if (r.armed) {
+            r.armed = false;
+            if (!try memory.remove(io, ctx, &request.ref, options)) return error.Corrupt;
+            const again: Store.CreateRequest = .{ .job = request.ref.job, .key = request.ref.key, .life = life, .plan = "", .payload = "{}", .run_at = .{ .after = .fromSeconds(3600) } };
+            if (try memory.create(io, ctx, &again, options) != .created) return error.Corrupt;
+        }
+        return memory.update(io, ctx, request, options);
+    }
+};
+
+test "a change read on one life of a key never lands on the next" {
+    var reborn: Reborn = undefined;
+    reborn.init();
+    defer reborn.deinit();
+    const client: scheduler.Client = .init(testing.allocator, io, reborn.store(), .{});
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    // The job is cancelled and scheduled again between the read of the
+    // change and its write: the new job is left alone.
+    for ([_][]const u8{ "pause", "reschedule" }) |key| {
+        const ref: scheduler.Ref = .of(SendInvoice, key);
+        if (try client.schedule(io, .root, SendInvoice, .{ .key = key, .when = .{ .after = .fromSeconds(60) }, .payload = small }, .{}) != .created) return error.TestUnexpectedResult;
+        reborn.armed = true;
+        const changed = if (std.mem.eql(u8, key, "pause")) try client.pause(io, .root, ref, .{}) else try client.reschedule(io, .root, ref, .{ .at = at }, .{});
+        try testing.expectEqual(Changed.not_found, changed);
+        const r = (try reborn.store().get(io, .root, &ref, .{ .allocator = arena.allocator() })) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualSlices(u8, &Reborn.life, &r.life);
+        try testing.expectEqual(scheduler.State.pending, r.state);
+        try testing.expectEqual(@as(u64, 0), r.revision);
+        try testing.expect(r.scheduled_at.unix_ms != at.unix_ms);
+    }
 }
 
 /// `when` is a moment within `[low, high]` in milliseconds.

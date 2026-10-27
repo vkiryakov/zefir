@@ -1,7 +1,7 @@
 //! Tests of scheduler.testing.conformance: MemoryStore passes it, also when
-//! a pause of the mix of S20 lands on a new life of its record; a store
-//! that breaks a rule fails the check of that rule, and a check past its
-//! time limit fails while the run goes on.
+//! a pause of the mix of S20 meets a new life of its record; a store that
+//! breaks a rule fails the check of that rule, and a check past its time
+//! limit fails while the run goes on.
 
 const std = @import("std");
 const testing = std.testing;
@@ -136,7 +136,7 @@ const StalledHarness = struct {
     }
 };
 
-test "S20 holds when a pause of the mix lands on a new life of its record" {
+test "S20 holds when a pause of the mix meets a new life of its record" {
     // With the default limits, the mix of S20 may evict rows of the
     // history, and MemoryStore warns about it.
     const level = testing.log_level;
@@ -147,7 +147,7 @@ test "S20 holds when a pause of the mix lands on a new life of its record" {
     defer report.deinit();
     try expectNoFailures(&report);
     try testing.expect(report.outcome(.s20) == .passed);
-    try testing.expect(harness.stalled.landed.load(.acquire));
+    try testing.expect(harness.stalled.refused.load(.acquire));
 }
 
 /// A MemoryStore behind a FaultyStore, which loses the reply of a call on
@@ -257,4 +257,24 @@ test "a store that breaks a rule fails its check" {
     try testing.expectEqualStrings("create of a pending key answered created, not existing", try failedWhy(report.outcome(.s1)));
     try testing.expect(report.outcome(.s3) == .passed);
     try testing.expectEqual(@as(usize, 1), report.failedCount());
+}
+
+/// An update that holds on the revision and state alone: the life the
+/// record has now stands in for the life the change read.
+fn lifeBlind(vtable: *Store.VTable) void {
+    vtable.name = "life-blind";
+    vtable.update = struct {
+        fn update(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) scheduler.StoreError!Store.UpdateResult {
+            var blind = request.*;
+            if (try memoryOf(ptr).get(io, ctx, &request.ref, options)) |now| blind.expect.life = now.life;
+            return memoryOf(ptr).update(io, ctx, &blind, options);
+        }
+    }.update;
+}
+
+test "a store whose update does not hold on the life fails S4" {
+    var harness: PatchedHarness = .{ .patch = lifeBlind };
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s4} });
+    defer report.deinit();
+    try testing.expectEqualStrings("update of a life that was removed, on the revision and state of the new life of its key, answered updated, not conflict", try failedWhy(report.outcome(.s4)));
 }

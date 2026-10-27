@@ -102,10 +102,10 @@ test "create is one upsert with a pipeline" {
 /// An update of the record "send-invoice/order-42" at revision 3 in
 /// `state`, with the tag of the fixture.
 fn updateOf(state: scheduler.State, set: Store.Patch) Store.UpdateRequest {
-    return .{ .ref = .{ .job = "send-invoice", .key = "order-42" }, .expect = .{ .revision = 3, .state = state }, .set = set, .tag = fixture.tag };
+    return .{ .ref = .{ .job = "send-invoice", .key = "order-42" }, .expect = .{ .life = fixture.life, .revision = 3, .state = state }, .set = set, .tag = fixture.tag };
 }
 
-test "update matches revision and state and sets wake_at by the state after it" {
+test "update matches life, revision and state and sets wake_at by the state after it" {
     var f: Fixture = .{};
     const conflicting = try fixture.pendingDoc(f.a(), "send-invoice", "order-42", fixture.life_hex, .{ .tag = "elsewhere" });
     try f.start(&.{
@@ -120,7 +120,7 @@ test "update matches revision and state and sets wake_at by the state after it" 
     // A pause: the record is out of the index of claims.
     try testing.expectEqual(Store.UpdateResult{ .updated = 4 }, try f.store.update(io, fixture.no_deadline, &updateOf(.pending, .{ .state = .paused }), f.call()));
     const paused = try fixture.item(try f.entry(0), "updates");
-    try fixture.expectDoc(bson.literal(.{ ._id = "send-invoice/order-42", .revision = @as(i64, 3), .state = "pending" }), try fixture.docAt(paused, "q"));
+    try fixture.expectDoc(bson.literal(.{ ._id = "send-invoice/order-42", .life = fixture.life_hex, .revision = @as(i64, 3), .state = "pending" }), try fixture.docAt(paused, "q"));
     try fixture.expectDoc(bson.literal(.{ .@"$set" = .{
         .revision = head.revision,
         .tag = head.tag,

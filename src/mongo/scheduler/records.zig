@@ -113,7 +113,7 @@ pub fn get(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const scheduler.
     return try c.record((doc orelse return null).raw());
 }
 
-/// Changes the record on condition of its revision and state, in one
+/// Changes the record on condition of its life, revision and state, in one
 /// pipeline: a plain update has no `$$NOW`.
 pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) StoreError!Store.UpdateResult {
     var c: Call = .init(s, io, ctx, options, "update");
@@ -123,7 +123,8 @@ pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     const revision = std.math.cast(i64, request.expect.revision) orelse return c.invalid("update: a revision is at most 2^63 - 1", .{});
     const id = (try c.id(request.ref)) orelse return .not_found;
     const stage = updateStage(c.a(), request) catch |err| return c.built(err);
-    const filter = .{ ._id = id, .revision = revision, .state = @tagName(request.expect.state) };
+    const life = documents.hex(request.expect.life);
+    const filter = .{ ._id = id, .life = &life, .revision = revision, .state = @tagName(request.expect.state) };
     const result = c.jobs().updateOne(io, c.op(), filter, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md }) catch |err|
         return updateLost(&c, request, id, err);
     if (result.matched > 0) return .{ .updated = request.expect.revision + 1 };

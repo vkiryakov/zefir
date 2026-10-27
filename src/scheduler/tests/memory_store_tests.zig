@@ -60,8 +60,12 @@ const Fixture = struct {
         return (try f.store().get(io, .root, &.{ .job = job, .key = key }, f.options())) orelse error.TestUnexpectedResult;
     }
 
+    /// An update on `revision` and `state` of the record of `job` and `key`,
+    /// on the life it has now.
     fn update(f: *Fixture, job: []const u8, key: []const u8, revision: u64, state: scheduler.State, set: Store.Patch) !Store.UpdateResult {
-        return f.store().update(io, .root, &.{ .ref = .{ .job = job, .key = key }, .expect = .{ .revision = revision, .state = state }, .set = set, .tag = @splat(9) }, f.options());
+        const ref: scheduler.Ref = .{ .job = job, .key = key };
+        const life: scheduler.Life = if (try f.store().get(io, .root, &ref, f.options())) |r| r.life else @splat(0);
+        return f.store().update(io, .root, &.{ .ref = ref, .expect = .{ .life = life, .revision = revision, .state = state }, .set = set, .tag = @splat(9) }, f.options());
     }
 
     fn claim(f: *Fixture, owner: []const u8, any_key: []const []const u8, keyed_only: []const []const u8, max: u32, lease: Io.Duration) !Store.ClaimResult {
@@ -236,7 +240,7 @@ test "create refuses what breaks the rules of names" {
     try testing.expectEqual(@as(usize, 1), page.records.len);
 }
 
-test "update applies on revision and state and raises revision" {
+test "update applies on life, revision and state and raises revision" {
     var f: Fixture = .init(.{});
     defer f.deinit();
     _ = try f.create("send-invoice", "order-42", .{ .at = .fromUnixMs(5_000) }, 1);
@@ -261,6 +265,11 @@ test "update applies on revision and state and raises revision" {
     const wrong_state = try f.update("send-invoice", "order-42", 1, .paused, .{ .state = .pending });
     try testing.expect(wrong_state == .conflict and wrong_state.conflict.revision == 1);
     try testing.expect(try f.update("send-invoice", "order-41", 0, .pending, .{ .state = .paused }) == .not_found);
+    // Its revision and state, on another life: a conflict too.
+    var other: scheduler.Life = @splat(0);
+    other[0] = 2;
+    const reborn = try f.store().update(io, .root, &.{ .ref = .{ .job = "send-invoice", .key = "order-42" }, .expect = .{ .life = other, .revision = 1, .state = .pending }, .set = .{ .state = .paused }, .tag = @splat(9) }, f.options());
+    try testing.expect(reborn == .conflict and reborn.conflict.life[0] == 1 and reborn.conflict.state == .pending);
 
     // .after by the store's clock; run_at and scheduled_at move, attempt is 0.
     const moved_from = f.now();
@@ -282,7 +291,7 @@ test "update applies on revision and state and raises revision" {
     var d: scheduler.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, f.store().update(io, .root, &.{
         .ref = .{ .job = "send-invoice", .key = "order-42" },
-        .expect = .{ .revision = 4, .state = .pending },
+        .expect = .{ .life = paused.life, .revision = 4, .state = .pending },
         .set = .{ .state = .succeeded },
         .tag = @splat(0),
     }, .{ .allocator = f.arena.allocator(), .diagnostics = &d }));
@@ -392,7 +401,7 @@ test "a deadline under 1 ms and a cancelled token change nothing" {
 
     // On a record that is there: no change, no removal.
     _ = try f.store().create(io, .root, &create, options);
-    const update: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = 0, .state = .pending }, .set = .{ .state = .paused }, .tag = @splat(0) };
+    const update: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .life = @splat(1), .revision = 0, .state = .pending }, .set = .{ .state = .paused }, .tag = @splat(0) };
     try testing.expectError(error.DeadlineExceeded, f.store().update(io, past, &update, options));
     try testing.expectError(error.Cancelled, f.store().update(io, cancelled, &update, options));
     try testing.expectError(error.Cancelled, f.store().remove(io, cancelled, &ref, options));

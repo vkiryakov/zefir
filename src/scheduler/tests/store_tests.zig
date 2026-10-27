@@ -96,7 +96,7 @@ test "Store.init routes each wrapper to the method of the type" {
     try testing.expectEqual(@as(?*const anyopaque, &create), recorder.last_request);
     try testing.expectError(error.Corrupt, store.get(io, ctx, &ref, options));
     try testing.expectEqual(@as(?*const anyopaque, &ref), recorder.last_request);
-    const update: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = 7, .state = .pending }, .set = .{ .pause_requested = true }, .tag = tag };
+    const update: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .life = life, .revision = 7, .state = .pending }, .set = .{ .pause_requested = true }, .tag = tag };
     const updated = try store.update(io, ctx, &update, options);
     try testing.expect(updated == .updated and updated.updated == 8);
     try testing.expect(try store.remove(io, ctx, &ref, options));

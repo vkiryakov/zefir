@@ -1,12 +1,13 @@
 //! A MemoryStore whose pause of a pending record at revision 0 stalls
 //! between the read of its client and the write, as the task of a client
-//! may, until one pause has landed: meanwhile the record moves on to
-//! revision 1, a claim of the load takes it on that revision, and it is
+//! may, until one pause has met a new life: meanwhile the record moves on
+//! to revision 1, a claim of the load takes it on that revision, and it is
 //! removed and created again with a new life, pending at revision 0. The
-//! pause then lands on the new life, whose revision and state are those it
-//! expects: an update holds on them, not on the life. A load that takes
-//! such a pause for one of the life it read sees a claim of a paused
-//! record that never was.
+//! pause then meets the new life, whose revision and state are those it
+//! expects, and an update holds on the life too: it is refused with a
+//! conflict. A store that let it land would have a load that notes the
+//! pause for the life it read see a claim of a paused record that never
+//! was.
 
 const std = @import("std");
 const Io = std.Io;
@@ -24,8 +25,9 @@ pub const StalledPause = struct {
     stalling: std.atomic.Value(bool) = .init(false),
     /// The lives of the records the stalls created.
     lives: u64 = 0,
-    /// A pause landed on a new life, after a claim of the life before.
-    landed: std.atomic.Value(bool) = .init(false),
+    /// A pause met a new life, after a claim of the life before, and was
+    /// refused.
+    refused: std.atomic.Value(bool) = .init(false),
 
     /// Made in place: the store points at its fields.
     pub fn init(s: *StalledPause, gpa: Allocator, io: Io, options: MemoryStore.Options) void {
@@ -43,17 +45,17 @@ pub const StalledPause = struct {
         return .{ .ptr = &s.memory, .vtable = &s.vtable };
     }
 
-    /// Until a pause has landed on a new life, the pause of a pending
-    /// record at revision 0 stalls first.
+    /// Until a pause has met a new life, the pause of a pending record at
+    /// revision 0 stalls first.
     fn update(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) scheduler.StoreError!Store.UpdateResult {
         const memory: *MemoryStore = @ptrCast(@alignCast(ptr));
         const s: *StalledPause = @fieldParentPtr("memory", memory);
         const pause = request.set.state == .paused and request.expect.state == .pending and request.expect.revision == 0;
-        if (!pause or s.landed.load(.acquire) or s.stalling.swap(true, .acquire)) return memory.update(io, ctx, request, options);
+        if (!pause or s.refused.load(.acquire) or s.stalling.swap(true, .acquire)) return memory.update(io, ctx, request, options);
         defer s.stalling.store(false, .release);
-        const renewed = s.stall(io, ctx, &request.ref);
+        const reborn = s.stall(io, ctx, &request.ref);
         const result = try memory.update(io, ctx, request, options);
-        if (renewed and result == .updated) s.landed.store(true, .release);
+        if (reborn and result == .conflict and !std.mem.eql(u8, &result.conflict.life, &request.expect.life)) s.refused.store(true, .release);
         return result;
     }
 
@@ -67,7 +69,7 @@ pub const StalledPause = struct {
         const options: Store.CallOptions = .{ .allocator = arena.allocator() };
         const before = (s.memory.get(io, ctx, ref, options) catch return false) orelse return false;
         const life = before.life;
-        const moved: Store.UpdateRequest = .{ .ref = ref.*, .expect = .{ .revision = 0, .state = .pending }, .set = .{ .run_at = .{ .after = .zero } }, .tag = @splat(0xEE) };
+        const moved: Store.UpdateRequest = .{ .ref = ref.*, .expect = .{ .life = life, .revision = 0, .state = .pending }, .set = .{ .run_at = .{ .after = .zero } }, .tag = @splat(0xEE) };
         const result = s.memory.update(io, ctx, &moved, options) catch return false;
         if (result != .updated) return false;
         const give_up = Io.Clock.awake.now(io).addDuration(.fromSeconds(2));

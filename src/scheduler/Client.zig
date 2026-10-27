@@ -131,6 +131,9 @@ pub const Changed = enum {
     /// does not apply to it. Give a failed job its attempts back with
     /// `retry`, or schedule the key again.
     finished,
+    /// No job had the key, or the one the call read was cancelled before
+    /// the change: a job scheduled again with the key since is another
+    /// one, which the change leaves alone.
     not_found,
 };
 
@@ -235,11 +238,14 @@ const Change = union(enum) {
 const max_lost = 8;
 
 /// Reads the record, computes the patch by its state and writes it on
-/// condition of its revision and state. A race lost to another change is
-/// computed again from the record the store returns with it.
+/// condition of its life, revision and state. A race lost to another
+/// change of the record is computed again from the record the store
+/// returns with it; a record of another life is a job scheduled again with
+/// the key since the read, which the change leaves alone.
 fn change(c: *const Client, io: Io, ctx: core.Context, a: Allocator, ref: record.Ref, what: Change, d: ?*Diagnostics) Error!Changed {
     const options: Store.CallOptions = .{ .allocator = a, .diagnostics = d };
     var current = (try c.store.get(io, ctx, &ref, options)) orelse return .not_found;
+    const life = current.life;
     var lost: u32 = 0;
     while (true) {
         const set = switch (what.step(current)) {
@@ -252,11 +258,12 @@ fn change(c: *const Client, io: Io, ctx: core.Context, a: Allocator, ref: record
         }
         var tag: Store.Tag = undefined;
         io.random(&tag);
-        const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = current.revision, .state = current.state }, .set = set, .tag = tag };
+        const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .life = life, .revision = current.revision, .state = current.state }, .set = set, .tag = tag };
         switch (try c.store.update(io, ctx, &request, options)) {
             .updated => return .changed,
             .not_found => return .not_found,
             .conflict => |now| {
+                if (!std.mem.eql(u8, &now.life, &life)) return .not_found;
                 current = now;
                 lost += 1;
             },

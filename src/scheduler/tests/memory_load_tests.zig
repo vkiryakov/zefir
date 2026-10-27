@@ -1,6 +1,6 @@
 //! Tests of scheduler.MemoryStore under load: tasks that claim the same
 //! records at once, and tasks that mix every operation of the contract for
-//! 3 s, after which its rules still hold, also when a pause lands on a new
+//! 3 s, after which its rules still hold, also when a pause meets a new
 //! life of its record. The load tasks stop by a flag, and no gate holds
 //! them, before their group is cancelled: on macOS, std 0.17 can lose a
 //! cancel while std.testing.allocator records a stack trace.
@@ -299,20 +299,14 @@ const Mixer = struct {
             .running => if (r.boolean()) .{ .pause_requested = true } else .{ .run_at = later },
             .succeeded, .failed => if (r.boolean()) .{ .reset = true } else .{ .reset = true, .state = .paused },
         };
-        const request: Store.UpdateRequest = .{ .ref = slot.*, .expect = .{ .revision = now.revision, .state = now.state }, .set = set, .tag = @splat(m.index) };
+        const request: Store.UpdateRequest = .{ .ref = slot.*, .expect = .{ .life = now.life, .revision = now.revision, .state = now.state }, .set = set, .tag = @splat(m.index) };
         switch (try store.update(io, .root, &request, m.options())) {
             .updated => |revision| {
                 if (revision != now.revision + 1) m.fail("update raised the revision by other than 1");
                 const paused = if (set.state) |state| state == .paused else false;
-                // An update holds on the revision and state, not on the
-                // life: a new life of the key, created since the get, may be
-                // the one paused. A life never comes back to its key, so a
-                // get that still finds it shows the pause was of it.
-                if (paused) {
-                    const after = (try store.get(io, .root, slot, m.options())) orelse return;
-                    m.see(after);
-                    if (std.mem.eql(u8, &after.life, &now.life)) try m.quiets.append(testing.allocator, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
-                }
+                // An update holds on the life too: the pause is of the life
+                // read.
+                if (paused) try m.quiets.append(testing.allocator, .{ .quiet = .{ .life = now.life, .revision = revision }, .fence = 0 });
             },
             .conflict => |rec| m.see(rec),
             .not_found => {},
@@ -467,7 +461,7 @@ test "16 tasks mix every operation for 3 s and the invariants hold" {
     try mix(memory.store(), &memory);
 }
 
-test "the invariants of the mix hold when a pause lands on a new life of its record" {
+test "the invariants of the mix hold when a pause meets a new life of its record" {
     // Small limits evict under the load, and warn about it.
     const level = testing.log_level;
     testing.log_level = .err;
@@ -476,7 +470,7 @@ test "the invariants of the mix hold when a pause lands on a new life of its rec
     stalled.init(testing.allocator, io, .{ .max_history = 64, .max_finished = 4 });
     defer stalled.deinit();
     try mix(stalled.store(), &stalled.memory);
-    try testing.expect(stalled.landed.load(.acquire));
+    try testing.expect(stalled.refused.load(.acquire));
 }
 
 /// 16 tasks mix every operation on `store` for 3 s, and then its rules

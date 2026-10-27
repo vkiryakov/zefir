@@ -153,6 +153,25 @@ pub fn s4(r: *Runner) Error!void {
     const none = try r.update(missing, .{ .plan = "every 30s" });
     try r.expect(none == .not_found, "update of a key never created answered {t}, not not_found", .{none});
 
+    // A change read on one life never lands on the next life of its key,
+    // which starts pending at revision 0, as the one read was: conflict.
+    var first = request;
+    first.key = "order-44";
+    first.life = r.newLife();
+    try expectCreate(r, &first, .created, "of a new key");
+    const read = try r.fetch(job, "order-44");
+    try r.expect(try r.remove(job, "order-44"), "remove of a record that is there returned false", .{});
+    var remade = first;
+    remade.life = r.newLife();
+    try expectCreate(r, &remade, .created, "of a key removed");
+    const reborn = try r.fetch(job, "order-44");
+    const late = try r.update(read, .{ .state = .paused });
+    switch (late) {
+        .conflict => |now| try r.expectSame(reborn, now, &.{}, "the record of a conflict"),
+        else => return r.fail("update of a life that was removed, on the revision and state of the new life of its key, answered {t}, not conflict", .{late}),
+    }
+    try r.expectSame(reborn, try r.fetch(job, "order-44"), &.{}, "an update of a life that was removed");
+
     // plan, then run_at .after and .at: run_at and scheduled_at, attempt 0.
     const planned = try r.updated(asked, .{ .plan = "cron 30 3 * * *" });
     try r.expect(std.mem.eql(u8, planned.plan, "cron 30 3 * * *"), "update of plan gave \"{s}\"", .{planned.plan});
@@ -343,7 +362,7 @@ pub fn s19(r: *Runner) Error!void {
 
     // A conflict gives a record; a claim records and took_over; a finish
     // that answers changed, a record: all in the allocator of the call.
-    const update: Store.UpdateRequest = .{ .ref = .{ .job = job, .key = lend(&borrowed, 0, "k1") }, .expect = .{ .revision = kept.revision +% 1, .state = .pending }, .set = .{ .plan = lend(&borrowed, 2, "every 8s") }, .tag = r.newTag() };
+    const update: Store.UpdateRequest = .{ .ref = .{ .job = job, .key = lend(&borrowed, 0, "k1") }, .expect = .{ .life = kept.life, .revision = kept.revision +% 1, .state = .pending }, .set = .{ .plan = lend(&borrowed, 2, "every 8s") }, .tag = r.newTag() };
     const conflict = try r.need(r.store().update(r.io, r.ctx(), &update, .{ .allocator = fences[2].allocator() }), "update");
     fences[2].close();
     @memset(&borrowed, 0x55);

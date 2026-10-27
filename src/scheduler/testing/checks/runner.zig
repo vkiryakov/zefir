@@ -198,7 +198,7 @@ pub fn remove(r: *Runner, job: []const u8, key: []const u8) Error!bool {
 
 /// The change `set` of `current`, on its revision and state.
 pub fn update(r: *Runner, current: Record, set: Store.Patch) Error!Store.UpdateResult {
-    const request: Store.UpdateRequest = .{ .ref = refOf(current), .expect = .{ .revision = current.revision, .state = current.state }, .set = set, .tag = r.newTag() };
+    const request: Store.UpdateRequest = .{ .ref = refOf(current), .expect = .{ .life = current.life, .revision = current.revision, .state = current.state }, .set = set, .tag = r.newTag() };
     return r.need(r.store().update(r.io, r.ctx(), &request, r.call()), "update");
 }
 

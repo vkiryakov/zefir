@@ -1098,6 +1098,8 @@ state, and writes it on condition that nothing else changed the record
 in between. When another change came first, the client reads again and
 computes again; after 8 such races lost in a row, it gives up with
 `error.Contended`, which nothing applied, so the call may be made again.
+When the job was cancelled meanwhile, the call answers `.not_found`, and
+a job scheduled again with the key since is left alone.
 
 <details>
 <summary><b>Changes while a job runs</b></summary>
@@ -3073,7 +3075,7 @@ error: scheduler: Store.init: BadStore has no method claim; expected pub fn clai
 | `now` | the store's clock as the process knows it, without I/O | an `Instant` |
 | `create` | a record of a new life, pending; a finished record of the same `(job, key)` is replaced, a live one stays | `created`, `replaced`, `existing` |
 | `get` | the record of `(job, key)` | the record, or null |
-| `update` | if `revision` and `state` are those expected: the fields of `set`, `revision` one more | `updated`, `conflict` with the record as it is, `not_found` |
+| `update` | if `life`, `revision` and `state` are those expected: the fields of `set`, `revision` one more | `updated`, `conflict` with the record as it is, `not_found` |
 | `remove` | removes the record, in any state | whether it was there |
 | `list` | the records of a filter, a page at a time: a job's records together, their keys in order | a page, and where the next one starts |
 | `claim` | atomically, record by record: due records of the jobs asked, at most `max`, the oldest first, made running with an owner, a lease, `attempt` and `fence` one more | the records, the claim each took over, and how soon the next one is due |

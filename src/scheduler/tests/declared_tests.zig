@@ -206,7 +206,7 @@ test "another plan: the plan and the next run" {
     try testing.expectEqual(Store.CreateResult.existing, try store.create(io, .root, &new, .{ .allocator = a }));
     const r = (try store.get(io, .root, &.declared(NightlyCleanupV2), .{ .allocator = a })) orelse return error.TestUnexpectedResult;
     const patch = declared.reconcile(&r, new.plan, new.run_at) orelse return error.TestUnexpectedResult;
-    const updated = try store.update(io, .root, &.{ .ref = .declared(NightlyCleanupV2), .expect = .{ .revision = r.revision, .state = r.state }, .set = patch, .tag = @splat(1) }, .{ .allocator = a });
+    const updated = try store.update(io, .root, &.{ .ref = .declared(NightlyCleanupV2), .expect = .{ .life = r.life, .revision = r.revision, .state = r.state }, .set = patch, .tag = @splat(1) }, .{ .allocator = a });
     try testing.expect(updated == .updated);
     const moved = (try store.get(io, .root, &.declared(NightlyCleanupV2), .{ .allocator = a })) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("daily 04:00:00", moved.plan);
@@ -237,7 +237,7 @@ test "a running record gets only the plan" {
     if (claimed.len != 1) return error.TestUnexpectedResult;
     const running = claimed[0].record;
     const replan = declared.reconcile(&running, "daily 04:00:00", .{ .at = .fromUtc(2026, 10, 25, 4, 0, 0, .h24) }) orelse return error.TestUnexpectedResult;
-    const updated = try store.update(io, .root, &.{ .ref = .declared(NightlyCleanup), .expect = .{ .revision = running.revision, .state = .running }, .set = replan, .tag = @splat(3) }, .{ .allocator = a });
+    const updated = try store.update(io, .root, &.{ .ref = .declared(NightlyCleanup), .expect = .{ .life = running.life, .revision = running.revision, .state = .running }, .set = replan, .tag = @splat(3) }, .{ .allocator = a });
     try testing.expect(updated == .updated);
     const now_r = (try store.get(io, .root, &.declared(NightlyCleanup), .{ .allocator = a })) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(State.running, now_r.state);

@@ -167,7 +167,7 @@ pub fn get(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const scheduler.
     return records.get(s, io, ctx, ref, options);
 }
 
-/// `request.set` on condition of the record's revision and state.
+/// `request.set` on condition of the record's life, revision and state.
 pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) StoreError!Store.UpdateResult {
     return records.update(s, io, ctx, request, options);
 }

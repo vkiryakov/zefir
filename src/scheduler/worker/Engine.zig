@@ -313,7 +313,7 @@ fn declareOne(e: *Engine, io: Io, ctx: core.Context, a: Allocator, wanted: *cons
             if (lost == max_races) return error.Contended;
             var tag: Store.Tag = undefined;
             io.random(&tag);
-            const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = current.revision, .state = current.state }, .set = patch, .tag = tag };
+            const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .life = current.life, .revision = current.revision, .state = current.state }, .set = patch, .tag = tag };
             switch (try e.tally(io, .update, e.store.update(io, ctx, &request, options), &d)) {
                 .updated => return log.info("{s}: the declared record takes the plan of the code, {s}", .{ want.job, want.plan }),
                 .conflict => |now| current = now,
