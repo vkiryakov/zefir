@@ -182,6 +182,28 @@ test "requestStop twice does nothing and wait returns after the stop" {
     try testing.expectEqual(@as(?scheduler.State, .succeeded), try stateOf(&f, .of(Held, "x")));
 }
 
+fn runIt(w: *Worker) (Worker.StartError || Worker.WaitError)!void {
+    return w.run(io);
+}
+
+test "run starts the worker and returns once it stopped" {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var held: Held = .{ .probe = &probe };
+    try f.schedule(Held, "x", .{ .after = .zero });
+    var w: Worker = try .init(testing.allocator, io, f.store(), .{ .held = &held }, quick);
+    defer w.deinit(io);
+    var running = try io.concurrent(runIt, .{&w});
+    defer running.cancel(io) catch {};
+    try reach(&probe.ended, 1, 5);
+    try testing.expect(w.isReady());
+    w.requestStop(io);
+    try running.await(io);
+    try testing.expectEqual(Worker.State.stopped, w.state());
+}
+
 test "deinit of a running worker stops it and waits" {
     var f: Fixture = undefined;
     f.init();
