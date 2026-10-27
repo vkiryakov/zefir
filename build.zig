@@ -674,13 +674,18 @@ pub fn build(b: *std.Build) void {
         test_odm.dependOn(&run.step);
     }
 
-    // scheduler panic programs: a call of a MemoryStore on another std.Io
-    // panics in safe builds. Each program must print the panic message and
-    // end in its own panic handler, which exits with code 3 instead of
-    // aborting. They get the Debug copy of scheduler made above, next to
-    // those of odm and mongo, whatever -Doptimize says.
+    // scheduler panic programs: a call of a MemoryStore or a Worker on
+    // another std.Io, a call on a Worker moved after start(), and a
+    // Worker.deinit() while another task waits in it panic in safe builds.
+    // Each program must print the panic message and end in its own panic
+    // handler, which exits with code 3 instead of aborting. They get the
+    // Debug copy of scheduler made above, next to those of odm and mongo,
+    // whatever -Doptimize says.
     for ([_][2][]const u8{
         .{ "memory_another_io", "panic: zefir-scheduler: a call on another std.Io than the store's: pass the io of MemoryStore.init" },
+        .{ "worker_another_io", "panic: zefir-scheduler: a call on another std.Io than the worker's: pass the io of Worker.init" },
+        .{ "worker_moved", "panic: zefir-scheduler: Worker moved after start(): keep it where start() ran" },
+        .{ "worker_deinit_while_waiting", "panic: zefir-scheduler: Worker.deinit() while a task is in wait, run or shutdown: let it return first" },
     }) |case| {
         const exe = b.addExecutable(.{
             .name = b.fmt("scheduler-panic-{s}", .{case[0]}),
