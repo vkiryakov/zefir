@@ -37,6 +37,27 @@ test "README.md shows a run of every program as it printed, after the program" {
     }
 }
 
+test "the emergency record goes to stderr, and stdout gets nothing" {
+    try std.testing.expectEqualStrings("", @embedFile("emergency.out"));
+}
+
+test "README.md shows the lines of the run of config.zig that it quotes as the run printed them" {
+    const masked_guide = try check.mask(guide);
+    defer std.testing.allocator.free(masked_guide);
+    var run: [4][]const u8 = undefined;
+    var lines = std.mem.splitScalar(u8, @embedFile("config.out"), '\n');
+    for (&run) |*line| line.* = lines.next() orelse return error.TestUnexpectedResult;
+    // The record of std.log, the configuration and the paid invoice; the
+    // keys of the vault are shown formatted.
+    for ([_][]const u8{ run[0], run[1], run[3] }) |line| {
+        const record = try check.mask(line);
+        defer std.testing.allocator.free(record);
+        const block = try std.mem.concat(std.testing.allocator, u8, &.{ "```json\n", record, "\n```\n" });
+        defer std.testing.allocator.free(block);
+        try check.expectBlock("README.md", masked_guide, block);
+    }
+}
+
 test "every Zig block of README.md but those of build.zig and the calls that do not compile is a part of an example" {
     try check.expectZigFromExamples("README.md", guide, example_files);
 }

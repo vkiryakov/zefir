@@ -14,8 +14,9 @@ the fields are checked when the program compiles, secrets come out as
 > - **32-bit targets.** zefir-log builds for 64-bit targets only, such as
 >   x86_64 and aarch64; on a 32-bit target the build stops (see
 >   [Installation](#installation)).
-> - **Log files.** Records go to stdout or to a writer you own: no files
->   and no rotation. A log collector takes stdout.
+> - **Log files.** Records go to stdout or to a writer you own, which may
+>   write a file; zefir-log opens no log files of its own and rotates none.
+>   A log collector takes stdout.
 > - **Ready-made alerts.** A subscriber is your code: no Slack, pager or
 >   webhook client ships with zefir-log. This guide shows one for
 >   [Slack](#example-payment-errors-to-slack).
@@ -732,7 +733,7 @@ invoices.info("Invoice paid", .{ .src = @src(), .invoice_id = 1001, .amount = Mo
 ```
 
 ```json
-{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Invoice paid","service.name":"billing","service.version":"2.1.0","scope":"billing.invoices","source":{"file":"config.zig","line":77},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","invoice_id":1001,"amount":"19.99 EUR","receipt_digest":"9f86d081"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Invoice paid","service.name":"billing","service.version":"2.1.0","scope":"billing.invoices","source":{"file":"main.zig","line":77},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","invoice_id":1001,"amount":"19.99 EUR","receipt_digest":"9f86d081"}
 ```
 
 Now `trace_id = 4bf92f3577b34da6a3ce929d0e0e4736` in the log store finds this
@@ -891,7 +892,7 @@ $ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"warmed up 128 entries","service.name":"billing","service.version":"2.1.0","scope":"cache"}
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Configuration loaded","service.name":"billing","service.version":"2.1.0","config":{"port":9000,"database":{"host":"postgres.internal","password":"[REDACTED]","pool":{"min":2,"max":16}},"vault_key":"[REDACTED]","regions":["eu-west","us-east"]}}
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Vault keys loaded","service.name":"billing","service.version":"2.1.0","vault":"payments","key":"[REDACTED]","backup":"[REDACTED]","all":"[REDACTED]"}
-{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Invoice paid","service.name":"billing","service.version":"2.1.0","scope":"billing.invoices","source":{"file":"config.zig","line":77},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","invoice_id":1001,"amount":"19.99 EUR","receipt_digest":"9f86d081"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Invoice paid","service.name":"billing","service.version":"2.1.0","scope":"billing.invoices","source":{"file":"main.zig","line":77},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","invoice_id":1001,"amount":"19.99 EUR","receipt_digest":"9f86d081"}
 ```
 
 The database password is redacted by its name, the vault key and every
@@ -1637,7 +1638,7 @@ pub fn main(init: std.process.Init) !void {
 ```text
 $ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Order placed","service.name":"orders","service.version":"3.0.0","scope":"orders","order_id":7,"total_cents":4200}
-{"timestamp":"2026-10-12T09:41:07.415Z","level":"error","message":"Payment declined","service.name":"orders","service.version":"3.0.0","scope":"orders","source":{"file":"alerts.zig","line":52},"order_id":7,"reason":"card_expired"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"error","message":"Payment declined","service.name":"orders","service.version":"3.0.0","scope":"orders","source":{"file":"main.zig","line":52},"order_id":7,"reason":"card_expired"}
 alerts sent: 1, records filtered: 1
 ```
 
@@ -1647,9 +1648,10 @@ only the error record carries its call site. The last line comes from
 
 ## Threads and Io
 
-A service runs on zio: its clients, its servers and their tasks take the
-runtime's `rt.io()`. The logger takes `init.io`, the `io` that
-`main(init: std.process.Init)` gets, and has threads of its own:
+A service runs on [zio](https://github.com/lalinsky/zio), the async runtime
+of zefir's services: its clients, its servers and their tasks take `rt.io()`
+of the `zio.Runtime` that `main` creates. The logger takes `init.io`, the
+`io` that `main(init: std.process.Init)` gets, and has threads of its own:
 
 - **Your `io`**, `init.io`, reads the clock and, in sync mode, writes
   stdout. Any thread may log through it: `main`, the tasks of the zio

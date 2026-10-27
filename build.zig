@@ -2808,6 +2808,9 @@ fn addLogGuide(
     // "log in a minute" of the repository's README.md is a program of the
     // guide too.
     readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    // Each program is the reader's src/main.zig: it runs from a copy named
+    // main.zig, so the call site it logs names main.zig, as there.
+    const copies = b.addWriteFiles();
     for (log_guide.programs) |name| {
         const exe = b.addExecutable(.{
             .name = b.fmt("log-guide-{s}", .{name}),
@@ -2817,7 +2820,7 @@ fn addLogGuide(
                 .optimize = optimize,
                 .sanitize_thread = tsan,
                 .imports = &.{.{ .name = "example", .module = b.createModule(.{
-                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .root_source_file = copies.addCopyFile(b.path(b.fmt(dir ++ "{s}.zig", .{name})), b.fmt("{s}/main.zig", .{name})),
                     .target = target,
                     .optimize = optimize,
                     .sanitize_thread = tsan,
