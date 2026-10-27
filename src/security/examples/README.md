@@ -1,4 +1,4 @@
-# security
+# zefir-security: JWT for Zig services (security.jwt)
 
 zefir-security is planned to hold the security of zefir services:
 authentication, authorization, MFA/TOTP, WebAuthn, TLS integration, CORS
@@ -113,10 +113,15 @@ and a signature. Here is one that orders gave Ann:
 eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IjIwMjYtMTAifQ.eyJpc3MiOiJvcmRlcnMiLCJzdWIiOiJ1c2VyLTciLCJhdWQiOlsib3JkZXJzIiwiYmlsbGluZyJdLCJpYXQiOjE3OTI2NzA0MDAsImV4cCI6MTc5MjY3MTMwMCwicm9sZXMiOlsiYnV5ZXIiXX0.O2qCht2ma0AURVamIEnpQNz-YMc9weaHZYs3l4VaZPttriA3wGcDmVX_17-V96HjT5p4BITZ0TrWVU7pHtYKCg
 ```
 
-Its header and its payload are JSON:
+Its header and its payload are JSON. The header:
 
 ```json
 {"alg":"EdDSA","typ":"JWT","kid":"2026-10"}
+```
+
+The payload:
+
+```json
 {"iss":"orders","sub":"user-7","aud":["orders","billing"],"iat":1792670400,"exp":1792671300,"roles":["buyer"]}
 ```
 
@@ -211,9 +216,9 @@ PEM file:
 openssl genpkey -algorithm ed25519 -out orders.pem
 ```
 
-A whole program: it reads the key from its settings, signs a token for
-user-7, verifies it as a route of orders would, and shows how billing
-refuses it, since the token is not meant for billing.
+A whole program, `minute.zig`: it reads the key from its settings, signs a
+token for user-7, verifies it as a route of orders would, and shows how
+billing refuses it, since the token is not meant for billing.
 
 ```zig
 const std = @import("std");
@@ -397,6 +402,9 @@ const verified = try verifier.verify(Claims, io, arena.allocator(), token, .{});
 logger.info("Token verified", .{
     .subject = verified.registered.subject,
     .roles = verified.claims.roles,
+    // jwt.Signer writes "iat" into every token.
+    .lifetime_s = verified.registered.expires_at - verified.registered.issued_at.?,
+});
 ```
 
 Everything in the result lives in the arena given to `verify`, the arena
@@ -546,9 +554,11 @@ try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
 ## Signing in
 
 The sign-in of orders, `POST /api/login`, is a controller of zefir-http
-that checks a user's name and secret and signs a token for them:
+that checks a user's name and secret and signs a token for them,
+`LoginController.zig`:
 
 ```zig
+// Application code (src/LoginController.zig of the orders service): zefir-security ships none of these.
 //! Signing in: POST /api/login. A user sends a name and a secret, and the
 //! answer is a token of orders, in the form that OAuth clients read (RFC
 //! 6749 §5.1). zefir has no passwords: here the users and their secrets
@@ -715,7 +725,8 @@ request keeps its own, as `JwtAuth` does.
 
 ## HTTP
 
-The middleware `JwtAuth` checks the token of every request of orders:
+The middleware `JwtAuth`, in `auth.zig`, checks the token of every
+request of orders:
 
 ```zig
 // Application code (src/auth.zig of the orders service): zefir-security ships none of these.
@@ -727,14 +738,12 @@ The middleware `JwtAuth` checks the token of every request of orders:
 //! reason kept for the answer. `requireUser` sits in the middleware of the
 //! controllers that need a user, and answers 401 with that reason.
 //!
-//! ```zig
 //! // main: the server's middleware, for every request
 //! .middleware = .{&jwt_auth},
 //! // a protected controller
 //! .middleware = .{auth.requireUser},
 //! // a handler
 //! const user = try ctx.local(auth.CurrentUser);
-//! ```
 
 const std = @import("std");
 const http = @import("http");
@@ -839,9 +848,11 @@ The error handler of orders adds that header to the 401 of `requireUser`.
 The sign-in refuses a wrong name or secret with an error of its own,
 `InvalidCredentials`, and its 401 says `Bearer` alone: the reason a token
 was refused is no answer to a mistyped secret, even while Ann's app still
-sends her expired token. The handler also maps the errors of `sign`:
+sends her expired token. The handler, `errors.zig`, also maps the errors
+of `sign`:
 
 ```zig
+// Application code (src/errors.zig of the orders service): zefir-security ships none of these.
 //! The error handler of the orders service: the one place where errors
 //! become responses. Every 401 carries `WWW-Authenticate`, as RFC 9110
 //! asks: that of `requireUser` with the reason when a token was refused
@@ -883,8 +894,8 @@ pub const AppErrors = struct {
 };
 ```
 
-The orders of a user stand behind `requireUser`, and read the user from
-`ctx.locals`:
+The orders of a user, `OrdersController.zig`, stand behind `requireUser`,
+and read the user from `ctx.locals`:
 
 ```zig
 //! The orders of the signed-in user: GET /api/orders. Its routes stand
@@ -918,7 +929,8 @@ pub fn list(_: *OrdersController, ctx: *http.Context) !http.Json(OrdersResponse)
 }
 ```
 
-The whole service, on the backend in memory, with Ann's app as its client:
+The whole service, `orders.zig`, on the backend in memory, with Ann's app
+as its client:
 
 ```zig
 //! The orders service of the guide on the backend in memory, with Ann's
@@ -1099,9 +1111,10 @@ GET /api/orders with Ann's token, its signature changed
 → 401 WWW-Authenticate: Bearer error="invalid_token", error_description="the token's signature is invalid"
 ```
 
-The tests of orders run the same server on `http.testing.Backend`, with a
-key made for them and the time set by `jwt.testing.FixedClock`, so a token
-expires without a wait of 15 minutes ([Tests](#tests) tells more):
+The tests of orders, `auth_test.zig`, run the same server on
+`http.testing.Backend`, with a key made for them and the time set by
+`jwt.testing.FixedClock`, so a token expires without a wait of 15 minutes
+([Tests](#tests) tells more):
 
 ```zig
 //! Tests of the orders service without a network: `http.testing.Backend`
@@ -1427,15 +1440,16 @@ test "after orders changes its key, a token of the old one still passes" {
 
 ## RPC
 
-Billing is a service of zefir-rpc. Its authenticator checks the token of
-every call, with the public key of orders from its settings:
+Billing is a service of zefir-rpc. Its authenticator, `JwtAuthenticator.zig`,
+checks the token of every call, with the public key of orders from its
+settings:
 
 ```zig
+// Application code (src/JwtAuthenticator.zig of the billing service): zefir-security ships none of these.
 //! The authenticator of the billing service: who calls, by the token that
 //! orders signed for its user. Billing has only public keys of orders,
 //! from its settings: it checks tokens, and cannot make one.
 //!
-//! ```zig
 //! // main of billing: the key of orders, APP_AUTH_ORDERS_KEY and
 //! // APP_AUTH_ORDERS_KEY_ID, and while it changes the other one,
 //! // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID, as in orders
@@ -1449,7 +1463,6 @@ every call, with the public key of orders from its settings:
 //! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
 //! // .authenticator = &authenticator in the options of rpc.Server
-//! ```
 
 const jwt = @import("security").jwt;
 const rpc = @import("rpc");
@@ -1503,8 +1516,8 @@ pub fn authenticate(self: *JwtAuthenticator, ctx: *const rpc.AuthContext) rpc.Au
   alone; a claim that orders adds later is skipped, and billing goes on
   working.
 
-The contract of billing, a package that billing and its clients share,
-and its handler, which charges an order to the caller:
+The contract of billing, `billing_api.zig`, the root of the package
+billing-api that billing and its clients share:
 
 ```zig
 //! The package billing-api: the contract of the billing service.
@@ -1543,7 +1556,11 @@ test "the rules of the requests are valid" {
 }
 ```
 
+The handler of billing, `BillingHandler.zig`, which charges an order to
+the caller:
+
 ```zig
+// Application code (src/BillingHandler.zig of the billing service): zefir-security ships none of these.
 //! The handler of billing.v1: it charges an order to the caller, whom the
 //! authenticator found by the token. Every method needs a caller.
 
@@ -1567,9 +1584,9 @@ pub fn charge(_: *BillingHandler, ctx: *rpc.Context, req: api.ChargeRequest) err
 The token reaches billing as the credentials of a call. Orders calls
 billing for the user it serves with the token that came with the request:
 `.{ .credentials = .{ .bearer = token } }` among the options of
-`client.call`, as the tests below do. The tests run billing on
-`rpc.testing.Server`, and sign their tokens as orders would, with a key of
-orders made for them; billing gets only its public half:
+`client.call`, as the tests below do. The tests, `rpc_auth_test.zig`, run
+billing on `rpc.testing.Server`, and sign their tokens as orders would,
+with a key of orders made for them; billing gets only its public half:
 
 ```zig
 //! Tests of the billing service without a network: `rpc.testing.Server`

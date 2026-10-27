@@ -7,14 +7,12 @@
 //! reason kept for the answer. `requireUser` sits in the middleware of the
 //! controllers that need a user, and answers 401 with that reason.
 //!
-//! ```zig
 //! // main: the server's middleware, for every request
 //! .middleware = .{&jwt_auth},
 //! // a protected controller
 //! .middleware = .{auth.requireUser},
 //! // a handler
 //! const user = try ctx.local(auth.CurrentUser);
-//! ```
 
 const std = @import("std");
 const http = @import("http");

@@ -1,8 +1,8 @@
+// Application code (src/JwtAuthenticator.zig of the billing service): zefir-security ships none of these.
 //! The authenticator of the billing service: who calls, by the token that
 //! orders signed for its user. Billing has only public keys of orders,
 //! from its settings: it checks tokens, and cannot make one.
 //!
-//! ```zig
 //! // main of billing: the key of orders, APP_AUTH_ORDERS_KEY and
 //! // APP_AUTH_ORDERS_KEY_ID, and while it changes the other one,
 //! // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID, as in orders
@@ -16,7 +16,6 @@
 //! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
 //! // .authenticator = &authenticator in the options of rpc.Server
-//! ```
 
 const jwt = @import("security").jwt;
 const rpc = @import("rpc");
