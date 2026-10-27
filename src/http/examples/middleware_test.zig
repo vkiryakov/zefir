@@ -1,8 +1,9 @@
 // Application code (src/middleware_test.zig of the example app): zefir-http ships none of these.
 //! Tests of the example app's authentication and CORS without a network:
-//! `http.testing.Backend` serves the same server and the same controllers
-//! from memory. The settings come through confy, as in `main`, here from
-//! an environment of the test's own.
+//! `http.testing.Backend` serves, from memory, a small server with the
+//! app's `Cors` and `TokenAuth`, stand-in controllers and an error handler
+//! of its own. The settings come through confy, as in `main`, here from an
+//! environment of the test's own.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -52,8 +53,8 @@ const HealthController = struct {
 
 const ApiError = struct { code: []const u8, message: []const u8 };
 
-/// The app's error handler: its own format, and `WWW-Authenticate` on every
-/// 401, which RFC 9110 asks for.
+/// A stand-in for the app's error handler: its own format, and
+/// `WWW-Authenticate` on every 401, which RFC 9110 asks for.
 const AppErrors = struct {
     pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
         return .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) });
@@ -65,7 +66,7 @@ const AppErrors = struct {
     }
 };
 
-/// The app as `main` builds it, on the backend in memory.
+/// The small server of these tests, on the backend in memory.
 const App = struct {
     arena: std.heap.ArenaAllocator,
     config: Config = undefined,

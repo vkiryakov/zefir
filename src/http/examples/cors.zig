@@ -4,11 +4,9 @@
 //! in the server's middleware, which runs before the route is chosen, so
 //! the preflight of any path reaches it.
 //!
-//! ```zig
 //! const origins = [_][]const u8{config.cors_origin};
 //! var cors: Cors = .{ .origins = &origins };
 //! // main: .middleware = .{ &cors, &token_auth },
-//! ```
 
 const std = @import("std");
 const http = @import("http");

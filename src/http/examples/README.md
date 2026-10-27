@@ -54,8 +54,8 @@ tests, the same server runs in memory.
 >   reconnects gets the events from then on, since the server keeps no
 >   history to send it the ones it missed.
 
-A whole program: a controller, a server, and three requests to it. The
-server runs on the backend in memory, `http.testing`, which needs no
+A whole program, `minute.zig`: a controller, a server, and three requests to
+it. The server runs on the backend in memory, `http.testing`, which needs no
 network; on the network, `http.native` takes its place, and the controller
 stays the same.
 
@@ -227,7 +227,7 @@ flowchart LR
 ```
 
 The files of the service, each shown whole in the chapter where it is
-explained:
+explained, but `openapi.json`, which the tests write from the code:
 
 | File | What is in it |
 | --- | --- |
@@ -732,7 +732,8 @@ Ann's own, and Bob does not see them.
 
 A controller is a struct with a method for each route, and the routes are
 declared in it. Its dependencies are fields, pointers to objects that
-`Service.start` builds:
+`Service.start` builds. The controller of `/api/v1/todos`,
+`TodosV1Controller.zig`:
 
 ```zig
 //! The REST controller of todos, version 1: /api/v1/todos. It declares its
@@ -1287,8 +1288,9 @@ decoded: a `%2F` inside `{id}` stays a `/` of the value. `.` and `..`
 resolve as RFC 3986 says, an empty segment (`//`) matches no route, a slash
 at the end does not matter, the case of letters does.
 
-The health check of the load balancer is a controller without a version,
-open to everybody, since it lists no `requireUser`:
+The health check of the load balancer, `HealthController.zig`, is a
+controller without a version, open to everybody, since it lists no
+`requireUser`:
 
 ```zig
 //! GET /api/health, for the load balancer: a service route without a
@@ -1335,8 +1337,9 @@ Every one of them works in the same steps:
 5. check       the rules of field_rules: v.checkAll                           → 422, every violation
 ```
 
-The DTOs of the service describe all of it in one place, `field_rules`: per
-field, its outside name, its transforms and its rules, in this order.
+The DTOs of the service, in `dto.zig`, describe all of it in one place,
+`field_rules`: per field, its outside name, its transforms and its rules, in
+this order.
 
 ```zig
 //! The DTOs of /api/v1/todos: what a request brings in and what a response
@@ -1842,17 +1845,20 @@ return .{ .value = .from(todo), .status = 201 };
 
 The compiler does not see that number, so a route that answers otherwise
 lists its statuses in `.responses`, by the names of `std.http.Status`.
-`create` answers 201 for a new todo and 200 for a retry, the export writes
-CSV itself, and signing in is a redirect:
+`create` answers 201 for a new todo and 200 for a retry:
 
 ```zig
 // 201 for a new todo, 200 for a retry with the same Idempotency-Key.
 .responses = .{ .created = .{}, .ok = .{} },
 ```
 
+The export writes CSV itself:
+
 ```zig
 .responses = .{ .ok = .{ .content_type = "text/csv" } },
 ```
+
+Signing in is a redirect:
 
 ```zig
 .login = http.post("", .{ .form = LoginForm, .responses = .{ .see_other = .{} }, .max_body_bytes = 1024 }),
@@ -1893,6 +1899,8 @@ flowchart LR
     json --> after["onResponse, then out"]
     own --> after
 ```
+
+The error handler of the service, `errors.zig`:
 
 ```zig
 //! The error handler of the example app: the one place where errors become
@@ -2271,14 +2279,12 @@ knows its users by tokens, which come from its settings as `confy.Secret`:
 //! `requirePermission` sit in the middleware of the controllers that need
 //! a user, and refuse the request with 401 and 403.
 //!
-//! ```zig
 //! // main: the server's middleware, for every request
 //! .middleware = .{ &token_auth },
 //! // a protected controller
 //! .middleware = .{ auth.requireUser, auth.requirePermission("todos") },
 //! // a handler
 //! const user = try ctx.local(auth.CurrentUser);
-//! ```
 //!
 //! A real service verifies a signed token (a JWT) or asks a store of
 //! sessions instead of a table; the shape of the middleware stays the same.
@@ -2456,7 +2462,8 @@ cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 ```
 
-A browser signs in with a form, and keeps its token in a cookie:
+A browser signs in with a form, and keeps its token in a cookie. The
+controller of `/api/session`, `SessionController.zig`:
 
 ```zig
 //! Signing a browser in and out: /api/session. The page posts a form with
@@ -2640,11 +2647,9 @@ the API's answers say so. The service's middleware for it:
 //! in the server's middleware, which runs before the route is chosen, so
 //! the preflight of any path reaches it.
 //!
-//! ```zig
 //! const origins = [_][]const u8{config.cors_origin};
 //! var cors: Cors = .{ .origins = &origins };
 //! // main: .middleware = .{ &cors, &token_auth },
-//! ```
 
 const std = @import("std");
 const http = @import("http");
@@ -2861,6 +2866,8 @@ The page of the service and its files come from the directory `public/`:
 ```zig
 .static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
 ```
+
+The page, `public/index.html`:
 
 ```html
 <!doctype html>
@@ -3136,9 +3143,9 @@ none of this is compiled.
 
 `http.testing.Backend` serves the same server, the same controllers and
 middleware, from memory: no sockets, and a test sees every response whole.
-The tests of the service start it with `Service.start`, as `main` does, read
-its settings with confy from an environment of their own, and keep the
-records of its access log:
+The tests of the service, `todos_test.zig`, start it with `Service.start`,
+as `main` does, read its settings with confy from an environment of their
+own, and keep the records of its access log:
 
 ```zig
 //! Tests of the example app without a network: `http.testing.Backend`
@@ -3510,9 +3517,10 @@ check. Their handlers only answer:
 ```zig
 // Application code (src/middleware_test.zig of the example app): zefir-http ships none of these.
 //! Tests of the example app's authentication and CORS without a network:
-//! `http.testing.Backend` serves the same server and the same controllers
-//! from memory. The settings come through confy, as in `main`, here from
-//! an environment of the test's own.
+//! `http.testing.Backend` serves, from memory, a small server with the
+//! app's `Cors` and `TokenAuth`, stand-in controllers and an error handler
+//! of its own. The settings come through confy, as in `main`, here from an
+//! environment of the test's own.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -3562,8 +3570,8 @@ const HealthController = struct {
 
 const ApiError = struct { code: []const u8, message: []const u8 };
 
-/// The app's error handler: its own format, and `WWW-Authenticate` on every
-/// 401, which RFC 9110 asks for.
+/// A stand-in for the app's error handler: its own format, and
+/// `WWW-Authenticate` on every 401, which RFC 9110 asks for.
 const AppErrors = struct {
     pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
         return .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) });
@@ -3575,7 +3583,7 @@ const AppErrors = struct {
     }
 };
 
-/// The app as `main` builds it, on the backend in memory.
+/// The small server of these tests, on the backend in memory.
 const App = struct {
     arena: std.heap.ArenaAllocator,
     config: Config = undefined,
@@ -3960,12 +3968,12 @@ the beans of the service out of modules, starts them in order, watches
 them, and stops them all within one deadline. The guides of the modules
 write it `core.App`: it is `zefir.App` of the umbrella module.
 
-The module below declares what App builds: the backend in memory, a
-provider; `HealthController`, a controller; and `Servers`, whose function
-`httpServer` makes the server of them. App passes each parameter of that
-function by its type: its allocator, the config that `main` hands to
-`init`, the backend it built, and `core.app.Controllers(AppModule)`, the
-controllers of the module:
+The module below, in the program `app.zig`, declares what App builds: the
+backend in memory, a provider; `HealthController`, a controller; and
+`Servers`, whose function `httpServer` makes the server of them. App passes
+each parameter of that function by its type: its allocator, the config that
+`main` hands to `init`, the backend it built, and
+`core.app.Controllers(AppModule)`, the controllers of the module:
 
 ```zig
 //! The health check of the todo service under zefir.App, on the backend in
