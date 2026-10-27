@@ -1963,9 +1963,9 @@ yours goes into a pipeline as a `$literal`: a key such as `$set` or
 | jobs | `scan` | `{job: 1, wake_at: 1}`, of the documents with `wake_at` | claims: the due jobs of the worker's types, the oldest first, and how soon the next one is due |
 | jobs | `expire` | `{expires_at: 1}`, a TTL index | finished jobs kept for a time |
 | jobs | `tenant` | `{tenant: 1, _id: 1}`, of the documents with a tenant | `list` by tenant |
-| runs | `job_key_finished` | `{job: 1, key: 1, finished_at: -1}` | the history of one job, the newest first |
-| runs | `job_finished` | `{job: 1, finished_at: -1}` | the history of a type of job |
-| runs | `tenant_finished` | `{tenant: 1, finished_at: -1}`, of the rows with a tenant | the history of a tenant |
+| runs | `job_key_finished` | `{job: 1, key: 1, finished_at: -1, _id: -1}` | the history of one job, the newest first |
+| runs | `job_finished` | `{job: 1, finished_at: -1, _id: -1}` | the history of a type of job |
+| runs | `tenant_finished` | `{tenant: 1, finished_at: -1, _id: -1}`, of the rows with a tenant | the history of a tenant |
 | runs | `expire` | `{expires_at: 1}`, a TTL index | rows kept for a time |
 
 MongoDB's TTL monitor wakes once a minute and promises no exact time: a

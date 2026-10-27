@@ -146,7 +146,8 @@ pub fn deinit(s: *SchedulerStore) void {
 /// claimed (`wake_at` is `run_at` of a pending job and `lease_until` of a
 /// running one); `expire`, the TTL of the finished jobs kept for a time;
 /// `tenant` `{tenant: 1, _id: 1}`. The runs: `job_key_finished`,
-/// `job_finished`, `tenant_finished` and their own `expire`.
+/// `job_finished` and `tenant_finished`, which end with `finished_at` and
+/// `_id`, both descending, the order of `history`, and their own `expire`.
 pub fn ensureIndexes(s: *SchedulerStore, io: Io, ctx: core.Context) mongo.Error!void {
     return s.ensure(io, ctx, s.diagnostics);
 }
@@ -252,9 +253,9 @@ const job_indexes = [_]mongo.Collection.IndexModel{
 };
 
 const run_indexes = [_]mongo.Collection.IndexModel{
-    .{ .name = "job_key_finished", .keys = bson.literal(.{ .job = 1, .key = 1, .finished_at = -1 }) },
-    .{ .name = "job_finished", .keys = bson.literal(.{ .job = 1, .finished_at = -1 }) },
-    .{ .name = "tenant_finished", .keys = bson.literal(.{ .tenant = 1, .finished_at = -1 }), .partial_filter_expression = bson.literal(.{ .tenant = .{ .@"$exists" = true } }) },
+    .{ .name = "job_key_finished", .keys = bson.literal(.{ .job = 1, .key = 1, .finished_at = -1, ._id = -1 }) },
+    .{ .name = "job_finished", .keys = bson.literal(.{ .job = 1, .finished_at = -1, ._id = -1 }) },
+    .{ .name = "tenant_finished", .keys = bson.literal(.{ .tenant = 1, .finished_at = -1, ._id = -1 }), .partial_filter_expression = bson.literal(.{ .tenant = .{ .@"$exists" = true } }) },
     .{ .name = "expire", .keys = bson.literal(.{ .expires_at = 1 }), .expire_after_seconds = 0, .partial_filter_expression = bson.literal(.{ .expires_at = .{ .@"$exists" = true } }) },
 };
 

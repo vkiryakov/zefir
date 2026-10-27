@@ -80,9 +80,9 @@ test "ensureIndexes creates the indexes and measures the server's clock" {
     try fixture.expectDoc(bson.literal(.{
         .createIndexes = "scheduler_runs",
         .indexes = .{
-            .{ .key = .{ .job = 1, .key = 1, .finished_at = -1 }, .name = "job_key_finished" },
-            .{ .key = .{ .job = 1, .finished_at = -1 }, .name = "job_finished" },
-            .{ .key = .{ .tenant = 1, .finished_at = -1 }, .name = "tenant_finished", .partialFilterExpression = .{ .tenant = .{ .@"$exists" = true } } },
+            .{ .key = .{ .job = 1, .key = 1, .finished_at = -1, ._id = -1 }, .name = "job_key_finished" },
+            .{ .key = .{ .job = 1, .finished_at = -1, ._id = -1 }, .name = "job_finished" },
+            .{ .key = .{ .tenant = 1, .finished_at = -1, ._id = -1 }, .name = "tenant_finished", .partialFilterExpression = .{ .tenant = .{ .@"$exists" = true } } },
             .{ .key = .{ .expires_at = 1 }, .name = "expire", .expireAfterSeconds = 0, .partialFilterExpression = .{ .expires_at = .{ .@"$exists" = true } } },
         },
         .@"$db" = "app",
