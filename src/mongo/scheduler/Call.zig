@@ -2,16 +2,22 @@
 //! scratch arena for the commands and replies, and how the errors of
 //! zefir-mongo become those of the store contract.
 //!
-//! An error of zefir-mongo falls in one of three classes. "Not sent"
-//! (`Unavailable`, `DeadlineExceeded`, …) changed nothing. "Answered"
-//! (`CommandFailed`, `WriteFailed`, a `writeConcernError` among them) and
-//! "no reply" (`ConnectionLost`, `Timeout`, …) may have run: the operation
-//! reads the record again by the mark its write left. Applied, it gives the
-//! normal result; not applied, an answered write is `error.Refused`, with
-//! the server's code, and one without a reply may still arrive, so it is
-//! `error.OutcomeUnknown` unless sending it again changes nothing (rule 7
-//! of the contract): a renewal, or the upsert of a create while no claim
-//! can have taken its record.
+//! A `writeConcernError` is no failure of the write: it ran, without its
+//! write concern, and the reply still says what it did. zefir-mongo gives
+//! it as `WriteFailed`, or `Timeout` for code 50, with the result in the
+//! `partial` of a write or the `failure_reply` of a findAndModify, and the
+//! operation returns that result and logs a warning (`ran`).
+//!
+//! Any other error of zefir-mongo falls in one of three classes. "Not
+//! sent" (`Unavailable`, `DeadlineExceeded`, …) changed nothing.
+//! "Answered" (`CommandFailed`, `WriteFailed` of items the server refused)
+//! and "no reply" (`ConnectionLost`, `Timeout`, …) may have run: the
+//! operation reads the record again by the mark its write left. Applied, it
+//! gives the normal result; not applied, an answered write is
+//! `error.Refused`, with the server's code, and one without a reply may
+//! still arrive, so it is `error.OutcomeUnknown` unless sending it again
+//! changes nothing (rule 7 of the contract): a renewal, or the upsert of a
+//! create while no claim can have taken its record.
 
 const std = @import("std");
 const Io = std.Io;
@@ -173,11 +179,45 @@ pub fn unknown(c: *Call, err: mongo.Error, again: ?anyerror) StoreError {
     return c.fail(error.OutcomeUnknown, code(&c.md), "{s}: the write may have run (error.{t} of zefir-mongo: {s}) and may still arrive", .{ c.what, err, c.md.message() });
 }
 
-/// The record read again shows that the write that failed with `err` ran:
-/// an answered one ran without its write concern, which the log says.
+/// The write that failed with `err` ran, by its reply or the record read
+/// again; one that ran without its write concern, the log says.
 pub fn ran(c: *Call, err: mongo.Error) void {
-    if (classOf(err) != .answered) return;
+    if (!unconfirmed(err, &c.md)) return;
     log.warn("SchedulerStore: {s}: the server answered error.{t} (code {d}: {s}), yet the write is in place: its write concern is not confirmed", .{ c.what, err, code(&c.md) orelse 0, c.md.message() });
+}
+
+/// Whether a write that failed with `err`, and that ran, ran without its
+/// write concern: the server answered with an error, a `writeConcernError`
+/// among them, or with MaxTimeMSExpired, code 50, which zefir-mongo gives
+/// as `error.Timeout`, while it waited for it.
+pub fn unconfirmed(err: mongo.Error, md: *const mongo.Diagnostics) bool {
+    return classOf(err) == .answered or (err == error.Timeout and code(md) == 50);
+}
+
+/// Whether the write whose `partial` result, an `UpdateResult` or a
+/// `DeleteResult`, its error left in `known` ran without its write
+/// concern: a `writeConcernError`, and no item that the server refused.
+/// The rest of `known` is then what the write did.
+pub fn ranUnconfirmed(known: anytype) bool {
+    return known.write_errors.len == 0 and known.write_concern_errors.len > 0;
+}
+
+/// What a findAndModify did that ran without its write concern: the
+/// document it changed, or none.
+pub const Modified = struct { value: ?bson.RawDocument };
+
+/// What the findAndModify whose error left `reply`, its `failure_reply`,
+/// did: with a `writeConcernError`, it ran, and `value` holds the
+/// document it changed or null; null when it did not run so.
+pub fn modifiedUnconfirmed(reply: ?bson.OwnedDocument) ?Modified {
+    const doc = (reply orelse return null).raw();
+    if ((doc.get("writeConcernError") catch null) == null) return null;
+    const value = (doc.get("value") catch null) orelse return null;
+    return switch (value) {
+        .document => |found| .{ .value = found },
+        .null => .{ .value = null },
+        else => null,
+    };
 }
 
 pub fn invalid(c: *Call, comptime fmt: []const u8, args: anytype) error{InvalidArgument} {

@@ -1,6 +1,7 @@
 //! Workers on mongod through faults (13.4 and 9.12 of the design): replies
-//! lost after the server ran a write, commands that the server fails
-//! (`failCommand`), a server that stops answering (mongo-stall, paused)
+//! lost after the server ran a write, commands that the server fails, or
+//! runs without their write concern (`failCommand`), a server that stops
+//! answering (mongo-stall, paused)
 //! during runs and during polling, and a server restarted during polling
 //! and runs (mongo-restart). No job runs without a claim, none is lost,
 //! and the workers find the server again.
@@ -276,6 +277,100 @@ fn failedCommands(io: Io) !void {
         try testing.expectEqualStrings(effect.instance, row.instance);
     }
     try testing.expectEqual(@as(usize, 0), (try client.list(io, within10s(io), .{ .job = Failing.scheduler_job.name }, .{}, arena, .{})).records.len);
+}
+
+// writeConcernError.
+
+/// The job of the scenario whose writes run without their write concern:
+/// each run outlasts two renewals of its lease.
+const Unconfirmed = struct {
+    effects: mongo.Collection,
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "e2e-unconfirmed", .history = .forever };
+
+    pub fn run(self: *Unconfirmed, ctx: *scheduler.Context) !void {
+        const start = fixture.nowMs(ctx.io());
+        try ctx.io().sleep(.fromMilliseconds(2500), .awake);
+        try fixture.note(self.effects, ctx, start);
+    }
+};
+
+test "failCommand writeConcernError on every write: each job runs once, and no call fails" {
+    try e2e.onZio(unconfirmedWrites);
+}
+
+fn unconfirmedWrites(io: Io) !void {
+    const app = "scheduler-e2e-concern";
+    var scene: fixture.Scene = undefined;
+    try scene.open(io, e2e.servers.plain, "concern");
+    defer scene.close(io);
+    defer scene.admin.failPointOff(io);
+    // The client and the worker of the instance have the appName that the
+    // fail point names; the effects and the reads of the test go past it.
+    var node: fixture.Node = undefined;
+    try node.open(io, e2e.servers.plain ++ "/?appName=" ++ app, scene.database);
+    defer node.close();
+    var d: fixture.Node = undefined;
+    try d.open(io, e2e.servers.plain, scene.database);
+    defer d.close();
+    const client: scheduler.Client = .init(testing.allocator, io, node.store.store(), .{});
+    const straight: scheduler.Client = .init(testing.allocator, io, d.store.store(), .{});
+    var unconfirmed: Unconfirmed = .{ .effects = d.effects() };
+    var w: scheduler.Worker(struct { unconfirmed: *Unconfirmed }) = try .init(testing.allocator, io, node.store.store(), .{ .unconfirmed = &unconfirmed }, fixture.options("concern", 4));
+    defer w.deinit(io);
+
+    // Every write of the instance runs, and its reply says that the journal
+    // did not confirm it: the schedules, the claims, the renewals, the rows
+    // of the history and the outcomes.
+    try scene.admin.failPoint(io, 1000, .{
+        .failCommands = .{ "findAndModify", "update", "delete" },
+        .appName = app,
+        .writeConcernError = .{ .code = @as(i32, 64), .codeName = "WriteConcernFailed", .errmsg = "e2e: the journal did not confirm the write in time" },
+    });
+    for (0..4) |i| {
+        var key: [8]u8 = undefined;
+        const scheduled = try client.schedule(io, within10s(io), Unconfirmed, .{ .key = try std.fmt.bufPrint(&key, "u{d}", .{i}), .when = .{ .after = .zero } }, .{});
+        try testing.expectEqual(scheduler.Client.Scheduled.created, scheduled);
+    }
+    try w.start(io);
+    var limit: fixture.Limit = .of(io, 60, "the runs of e2e-unconfirmed");
+    while (try countEffects(io, &scene) < 4) try limit.tick(io);
+    try fixture.stop(io, &w);
+    // mongod counts the commands that the fail point met: at least a
+    // schedule, a claim, a row and an outcome of each job.
+    const off = try scene.admin.reply(io, "admin", .{ .configureFailPoint = "failCommand", .mode = "off" });
+    defer off.deinit();
+    const met = if (off.raw().get("count") catch null) |count| count.asI64() catch 0 else 0;
+    if (met < 16) {
+        std.debug.print("the fail point met {d} writes of the instance: {f}\n", .{ met, off.raw() });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(@as(u64, 0), w.stats().store_errors);
+    try testing.expectEqual(@as(u64, 0), w.stats().lost);
+    try testing.expectEqual(@as(u64, 4), w.stats().succeeded);
+
+    // Each job ran once, in its first attempt, its row of the history has
+    // the run, and its outcome removed its record.
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const effects = try fixture.effectsOf(io, scene.effects(), arena, Unconfirmed.scheduler_job.name);
+    try testing.expectEqual(@as(usize, 4), effects.len);
+    const rows = (try straight.history(io, within10s(io), .{ .job = Unconfirmed.scheduler_job.name }, .{ .limit = 100 }, arena, .{})).runs;
+    try testing.expectEqual(@as(usize, 4), rows.len);
+    for (effects, 0..) |effect, i| {
+        for (effects[0..i]) |before| try testing.expect(!std.mem.eql(u8, before.key, effect.key));
+        try testing.expectEqual(@as(i64, 1), effect.attempt);
+        const row = for (rows) |row| {
+            if (std.mem.eql(u8, row.key, effect.key)) break row;
+        } else {
+            std.debug.print("{s} ran, and has no row of the history\n", .{effect.key});
+            return error.TestUnexpectedResult;
+        };
+        try testing.expectEqual(scheduler.RunOutcome.succeeded, row.outcome);
+        try testing.expectEqual(@as(u64, 1), row.fence);
+    }
+    try testing.expectEqual(@as(usize, 0), (try straight.list(io, within10s(io), .{ .job = Unconfirmed.scheduler_job.name }, .{}, arena, .{})).records.len);
 }
 
 // mongo-stall.

@@ -28,8 +28,11 @@
 //! - Every write goes with `Options.write_concern`, `{w: 1, j: true}` by
 //!   default: the server answers once the change is in its journal on
 //!   disk. A `writeConcernError` of the server means the write ran without
-//!   that promise: the store reads the job again, returns the normal
-//!   result and logs a warning.
+//!   that promise, with code 50 (MaxTimeMSExpired: the deadline of the call
+//!   passed while the server waited) as with any other: the reply still
+//!   says what the write did, so the store returns the normal result, goes
+//!   on after a row of the history, and logs a warning with the server's
+//!   code.
 //! - An error after which the write may have run (a lost connection, a
 //!   timeout, a refusal of the server) is resolved by reading the job
 //!   again by the mark the write left; where that cannot tell, the call is

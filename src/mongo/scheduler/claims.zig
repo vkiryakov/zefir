@@ -41,13 +41,26 @@ pub fn claim(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Stor
         const tag = try std.fmt.allocPrint(c.a(), "{s}-{d}", .{ &documents.hex(request.tag), k });
         const stage = claimStage(c.a(), request.owner, tag, documents.millis(request.lease)) catch |err| return c.built(err);
         const before = Clock.local(io);
-        const options_: mongo.Collection.FindOneAndUpdateOptions = .{ .allocator = c.a(), .sort = by_wake, .return_document = .after, .write_concern = s.write_concern, .diagnostics = &c.md };
-        const doc = c.jobs().findOneAndUpdate(io, c.op(), filter, &[_]bson.RawDocument{stage}, options_) catch |err| {
-            if (try claimLost(&c, request.owner, tag, err, taken.items.len)) |read| try taken.append(c.a(), read);
-            ended = true;
-            break;
-        } orelse break;
-        const read = c.decode(doc.raw()) catch |err| {
+        var refusal: ?bson.OwnedDocument = null;
+        const options_: mongo.Collection.FindOneAndUpdateOptions = .{ .allocator = c.a(), .sort = by_wake, .return_document = .after, .write_concern = s.write_concern, .diagnostics = &c.md, .failure_reply = &refusal };
+        // A reply that waited for a write concern it did not get says
+        // little of the server's clock.
+        var timed = true;
+        const doc: ?bson.RawDocument = if (c.jobs().findOneAndUpdate(io, c.op(), filter, &[_]bson.RawDocument{stage}, options_)) |found|
+            (if (found) |d| d.raw() else null)
+        else |err| doc: {
+            // Without its write concern, the claim ran, and its reply holds
+            // what it took.
+            const modified = Call.modifiedUnconfirmed(refusal) orelse {
+                if (try claimLost(&c, request.owner, tag, err, taken.items.len)) |read| try taken.append(c.a(), read);
+                ended = true;
+                break;
+            };
+            c.ran(err);
+            timed = false;
+            break :doc modified.value;
+        };
+        const read = c.decode(doc orelse break) catch |err| {
             // A record that no longer reads ends the claim; it comes back
             // when its lease ends.
             if (taken.items.len == 0) return err;
@@ -55,7 +68,7 @@ pub fn claim(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Stor
             ended = true;
             break;
         };
-        if (read.record.claimed_at) |at| s.clock.sample(at, before, Clock.local(io));
+        if (timed) if (read.record.claimed_at) |at| s.clock.sample(at, before, Clock.local(io));
         try taken.append(c.a(), read);
     }
     const next_in = if (taken.items.len < request.max and !ended) try nextIn(&c, branches, taken.items.len) else null;
@@ -231,8 +244,17 @@ fn leaseStage(a: std.mem.Allocator, lease: Duration) bson.Builder.Error!bson.Raw
 
 fn renewOnce(c: *Call, id: []const u8, life: []const u8, filter: anytype, stage: bson.RawDocument, lease: Duration) mongo.Error!Store.RenewResult {
     const before = Clock.local(c.io);
-    const options: mongo.Collection.FindOneAndUpdateOptions = .{ .allocator = c.a(), .projection = bson.literal(.{ .lease_until = 1 }), .return_document = .after, .write_concern = c.store.write_concern, .diagnostics = &c.md };
-    if (try c.jobs().findOneAndUpdate(c.io, c.op(), filter, &[_]bson.RawDocument{stage}, options)) |doc| {
+    var refusal: ?bson.OwnedDocument = null;
+    const options: mongo.Collection.FindOneAndUpdateOptions = .{ .allocator = c.a(), .projection = bson.literal(.{ .lease_until = 1 }), .return_document = .after, .write_concern = c.store.write_concern, .diagnostics = &c.md, .failure_reply = &refusal };
+    const found = c.jobs().findOneAndUpdate(c.io, c.op(), filter, &[_]bson.RawDocument{stage}, options) catch |err| found: {
+        // Without its write concern, the renewal ran, and its reply says
+        // whether it held.
+        const modified = Call.modifiedUnconfirmed(refusal) orelse return err;
+        c.ran(err);
+        if (modified.value != null) return .renewed;
+        break :found null;
+    };
+    if (found) |doc| {
         if (doc.raw().get("lease_until") catch null) |until| if (until == .date_time)
             c.store.clock.sample(scheduler.Instant.fromUnixMs(until.date_time.milliseconds).add(.fromNanoseconds(-lease.nanoseconds)), before, Clock.local(c.io));
         return .renewed;
@@ -265,12 +287,25 @@ pub fn finish(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     const id = (try c.id(request.ref)) orelse return .lost;
     const life = documents.hex(request.life);
     const filter = .{ ._id = id, .life = &life, .owner = request.owner, .fence = fence, .revision = revision, .state = "running" };
-    const write: mongo.Collection.UpdateOptions = .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md };
-    const applied = if (request.next == .delete)
-        (c.jobs().deleteOne(io, c.op(), filter, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md }) catch |err| return finishLost(&c, id, request, err)).deleted > 0
-    else applied: {
+    // Without its write concern, the transition ran, and its reply says
+    // whether it held.
+    const applied = if (request.next == .delete) applied: {
+        var known: mongo.Collection.DeleteResult = .{};
+        const result = c.jobs().deleteOne(io, c.op(), filter, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
+            if (!Call.ranUnconfirmed(known)) return finishLost(&c, id, request, err);
+            c.ran(err);
+            break :result known;
+        };
+        break :applied result.deleted > 0;
+    } else applied: {
         const stages = transitionStages(c.a(), request) catch |err| return c.built(err);
-        break :applied (c.jobs().updateOne(io, c.op(), filter, stages, write) catch |err| return finishLost(&c, id, request, err)).matched > 0;
+        var known: mongo.Collection.UpdateResult = .{};
+        const result = c.jobs().updateOne(io, c.op(), filter, stages, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
+            if (!Call.ranUnconfirmed(known)) return finishLost(&c, id, request, err);
+            c.ran(err);
+            break :result known;
+        };
+        break :applied result.matched > 0;
     };
     if (applied) return .done;
     const now = (c.read(id, &c.md) catch |err| return records.readFailed(&c, err)) orelse return .lost;
@@ -363,12 +398,16 @@ fn putCount(b: *bson.Builder, key: []const u8, n: u32) bson.Builder.Error!void {
 
 /// The row of `run`: `_id` "<life>/<fence>", written unless the row is
 /// there, but for the owner's row over an abandoned one (A15). A unique
-/// key error is a row that a concurrent write made: it is there.
+/// key error is a row that a concurrent write made: it is there; so is one
+/// written without its write concern.
 fn writeRow(c: *Call, run: *const scheduler.Run, keep: scheduler.Retention) StoreError!void {
     const row_id = try std.fmt.allocPrint(c.a(), "{s}/{d}", .{ &documents.hex(run.life), run.fence });
     const stage = rowStage(c.a(), run, keep) catch |err| return c.built(err);
-    _ = c.runs().updateOne(c.io, c.op(), .{ ._id = row_id }, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .upsert = true, .write_concern = c.store.write_concern, .diagnostics = &c.md }) catch |err| {
+    var known: mongo.Collection.UpdateResult = .{};
+    _ = c.runs().updateOne(c.io, c.op(), .{ ._id = row_id }, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .upsert = true, .write_concern = c.store.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| {
         if (Call.code(&c.md)) |code| if (code == 11000) return;
+        // Without its write concern, the row is there all the same.
+        if (Call.ranUnconfirmed(known)) return c.ran(err);
         // The transition did not go out: the record is as it was.
         return c.nothing(err);
     };

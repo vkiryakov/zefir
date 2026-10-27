@@ -29,12 +29,19 @@ pub fn create(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     const id = (try c.id(.{ .job = request.job, .key = request.key })).?;
     const stage = createStage(c.a(), request) catch |err| return c.built(err);
     const run_at = earliest(&c, request.run_at);
-    const result = upsert(&c, id, stage) catch |err| return createLost(&c, id, stage, request, run_at, err);
+    var known: mongo.Collection.UpdateResult = .{};
+    const result = upsert(&c, id, stage, &known) catch |err| result: {
+        if (!Call.ranUnconfirmed(known)) return createLost(&c, id, stage, request, run_at, err);
+        c.ran(err);
+        break :result known;
+    };
     return createdBy(result);
 }
 
-fn upsert(c: *Call, id: []const u8, stage: bson.RawDocument) mongo.Error!mongo.Collection.UpdateResult {
-    return c.jobs().updateOne(c.io, c.op(), .{ ._id = id }, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .upsert = true, .write_concern = c.store.write_concern, .diagnostics = &c.md });
+/// The upsert of the record; when it fails, `known` gets what the server
+/// said of it.
+fn upsert(c: *Call, id: []const u8, stage: bson.RawDocument, known: ?*mongo.Collection.UpdateResult) mongo.Error!mongo.Collection.UpdateResult {
+    return c.jobs().updateOne(c.io, c.op(), .{ ._id = id }, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .upsert = true, .write_concern = c.store.write_concern, .diagnostics = &c.md, .partial = known });
 }
 
 fn createdBy(result: mongo.Collection.UpdateResult) Store.CreateResult {
@@ -63,7 +70,7 @@ fn createLost(c: *Call, id: []const u8, stage: bson.RawDocument, request: *const
     }
     if (Call.classOf(err) == .answered) return c.refused(err);
     if (!beforeAnyClaim(c, run_at)) return c.unknown(err, null);
-    const again = upsert(c, id, stage) catch |e| return c.unknown(err, e);
+    const again = upsert(c, id, stage, null) catch |e| return c.unknown(err, e);
     if (createdBy(again) != .existing) return createdBy(again);
     // The first upsert may have come in between.
     const now = (c.read(id, &md) catch |e| return c.unknown(err, e)) orelse return c.unknown(err, null);
@@ -152,8 +159,12 @@ pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     const stage = updateStage(c.a(), request) catch |err| return c.built(err);
     const life = documents.hex(request.expect.life);
     const filter = .{ ._id = id, .life = &life, .revision = revision, .state = @tagName(request.expect.state) };
-    const result = c.jobs().updateOne(io, c.op(), filter, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md }) catch |err|
-        return updateLost(&c, request, id, err);
+    var known: mongo.Collection.UpdateResult = .{};
+    const result = c.jobs().updateOne(io, c.op(), filter, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
+        if (!Call.ranUnconfirmed(known)) return updateLost(&c, request, id, err);
+        c.ran(err);
+        break :result known;
+    };
     if (result.matched > 0) return .{ .updated = request.expect.revision + 1 };
     const now = (c.read(id, &c.md) catch |err| return readFailed(&c, err)) orelse return .not_found;
     return .{ .conflict = try documents.recordOut(c.out, &now.record) };
@@ -277,7 +288,12 @@ pub fn remove(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const schedul
     defer c.deinit();
     try c.check();
     const id = (try c.id(ref.*)) orelse return false;
-    const result = c.jobs().deleteOne(io, c.op(), .{ ._id = id }, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md }) catch |err| {
+    var known: mongo.Collection.DeleteResult = .{};
+    const result = c.jobs().deleteOne(io, c.op(), .{ ._id = id }, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
+        if (Call.ranUnconfirmed(known)) {
+            c.ran(err);
+            break :result known;
+        }
         switch (Call.classOf(err)) {
             .not_sent => return c.nothing(err),
             .memory => return error.OutOfMemory,

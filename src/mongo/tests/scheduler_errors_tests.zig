@@ -53,6 +53,17 @@ test "each error of zefir-mongo is not sent, answered or without a reply, and wh
     try testing.expectEqualStrings("get: error.CommandFailed of zefir-mongo: not authorized", d.message());
 }
 
+test "a write in place after an answered error or code 50 ran without its write concern" {
+    var md: mongo.Diagnostics = .{};
+    // The deadline passed on the client's side: the server said nothing.
+    try testing.expect(!Call.unconfirmed(error.Timeout, &md));
+    try testing.expect(!Call.unconfirmed(error.ConnectionLost, &md));
+    try testing.expect(Call.unconfirmed(error.WriteFailed, &md));
+    // MaxTimeMSExpired while the server waited for the journal.
+    md.server = .{ .code = 50 };
+    try testing.expect(Call.unconfirmed(error.Timeout, &md));
+}
+
 /// Fails unless the diagnostics hold neither the connection string nor
 /// the payload.
 fn expectClean(f: *Fixture) !void {
@@ -93,12 +104,11 @@ test "a write that may have run is resolved by reading the record again" {
         .updated_at = bson.DateTime{ .milliseconds = 0 },
     });
     const refused = try Script.failure(a, .{ .code = 2, .code_name = "BadValue", .errmsg = "the server refused it" });
-    const concern = bson.literal(.{ .n = 1, .nModified = 1, .writeConcernError = .{ .code = 64, .codeName = "WriteConcernFailed", .errmsg = "waiting for the journal timed out" }, .ok = 1.0 });
     const duplicate = bson.literal(.{ .n = 0, .writeErrors = .{.{ .index = 0, .code = 11000, .errmsg = "E11000 duplicate key error" }}, .ok = 1.0 });
     const one = bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 });
     try f.start(&.{
-        // update, writeConcernError: our tag is there, so it ran.
-        .{ .reply = concern },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{ours}) },
+        // update, no reply: our tag is there, so it ran.
+        .close_connection,                                                                                                    .{ .reply = try fixture.found(a, jobs_ns, &.{ours}) },
         // update, refused: the record as expected, so it did not run.
         .{ .reply = refused },                                                                                                .{ .reply = try fixture.found(a, jobs_ns, &.{as_expected}) },
         // create, no reply, no record, due in an hour: the same upsert again.
@@ -136,6 +146,7 @@ test "a write that may have run is resolved by reading the record again" {
     defer testing.log_level = level;
     const update: Store.UpdateRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .expect = .{ .life = fixture.life, .revision = 0, .state = .pending }, .set = .{ .pause_requested = true }, .tag = fixture.tag };
     try testing.expectEqual(Store.UpdateResult{ .updated = 1 }, try f.store.update(io, fixture.no_deadline, &update, f.call()));
+    try afterProbe();
     try testing.expectError(error.Refused, f.store.update(io, fixture.no_deadline, &update, f.call()));
     try testing.expectEqual(@as(?i32, 2), f.diagnostics.code);
     try expectClean(&f);
@@ -289,4 +300,152 @@ test "after a lost reply, create sends its upsert again only while no claim can 
     create.run_at = .{ .at = f.store.now(io).add(.fromSeconds(7200)) };
     try testing.expectEqual(Store.CreateResult.created, try f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
     try f.expectCommands(&.{ "update", "find", "update", "find", "update", "find", "update", "find", "update" });
+}
+
+/// A writeConcernError as mongod writes one, of `code`: 64 when the
+/// journal did not confirm in time, 50 when the deadline passed meanwhile.
+fn concernError(code: i32) bson.RawDocument {
+    return switch (code) {
+        50 => bson.literal(.{ .code = 50, .codeName = "MaxTimeMSExpired", .errmsg = "operation exceeded time limit" }),
+        else => bson.literal(.{ .code = 64, .codeName = "WriteConcernFailed", .errmsg = "waiting for the journal timed out" }),
+    };
+}
+
+/// The reply of a findAndModify that changed `value`, or none, and whose
+/// write concern failed with `code`.
+fn modifiedUnconfirmed(a: std.mem.Allocator, value: ?bson.RawDocument, code: i32) !bson.RawDocument {
+    var b: bson.Builder = .init(a);
+    try b.beginDocument("lastErrorObject");
+    try b.putInt32("n", if (value != null) 1 else 0);
+    try b.putBoolean("updatedExisting", value != null);
+    try b.end();
+    if (value) |doc| try b.putDocument("value", doc) else try b.putNull("value");
+    try b.putDocument("writeConcernError", concernError(code));
+    try b.putDouble("ok", 1);
+    return (try b.finish()).raw();
+}
+
+/// What a write of one item did, as its reply counts it.
+const Written = struct { n: i32, modified: i32 = 0, upserted: bool = false };
+
+/// The reply of a write of one item that did `w`, and whose write concern
+/// failed with `code`.
+fn writtenUnconfirmed(a: std.mem.Allocator, w: Written, code: i32) !bson.RawDocument {
+    var b: bson.Builder = .init(a);
+    try b.putInt32("n", w.n);
+    try b.putInt32("nModified", w.modified);
+    if (w.upserted) try b.put("upserted", .{.{ .index = 0, ._id = "send/k1" }});
+    try b.putDocument("writeConcernError", concernError(code));
+    try b.putDouble("ok", 1);
+    return (try b.finish()).raw();
+}
+
+/// The one row of a finish of the claim of "w1" with fence 1, kept always.
+const one_row = [_]scheduler.Run{.{ .job = "send", .key = "k1", .tenant = null, .life = fixture.life, .fence = 1, .attempt = 1, .scheduled_at = .fromUnixMs(0), .started_at = .fromUnixMs(0), .finished_at = .fromUnixMs(0), .outcome = .succeeded, .error_name = null, .instance = "w1", .expires_at = null }};
+
+/// A finish of the claim of "w1" with fence 1 at revision 0 to `next`.
+fn finishOf(next: Store.Next) Store.FinishRequest {
+    return .{ .ref = .{ .job = "send", .key = "k1" }, .life = fixture.life, .owner = "w1", .fence = 1, .revision = 0, .tag = fixture.tag, .next = next, .last = null };
+}
+
+test "a row of the history that ran without its write concern is there, and the transition goes" {
+    var f: Fixture = .{};
+    const a = f.a();
+    const one = bson.literal(.{ .n = 1, .nModified = 1, .ok = 1.0 });
+    const invalid = bson.literal(.{ .n = 0, .writeErrors = .{.{ .index = 0, .code = 121, .errmsg = "Document failed validation" }}, .ok = 1.0 });
+    try f.start(&.{
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1, .upserted = true }, 64) }, .{ .reply = one },
+        // Code 50: the deadline passed while the server waited.
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1, .upserted = true }, 50) }, .{ .reply = one },
+        // The server refused the row: the transition does not go.
+        .{ .reply = invalid },
+    });
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var finish = finishOf(.{ .done = .{ .state = .succeeded, .keep = .forever } });
+    finish.history = .{ .runs = &one_row, .keep = .forever };
+    try testing.expectEqual(Store.FinishResult.done, try f.store.finish(io, fixture.no_deadline, &finish, f.call()));
+    try testing.expectEqual(Store.FinishResult.done, try f.store.finish(io, fixture.no_deadline, &finish, f.call()));
+    try testing.expectError(error.Refused, f.store.finish(io, fixture.no_deadline, &finish, f.call()));
+    try testing.expectEqual(@as(?i32, 121), f.diagnostics.code);
+    try f.expectCommands(&.{ "update", "update", "update", "update", "update" });
+}
+
+test "a write that ran without its write concern gives what its reply says it did" {
+    var f: Fixture = .{};
+    const a = f.a();
+    const lease = bson.literal(.{ ._id = "send/k1", .lease_until = bson.DateTime{ .milliseconds = 1_793_000_061_000 } });
+    const claimed = try recordDoc(a, fixture.life_hex, .running, 0, fixture.tag_hex ++ "-1");
+    const reborn = try recordDoc(a, other_life_hex, .pending, 0, "efefefefefefefefefefefefefefefef");
+    const of_life = bson.literal(.{ ._id = "send/k1", .life = fixture.life_hex });
+    try f.start(&.{
+        // create: made, replaced, and existing with code 50.
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1, .upserted = true }, 64) },
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1, .modified = 1 }, 64) },
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1 }, 50) },
+        // update: applied; not applied, and the record is read for the
+        // conflict.
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1, .modified = 1 }, 64) },
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 0 }, 64) },
+        .{ .reply = try fixture.found(a, jobs_ns, &.{reborn}) },
+        // remove: one removed; none, with code 50.
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1 }, 64) },
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 0 }, 50) },
+        // finish: the transition, and the removal.
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1, .modified = 1 }, 64) },
+        .{ .reply = try writtenUnconfirmed(a, .{ .n = 1 }, 64) },
+        // claim: a record taken; none due, and when the next is.
+        .{ .reply = try modifiedUnconfirmed(a, claimed, 64) },
+        .{ .reply = try modifiedUnconfirmed(a, null, 64) },
+        .{ .reply = try fixture.found(a, jobs_ns, &.{}) },
+        // renew: renewed, with code 50 too; not this claim, and the record
+        // is read for whose it is.
+        .{ .reply = try modifiedUnconfirmed(a, lease, 64) },
+        .{ .reply = try modifiedUnconfirmed(a, lease, 50) },
+        .{ .reply = try modifiedUnconfirmed(a, null, 64) },
+        .{ .reply = try fixture.found(a, jobs_ns, &.{of_life}) },
+    });
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    const create: Store.CreateRequest = .{ .job = "send", .key = "k1", .life = fixture.life, .plan = "", .payload = payload, .run_at = .{ .after = .zero } };
+    try testing.expectEqual(Store.CreateResult.created, try f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
+    try testing.expectEqual(Store.CreateResult.replaced, try f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
+    try testing.expectEqual(Store.CreateResult.existing, try f.store.create(io, fixture.within(.fromSeconds(10)), &create, f.call()));
+
+    const update: Store.UpdateRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .expect = .{ .life = fixture.life, .revision = 0, .state = .pending }, .set = .{ .pause_requested = true }, .tag = fixture.tag };
+    try testing.expectEqual(Store.UpdateResult{ .updated = 1 }, try f.store.update(io, fixture.no_deadline, &update, f.call()));
+    switch (try f.store.update(io, fixture.no_deadline, &update, f.call())) {
+        .conflict => |now| try testing.expectEqualStrings(other_life_hex, &documents.hex(now.life)),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(try f.store.remove(io, fixture.no_deadline, &.{ .job = "send", .key = "k1" }, f.call()));
+    try testing.expect(!try f.store.remove(io, fixture.no_deadline, &.{ .job = "send", .key = "k1" }, f.call()));
+
+    try testing.expectEqual(Store.FinishResult.done, try f.store.finish(io, fixture.no_deadline, &finishOf(.{ .done = .{ .state = .succeeded, .keep = .forever } }), f.call()));
+    try testing.expectEqual(Store.FinishResult.done, try f.store.finish(io, fixture.no_deadline, &finishOf(.delete), f.call()));
+
+    const claim: Store.ClaimRequest = .{ .owner = "w2", .any_key = &.{"send"}, .keyed_only = &.{}, .max = 1, .lease = .fromSeconds(60), .tag = fixture.tag };
+    const took = try f.store.claim(io, fixture.no_deadline, &claim, f.call());
+    try testing.expectEqual(@as(usize, 1), took.claimed.len);
+    try testing.expectEqualStrings("k1", took.claimed[0].record.key);
+    const none = try f.store.claim(io, fixture.no_deadline, &claim, f.call());
+    try testing.expectEqual(@as(usize, 0), none.claimed.len);
+    try testing.expectEqual(@as(?std.Io.Duration, null), none.next_in);
+
+    const renew: Store.RenewRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .life = fixture.life, .owner = "w1", .fence = 1, .lease = .fromSeconds(60) };
+    try testing.expectEqual(Store.RenewResult.renewed, try f.store.renew(io, fixture.no_deadline, &renew, f.call()));
+    try testing.expectEqual(Store.RenewResult.renewed, try f.store.renew(io, fixture.no_deadline, &renew, f.call()));
+    try testing.expectEqual(Store.RenewResult.lost, try f.store.renew(io, fixture.no_deadline, &renew, f.call()));
+    try expectClean(&f);
+    try f.expectCommands(&.{
+        "update",    "update",        "update",        "update",        "update",        "find",
+        "delete",    "delete",        "update",        "delete",        "findAndModify", "findAndModify",
+        "aggregate", "findAndModify", "findAndModify", "findAndModify", "find",
+    });
 }

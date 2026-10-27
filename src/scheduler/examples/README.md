@@ -1982,10 +1982,12 @@ hard crash of the server between two flushes of the journal (100 ms
 apart) loses changes that it confirmed: a job scheduled, or the outcome of
 a run, which would then run again. `j` costs a flush of the journal for
 each write; `.{ .journal = false }` trades that for speed. A reply with a
-`writeConcernError` means the write ran without that promise: the store
-reads the job back, returns the result as usual, and logs a warning with
-the server's code. [Durable writes](../../mongo/examples/README.md#durable-writes)
-in the guide of zefir-mongo has the rest.
+`writeConcernError` means the write ran without that promise, also one of
+code 50, MaxTimeMSExpired, when the deadline of the call passed while the
+server waited: the reply still says what the write did, so the store
+returns the result as usual and logs a warning with the server's code.
+[Durable writes](../../mongo/examples/README.md#durable-writes) in the
+guide of zefir-mongo has the rest.
 
 ### MongoDB 7.0
 
