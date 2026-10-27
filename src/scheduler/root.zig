@@ -125,4 +125,5 @@ test {
     _ = @import("tests/client_read_tests.zig");
     _ = @import("tests/policy_tests.zig");
     _ = @import("tests/transition_tests.zig");
+    _ = @import("tests/declared_tests.zig");
 }
