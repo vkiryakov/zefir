@@ -125,7 +125,7 @@ keyed_only: []const []const u8,
 /// What `start` hands over; nothing reads it before.
 entries: []const Entry = &.{},
 
-/// Guards the fields up to `outage`, for short sections without a call
+/// Guards the fields up to `outages`, for short sections without a call
 /// of the store, a wait or a log line.
 mutex: Io.Mutex = .init,
 /// A stop was asked for: while starting, `start` goes on to draining.
@@ -134,8 +134,8 @@ stop_requested: bool = false,
 stop_began: ?Io.Timestamp = null,
 /// The earliest deadline of a `shutdown`, on the awake clock.
 deadline: ?i96 = null,
-/// The failures of the store in a row, for the logs.
-outage: ?Outage = null,
+/// The failures of the store in a row, by the kind of call, for the logs.
+outages: std.EnumArray(Call, ?Outage) = .initFill(null),
 
 state_value: std.atomic.Value(State) = .init(.configured),
 /// The address of the worker since `start`: a moved worker panics.
@@ -164,6 +164,9 @@ slots: []Slot = &.{},
 counters: Counters = .{},
 
 const Outage = struct { since: Io.Timestamp, tries: u64, warned: Io.Timestamp };
+
+/// The calls of the store the worker makes.
+pub const Call = enum { claim, renew, finish, create, get, update };
 
 /// The longest wait handed to `std.Io` at once: some implementations
 /// overflow on a far deadline.
@@ -274,7 +277,7 @@ fn declare(e: *Engine, io: Io) StartError!void {
         }
         var d: Diagnostics = .{};
         const ref: record.Ref = .{ .job = entry.policy.name, .key = "" };
-        if (try e.tally(io, "get", e.store.get(io, ctx, &ref, .{ .allocator = arena.allocator(), .diagnostics = &d }), &d) == null) continue;
+        if (try e.tally(io, .get, e.store.get(io, ctx, &ref, .{ .allocator = arena.allocator(), .diagnostics = &d }), &d) == null) continue;
         _ = e.counters.undeclared.fetchAdd(1, .monotonic);
         log.warn("{s}: the record of a declaration this code does not have is parked, and no instance of it runs it; " ++
             "remove it with client.cancel(io, ctx, .declared({s}), .{{}})", .{ entry.policy.name, entry.type_name });
@@ -293,11 +296,11 @@ fn declareOne(e: *Engine, io: Io, ctx: core.Context, a: Allocator, wanted: *cons
     const ref: record.Ref = .{ .job = want.job, .key = "" };
     var lost: u32 = 0;
     while (lost <= max_races) : (lost += 1) {
-        switch (try e.tally(io, "create", e.store.create(io, ctx, &want, options), &d)) {
+        switch (try e.tally(io, .create, e.store.create(io, ctx, &want, options), &d)) {
             .created, .replaced => return log.info("{s}: declared, {s}", .{ want.job, want.plan }),
             .existing => {},
         }
-        var current = (try e.tally(io, "get", e.store.get(io, ctx, &ref, options), &d)) orelse continue;
+        var current = (try e.tally(io, .get, e.store.get(io, ctx, &ref, options), &d)) orelse continue;
         // A finished record goes again to create, which replaces it.
         while (current.state != .succeeded and current.state != .failed) : (lost += 1) {
             const patch = declared.reconcile(&current, want.plan, want.run_at) orelse return;
@@ -305,7 +308,7 @@ fn declareOne(e: *Engine, io: Io, ctx: core.Context, a: Allocator, wanted: *cons
             var tag: Store.Tag = undefined;
             io.random(&tag);
             const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = current.revision, .state = current.state }, .set = patch, .tag = tag };
-            switch (try e.tally(io, "update", e.store.update(io, ctx, &request, options), &d)) {
+            switch (try e.tally(io, .update, e.store.update(io, ctx, &request, options), &d)) {
                 .updated => return log.info("{s}: the declared record takes the plan of the code, {s}", .{ want.job, want.plan }),
                 .conflict => |now| current = now,
                 .not_found => break,
@@ -527,22 +530,24 @@ pub fn callContext(e: *Engine, io: Io) core.Context {
 }
 
 /// Counts what a call of the store gave: an error, or an answer.
-pub fn tally(e: *Engine, io: Io, comptime what: []const u8, result: anytype, d: *const Diagnostics) @TypeOf(result) {
-    if (result) |_| e.storeAnswered(io) else |err| e.storeFailed(io, what, err, d);
+pub fn tally(e: *Engine, io: Io, comptime what: Call, result: anytype, d: *const Diagnostics) @TypeOf(result) {
+    if (result) |_| e.storeAnswered(io, what) else |err| e.storeFailed(io, what, err, d);
     return result;
 }
 
-/// Logs the first failure of the store, then once a minute while it goes
-/// on failing.
-fn storeFailed(e: *Engine, io: Io, comptime what: []const u8, err: anyerror, d: *const Diagnostics) void {
+/// Logs the first failure of a kind of call, then once a minute while it
+/// goes on failing: a store that takes claims and refuses renewals is
+/// still failing.
+fn storeFailed(e: *Engine, io: Io, comptime what: Call, err: anyerror, d: *const Diagnostics) void {
     e.counters.add(.store_errors, 1);
     e.counters.store_down.store(true, .release);
     const now = Io.Clock.awake.now(io);
     const tries: u64 = tries: {
         e.mutex.lockUncancelable(io);
         defer e.mutex.unlock(io);
-        const o = if (e.outage) |*o| o else {
-            e.outage = .{ .since = now, .tries = 1, .warned = now };
+        const slot = e.outages.getPtr(what);
+        const o = if (slot.*) |*o| o else {
+            slot.* = .{ .since = now, .tries = 1, .warned = now };
             break :tries 1;
         };
         o.tries += 1;
@@ -552,20 +557,21 @@ fn storeFailed(e: *Engine, io: Io, comptime what: []const u8, err: anyerror, d: 
     };
     switch (tries) {
         0 => {},
-        1 => log.warn("the store fails: " ++ what ++ ": error.{t}: {s}", .{ err, d.message() }),
-        else => log.warn("the store still fails, {d} tries: " ++ what ++ ": error.{t}: {s}", .{ tries, err, d.message() }),
+        1 => log.warn("the store fails: " ++ @tagName(what) ++ ": error.{t}: {s}", .{ err, d.message() }),
+        else => log.warn("the store still fails, {d} tries: " ++ @tagName(what) ++ ": error.{t}: {s}", .{ tries, err, d.message() }),
     }
 }
 
-fn storeAnswered(e: *Engine, io: Io) void {
+fn storeAnswered(e: *Engine, io: Io, comptime what: Call) void {
     e.counters.store_down.store(false, .release);
     const since = since: {
         e.mutex.lockUncancelable(io);
         defer e.mutex.unlock(io);
-        const o = e.outage orelse break :since null;
-        e.outage = null;
+        const slot = e.outages.getPtr(what);
+        const o = slot.* orelse break :since null;
+        slot.* = null;
         break :since o.since;
     };
     const began = since orelse return;
-    log.warn("the store answers again after {f}", .{began.durationTo(Io.Clock.awake.now(io))});
+    log.warn("the store answers " ++ @tagName(what) ++ " again after {f}", .{began.durationTo(Io.Clock.awake.now(io))});
 }

@@ -44,7 +44,7 @@ pub fn loop(e: *Engine) void {
         const request: Store.ClaimRequest = .{ .owner = e.instance, .any_key = e.any_key, .keyed_only = e.keyed_only, .max = free, .lease = e.options.lease, .tag = tag };
         const sent = Io.Clock.boot.now(io);
         const options: Store.CallOptions = .{ .allocator = r.arena.allocator(), .diagnostics = &d };
-        const result = e.tally(io, "claim", e.store.claim(io, e.callContext(io), &request, options), &d) catch {
+        const result = e.tally(io, .claim, e.store.claim(io, e.callContext(io), &request, options), &d) catch {
             _ = r.arena.reset(.retain_capacity);
             failures +|= 1;
             due = after(io, jitter(random, backoff(e.options, failures)));

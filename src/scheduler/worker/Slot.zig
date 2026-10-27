@@ -227,7 +227,7 @@ fn renew(s: *Slot, r: *const record.Record, local: i96) Renewed {
     const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), budget));
     var d: Diagnostics = .{};
     const request: Store.RenewRequest = .{ .ref = .{ .job = r.job, .key = r.key }, .life = r.life, .owner = e.instance, .fence = r.fence, .lease = e.options.lease };
-    const result = e.tally(io, "renew", e.store.renew(io, ctx, &request, .{ .allocator = s.calls.allocator(), .diagnostics = &d }), &d) catch return .failed;
+    const result = e.tally(io, .renew, e.store.renew(io, ctx, &request, .{ .allocator = s.calls.allocator(), .diagnostics = &d }), &d) catch return .failed;
     return switch (result) {
         .renewed => .{ .renewed = t },
         .lost => .lost,
@@ -287,7 +287,7 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
         };
         var diag: Diagnostics = .{};
         const options: Store.CallOptions = .{ .allocator = s.arena.allocator(), .diagnostics = &diag };
-        const result = e.tally(io, "finish", e.store.finish(io, e.callContext(io), &request, options), &diag) catch |err| {
+        const result = e.tally(io, .finish, e.store.finish(io, e.callContext(io), &request, options), &diag) catch |err| {
             if (Store.outcome(err) == .unknown) unknown = true;
             if (s.pause(io)) continue;
             log.warn("{s}/{s}: the outcome of the run could not be written before the stop; the job goes back when its lease ends", .{ r.job, r.key });
