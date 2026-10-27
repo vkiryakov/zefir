@@ -435,19 +435,21 @@ openssl rand -base64 48                                          # an HMAC secre
 ```
 
 The files are PEM: a block of base64 between two marker lines. The runs
-of this guide use a sample key of orders, whose public key is:
+of this guide use a sample key of orders.
+
+> [!WARNING]
+> This sample key is for reading the guide alone. Its private half is
+> published with the sources of zefir, so anybody can sign tokens with
+> it: never let a service trust it. Make the keys of your services with
+> the commands above.
+
+The public half of the sample key, which no service may trust:
 
 ```text
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA1rQM3tcZwaeBG73FtMkSgozKMFHlEkT24K1KGN0rUAY=
 -----END PUBLIC KEY-----
 ```
-
-> [!WARNING]
-> This sample key is for reading the guide alone. Its private half is
-> published in this repository, in `cases.zig`, so anybody can sign tokens
-> with it: never let a service trust it. Make the keys of your services
-> with the commands above.
 
 Each kind of key loads with a function of its own, with the algorithm you
 name; a key of another curve than that algorithm's fails at once, when the
@@ -678,10 +680,11 @@ The header of a token of orders is `{"alg":"EdDSA","typ":"JWT","kid":"2026-10"}`
 the algorithm of the key, the type and the id of the key. `sign` refuses
 what it cannot write as a token that `verify` would take, with
 `jwt.SignError`: `InvalidClaims` for a string that is not UTF-8, a float
-that is not finite or a time past the year 9999, `TokenTooLarge` for a
-token over 8 KiB, `BadSignature` for a key that `deinit` wiped while the
-signer still used it, and `OutOfMemory`. They are mistakes of the program,
-so the error handler of orders answers them with 500.
+that is not finite, a lifetime under one second or a time before 1970 or
+past the year 9999, `TokenTooLarge` for a token over 8 KiB, `BadSignature`
+for a key that `deinit` wiped while the signer still used it, and
+`OutOfMemory`. They are mistakes of the program, so the error handler of
+orders answers them with 500.
 
 ## Errors
 
@@ -694,7 +697,7 @@ client:
 | --- | --- | --- |
 | `TokenTooLarge` | the token is over 8 KiB | the token is too large |
 | `Malformed` | not three parts; bad base64url or JSON; a claim or a member of the header that jwt reads, given twice; nesting deeper than 32; a member of the header of the wrong type | the token is malformed |
-| `UnsupportedAlgorithm` | `alg` is none of the six, `none` among them | the token's algorithm is not supported |
+| `UnsupportedAlgorithm` | `alg` is absent or none of the six, `none` among them | the token's algorithm is not supported |
 | `UnsupportedHeader` | the header has `crit`, or `cty` says the payload is a nested token | the token's header asks for what is not supported |
 | `WrongType` | `typ` is absent or none of the verifier's `token_types` | the token is of another type |
 | `UnknownKey` | no key of the verifier has this `kid`; or the token has no `kid` and the verifier more than one key | the token's key is unknown |
@@ -1827,8 +1830,8 @@ and that entry gets no pointer to the clock.
   has no handle meant for tests.
 
 The tests of this guide, [`auth_test.zig`](#http) and
-[`rpc_auth_test.zig`](#rpc), run with `zig build test-security` in this
-repository; a service runs its own with a test step of its `build.zig`.
+[`rpc_auth_test.zig`](#rpc), are ordinary Zig tests: a service runs its
+own with a test step of its `build.zig`.
 
 ## Security
 
@@ -1926,8 +1929,8 @@ it expires, and nothing takes it back early. So:
 | a time (NumericDate) | 0 to 253402300799 seconds, the end of the year 9999 | — |
 | the path of a violation | 256 bytes | `Details.path_buf` |
 
-- **Memory.** `verify` takes its memory from the arena it is given, about
-  twice the size of the token and the slices of your claims, and frees
+- **Memory.** `verify` takes its memory from the arena it is given, a few
+  sizes of the token, the slices of your claims included, and frees
   nothing: the arena of the request frees it all. `sign` takes the token
   from its allocator, which the caller frees, and frees its own buffers
   before it returns.
