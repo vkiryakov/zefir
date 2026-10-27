@@ -85,6 +85,8 @@ pub fn s7(r: *Runner) Error!void {
 /// is left.
 const Race = struct {
     r: *Runner,
+    /// The seed of the tags of each task.
+    seeds: [8]u64,
     gate: Io.Event = .unset,
     stop: std.atomic.Value(bool) = .init(false),
     /// How many times each record was claimed, and by which task.
@@ -104,9 +106,14 @@ const Race = struct {
         var arena: std.heap.ArenaAllocator = .init(race.r.gpa);
         defer arena.deinit();
         const owner = [_]u8{ 's', '8', '-', 'w', '0' + task };
+        // A tag of its own for each claim: a store that tells its claims by
+        // tag after a lost reply would take one of the task for another.
+        var tags: std.Random.DefaultPrng = .init(race.seeds[task]);
         while (!race.stop.load(.acquire)) {
             _ = arena.reset(.retain_capacity);
-            const request: Store.ClaimRequest = .{ .owner = &owner, .any_key = &.{}, .keyed_only = &.{"s8-race"}, .max = 1 + task % 4, .lease = race.r.ms(60_000), .tag = @splat(task) };
+            var tag: Store.Tag = undefined;
+            tags.random().bytes(&tag);
+            const request: Store.ClaimRequest = .{ .owner = &owner, .any_key = &.{}, .keyed_only = &.{"s8-race"}, .max = 1 + task % 4, .lease = race.r.ms(60_000), .tag = tag };
             const result = try race.r.store().claim(race.r.io, race.r.ctx(), &request, .{ .allocator = arena.allocator() });
             if (result.claimed.len == 0) return;
             for (result.claimed) |c| {
@@ -124,7 +131,8 @@ pub fn s8(r: *Runner) Error!void {
         var key: [3]u8 = undefined;
         _ = try r.create("s8-race", std.fmt.bufPrint(&key, "{d:0>3}", .{i}) catch unreachable, .{ .after = .zero });
     }
-    var race: Race = .{ .r = r };
+    var race: Race = .{ .r = r, .seeds = undefined };
+    for (&race.seeds) |*seed| seed.* = r.rng.random().int(u64);
     {
         var group: Io.Group = .init;
         defer group.cancel(r.io);

@@ -378,6 +378,14 @@ const slots: [17]model.Ref = slots: {
     break :slots all;
 };
 
+/// A tag of its own for each write of the mix: a store that tells its
+/// changes by tag after a lost reply would take one of a task for another.
+fn tagOf(random: std.Random) Store.Tag {
+    var tag: Store.Tag = undefined;
+    random.bytes(&tag);
+    return tag;
+}
+
 /// A claim that a task of the mix holds.
 const Held = struct { slot: u8, life: model.Life, fence: u64, revision: u64, attempt: u32, scheduled_at: Instant, claimed_at: Instant };
 
@@ -519,7 +527,7 @@ const Mixer = struct {
             .running => if (random.boolean()) .{ .pause_requested = true } else .{ .run_at = later },
             .succeeded, .failed => if (random.boolean()) .{ .reset = true } else .{ .reset = true, .state = .paused },
         };
-        const request: Store.UpdateRequest = .{ .ref = slot.*, .expect = .{ .life = now.life, .revision = now.revision, .state = now.state }, .set = set, .tag = @splat(m.index) };
+        const request: Store.UpdateRequest = .{ .ref = slot.*, .expect = .{ .life = now.life, .revision = now.revision, .state = now.state }, .set = set, .tag = tagOf(random) };
         switch (try s.update(m.r.io, m.r.ctx(), &request, m.options())) {
             .updated => |revision| {
                 if (revision != now.revision +% 1) m.fail("update raised the revision by other than 1");
@@ -540,7 +548,7 @@ const Mixer = struct {
             .keyed_only = if (m.declares) &.{} else &.{"s20-b"},
             .max = random.intRangeAtMost(u32, 1, 3),
             .lease = m.r.ms(1000),
-            .tag = @splat(m.index),
+            .tag = tagOf(random),
         }, m.options());
         for (result.claimed) |c| {
             const rec = c.record;
@@ -598,7 +606,7 @@ const Mixer = struct {
             .owner = &m.owner,
             .fence = h.fence,
             .revision = h.revision,
-            .tag = @splat(m.index),
+            .tag = tagOf(random),
             .next = next,
             .last = .{ .outcome = .succeeded, .error_name = null, .attempt = h.attempt, .started_at = h.claimed_at, .finished_at = h.claimed_at },
             .history = .{ .runs = &rows, .keep = .{ .keep_for = m.r.ms(1000) } },

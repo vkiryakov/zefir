@@ -1,7 +1,8 @@
 //! Tests of scheduler.testing.conformance: MemoryStore passes it, also when
-//! a pause of the mix of S20 meets a new life of its record; a store that
-//! breaks a rule fails the check of that rule, and a check past its time
-//! limit fails while the run goes on.
+//! a pause of the mix of S20 meets a new life of its record; S8 and S20
+//! give every write a tag of its own; a store that breaks a rule fails the
+//! check of that rule, and a check past its time limit fails while the run
+//! goes on.
 
 const std = @import("std");
 const testing = std.testing;
@@ -398,6 +399,88 @@ test "S19 fails a store that keeps the plan of an update or the error of a finis
         defer report.deinit();
         try testing.expectEqualStrings(case[1], try failedWhy(report.outcome(.s19)));
     }
+}
+
+/// A MemoryStore that refuses a write whose tag another write had: a store
+/// that tells its changes by tag after a lost reply would take the one for
+/// the other. The same request sent again, as S20 sends a finish twice,
+/// keeps its tag.
+const LedgerHarness = struct {
+    memory: MemoryStore = undefined,
+    vtable: Store.VTable = undefined,
+    gpa: Allocator = undefined,
+    mutex: Io.Mutex = .init,
+    seen: std.AutoHashMapUnmanaged(Store.Tag, Write) = .empty,
+
+    /// A write: its kind and, for a finish, a hash of what makes it the
+    /// same request again.
+    const Write = struct { kind: enum { claim, update, finish }, same: u64 = 0 };
+
+    pub fn setUp(h: *LedgerHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        h.vtable = h.memory.store().vtable.*;
+        h.vtable.name = "tag-ledger";
+        h.vtable.claim = claim;
+        h.vtable.update = update;
+        h.vtable.finish = finish;
+        h.gpa = gpa;
+        h.seen = .empty;
+        return .{ .store = .{ .ptr = &h.memory, .vtable = &h.vtable }, .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *LedgerHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.seen.deinit(h.gpa);
+        h.memory.deinit();
+    }
+
+    fn note(ptr: *anyopaque, io: Io, tag: Store.Tag, write: Write, d: ?*scheduler.Diagnostics) scheduler.StoreError!void {
+        const h: *LedgerHarness = @fieldParentPtr("memory", memoryOf(ptr));
+        h.mutex.lockUncancelable(io);
+        defer h.mutex.unlock(io);
+        const entry = try h.seen.getOrPut(h.gpa, tag);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = write;
+            return;
+        }
+        if (write.kind == .finish and entry.value_ptr.kind == .finish and entry.value_ptr.same == write.same) return;
+        if (d) |x| x.set(null, "the tag of a {t} came again, on another write", .{write.kind});
+        return error.InvalidArgument;
+    }
+
+    fn claim(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.ClaimRequest, options: Store.CallOptions) scheduler.StoreError!Store.ClaimResult {
+        try note(ptr, io, request.tag, .{ .kind = .claim }, options.diagnostics);
+        return memoryOf(ptr).claim(io, ctx, request, options);
+    }
+
+    fn update(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) scheduler.StoreError!Store.UpdateResult {
+        try note(ptr, io, request.tag, .{ .kind = .update }, options.diagnostics);
+        return memoryOf(ptr).update(io, ctx, request, options);
+    }
+
+    fn finish(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.FinishRequest, options: Store.CallOptions) scheduler.StoreError!Store.FinishResult {
+        var same: std.hash.Wyhash = .init(0);
+        for ([_][]const u8{ request.ref.job, request.ref.key, &request.life, request.owner, std.mem.asBytes(&request.fence), std.mem.asBytes(&request.revision) }) |part| {
+            same.update(part);
+            same.update("/");
+        }
+        try note(ptr, io, request.tag, .{ .kind = .finish, .same = same.final() }, options.diagnostics);
+        return memoryOf(ptr).finish(io, ctx, request, options);
+    }
+};
+
+test "S8 and S20 give every write a tag of its own" {
+    // With the default limits, the mix of S20 may evict rows of the
+    // history, and MemoryStore warns about it.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+    var harness: LedgerHarness = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{ .s8, .s20 } });
+    defer report.deinit();
+    try expectNoFailures(&report);
+    try testing.expectEqual(@as(usize, 2), report.passedCount());
 }
 
 /// A get that sleeps 10 s first: S3, which starts with one, cannot end in
