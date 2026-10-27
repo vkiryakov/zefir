@@ -1,0 +1,55 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Zefir",
+  "description": "Zefir is a modular framework for building services in Zig 0.17, written against std.Io and run on the zio runtime: an HTTP server with OpenAPI 3.1/3.2 documents, typed RPC over NATS, a NATS client, an async MongoDB driver with BSON and a typed ODM, a Redis and Valkey client, JWT, typed configuration, structured logging, validation, deadlines, cancellation, W3C trace context and the zefir.App container.",
+  "folders": [
+    "src/core/examples",
+    "src/log/examples",
+    "src/confy/examples",
+    "src/validator/examples",
+    "src/rpc/examples",
+    "src/rpc-nats/examples",
+    "src/nats/examples",
+    "src/http/examples",
+    "src/mongo/examples",
+    "src/odm/examples",
+    "src/redis/examples",
+    "src/security/examples",
+    "src/openapi/examples",
+    "examples/rpc-custom-transport"
+  ],
+  "excludeFolders": [
+    "_autodocs"
+  ],
+  "excludeFiles": [
+    "SECURITY.md",
+    "CONTRIBUTING.md"
+  ],
+  "rules": [
+    "Zefir builds with Zig 0.17.0 only. Write Zig 0.17 code as the zefir guides show; code written for Zig 0.13 to 0.16 often does not compile with it.",
+    "Write main as pub fn main(init: std.process.Init) !void and take init.gpa, init.io, init.arena and init.environ_map from it, as every zefir guide does.",
+    "In build.zig: const zefir = b.dependency(\"zefir\", .{ .target = target, .optimize = optimize }); then add each module to .imports as .{ .name = \"confy\", .module = zefir.module(\"zefir-confy\") }.",
+    "Modules are published as zefir-<name>: zefir-core, -log, -confy, -validator, -rpc, -rpc-nats, -nats, -http, -mongo-bson, -mongo, -odm, -redis, -security, -openapi. Modules the README marks Planned or In progress do not exist.",
+    "Import a module by its name in .imports: @import(\"confy\"), @import(\"rpc-nats\"), @import(\"mongo-bson\"). Or add only zefir.module(\"zefir\") and use @import(\"zefir\").confy, .rpc_nats, .mongo_bson, .App.",
+    "zefir modules take io: std.Io and start no runtime. A service creates one zio runtime in main, zio.Runtime.init(init.gpa, .{ .executors = .auto }), and passes rt.io() to its clients, servers and zefir.App.",
+    "zio has no release for Zig 0.17 yet: depend on the exact zio commit that the Installation section of the zefir guides pins, never on a zio branch or another commit.",
+    "The logger and confy take init.io, which any thread may use; clients, servers and their tasks take the zio runtime's rt.io().",
+    "Send the std.log records of zefir's clients to zefir-log: pub const std_options: std.Options = .{ .logFn = log.stdLogFn }; in the root file, and logger.installStdLog() once the logger exists.",
+    "zefir-log takes a comptime message and a struct of named fields: logger.info(\"User created\", .{ .user_id = 42 }); logger.scoped(\"users\") adds a scope.",
+    "Read settings with confy.loadOrExit(init.arena.allocator(), &config, .{ .io = init.io, .environ = init.environ_map, .env_prefix = \"APP_\", .sources = &.{.osEnv()} }); type sensitive values confy.Secret.",
+    "zefir-nats, zefir-rpc-nats, zefir-mongo, zefir-odm and zefir-redis have no TLS yet: use them only on a network you trust. zefir-http has no TLS or HTTP/2: TLS ends at a proxy in front of it.",
+    "zefir-mongo supports a standalone mongod only (no replica set or sharded cluster), zefir-redis one standalone Redis or Valkey server (no Cluster or Sentinel), zefir-nats core NATS only (no JetStream).",
+    "A connected nats.Client, mongo or redis client must not move: keep it in a var of main or in a struct that stays put; never copy it or return it by value.",
+    "For zefir-mongo and zefir-redis clients, close(io) ends their work and deinit() then frees them.",
+    "odm: make every call of an odm.Registry, its sessions and collections on the io that Registry.init took (under zio, rt.io()); another std.Io, rt.blockingIo() included, panics in safe builds.",
+    "rpc: describe a service with rpc.Contract and implement it in a type with pub const rpc_handler = rpc.implement(Contract, .{}); a failure of the service arrives as result.outcome .failure, not as a Zig error.",
+    "http: a controller declares pub const http_routes = http.routes(.{ .prefix = ..., .methods = ... }) and a method per route taking *http.Context; the compiler checks the routes when it builds the server.",
+    "Validation rules live on the type: pub const field_rules = .{ .title = .{ v.trim, v.notBlank, v.maxLength(200) } } with const v = @import(\"validator\"); http's ctx.json(T) applies them and answers 422.",
+    "zefir.App gives every declared part what it asks for by type, starts them in order and stops them within one deadline; a dependency that no declared part provides is a compile error.",
+    "Deadlines and cancellation: pass core.Context by value and call try ctx.check(std.Io.Clock.awake.now(io)) before work; it fails with error.Cancelled or error.DeadlineExceeded.",
+    "security.jwt signs and verifies tokens of your own services only, with HS256, HS384, HS512, ES256, ES384 and EdDSA; it fetches no JWKS and verifies no RSA tokens (RS256, PS256).",
+    "zefir-openapi builds the OpenAPI 3.1 or 3.2 document of a zefir-http server from its routes, DTOs and errors when it compiles; texts go in typed pub const openapi declarations next to each type.",
+    "Test without servers through the helpers the guides use: http.testing.Backend, rpc.testing.MemoryTransport, odm.testing.FakeDriver, redis.testing.FakeServer, mongo.testing.FakeServer.",
+    "Until 1.0 any minor release may change the API: follow the docs of the zefir version that build.zig.zon pins (#dev, a vX.Y.Z tag or a commit)."
+  ]
+}
