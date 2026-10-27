@@ -122,51 +122,57 @@ rpc shows, and the handler is a file of the service.
 
 ```zig
 // build.zig of the users service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-// The users service of the guide of rpc, from the files of zefir.
-const users_api = b.createModule(.{
-    .root_source_file = zefir.path("src/rpc/examples/users_api.zig"),
-    .target = target,
-    .optimize = optimize,
-    .imports = &.{
-        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-        .{ .name = "validator", .module = zefir.module("zefir-validator") },
-    },
-});
-const users_service = b.createModule(.{
-    .root_source_file = zefir.path("src/rpc/examples/users_service.zig"),
-    .target = target,
-    .optimize = optimize,
-    .imports = &.{
-        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-        .{ .name = "core", .module = zefir.module("zefir-core") },
-        .{ .name = "users-api", .module = users_api },
-    },
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
 
-const exe = b.addExecutable(.{
-    .name = "user-service",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    // The users service of the guide of rpc, from the files of zefir.
+    const users_api = b.createModule(.{
+        .root_source_file = zefir.path("src/rpc/examples/users_api.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-            .{ .name = "rpc-nats", .module = zefir.module("zefir-rpc-nats") },
-            .{ .name = "nats", .module = zefir.module("zefir-nats") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
+            .{ .name = "validator", .module = zefir.module("zefir-validator") },
+        },
+    });
+    const users_service = b.createModule(.{
+        .root_source_file = zefir.path("src/rpc/examples/users_service.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
             .{ .name = "core", .module = zefir.module("zefir-core") },
             .{ .name = "users-api", .module = users_api },
-            .{ .name = "users-service", .module = users_service },
         },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "user-service",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+                .{ .name = "rpc-nats", .module = zefir.module("zefir-rpc-nats") },
+                .{ .name = "nats", .module = zefir.module("zefir-nats") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+                .{ .name = "users-api", .module = users_api },
+                .{ .name = "users-service", .module = users_service },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -611,7 +617,7 @@ authorization {
 }
 ```
 
-The passwords here are those of the tests: give every service its own
+The passwords here are samples: give every service its own
 secret, and keep it out of the configuration in plain text
 (`nats server passwd` makes a bcrypt hash of it).
 

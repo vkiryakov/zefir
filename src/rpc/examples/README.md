@@ -225,7 +225,8 @@ Then import the modules in `build.zig`. The examples also read their
 settings with confy, log with log, and take contexts from core. The package
 of a contract imports `rpc` and `validator` and gets them from the service
 that imports it: so the service and the contract use one zefir, and their
-types fit.
+types fit. The `test` step runs the tests of the service,
+`src/users_test.zig` of [Tests](#tests).
 
 ```zig
 // build.zig of the users service
@@ -241,6 +242,13 @@ pub fn build(b: *std.Build) void {
     const users_api = b.dependency("users_api", .{}).module("users-api");
     users_api.addImport("rpc", zefir.module("zefir-rpc"));
     users_api.addImport("validator", zefir.module("zefir-validator"));
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+        .{ .name = "core", .module = zefir.module("zefir-core") },
+        .{ .name = "confy", .module = zefir.module("zefir-confy") },
+        .{ .name = "log", .module = zefir.module("zefir-log") },
+        .{ .name = "users-api", .module = users_api },
+    };
 
     const exe = b.addExecutable(.{
         .name = "user-service",
@@ -248,17 +256,21 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-                .{ .name = "core", .module = zefir.module("zefir-core") },
-                .{ .name = "confy", .module = zefir.module("zefir-confy") },
-                .{ .name = "log", .module = zefir.module("zefir-log") },
-                .{ .name = "users-api", .module = users_api },
-            },
+            .imports = imports,
         }),
     });
     b.installArtifact(exe);
     b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/users_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
 }
 ```
 
@@ -1409,7 +1421,7 @@ Links stand on three levels:
 
 A call runs the server's links, then the handler's, then the method's,
 each level left to right, and unwinds them in reverse. The middleware of
-the users service:
+the users service, `middleware.zig`:
 
 ```zig
 //! The middleware of the users service: code around its calls. Each link
@@ -1612,7 +1624,8 @@ which the server runs in the task of every call, before the middleware.
 token, `.basic` with a user and a password, or `.custom` with a value of
 another scheme; `ctx.io()`, `ctx.operation()`, `ctx.allocator()`,
 `ctx.metadata()` and `ctx.route()` give the rest of the call. It returns the
-caller's identity, or null for an anonymous call:
+caller's identity, or null for an anonymous call. The authenticator of the
+users service, `TokenAuthenticator.zig`:
 
 ```zig
 //! The authenticator of the users service: who calls. It checks the bearer
@@ -1682,9 +1695,9 @@ An authenticator that verifies signed tokens instead of a table of them is
 `JwtAuthenticator` of [the zefir-security guide](../../security/examples/README.md),
 of the same shape.
 
-The whole service, with the authenticator, the store and the middleware on
-three levels; one client calls it as three callers, and the admin console
-takes its token from a provider:
+The whole service, `service.zig`, with the authenticator, the store and the
+middleware on three levels; one client calls it as three callers, and the
+admin console takes its token from a provider:
 
 ```zig
 //! The users service with authentication and middleware on all three
@@ -1909,7 +1922,8 @@ them, authentication, middleware, JSON, validation and the mapping of
 errors, on a memory transport of its own. Its `init` takes the parts of
 `rpc.Server.init` and the options but `.transport`, and `t.client(parts,
 options)` gives clients of it, with the parts and the options of
-`rpc.Client.init` but `.transport`. A test of a service needs no network:
+`rpc.Client.init` but `.transport`. A test of a service needs no network;
+the users service keeps its tests in `users_test.zig`:
 
 ```zig
 //! Tests of the users service without a network: `rpc.testing.Server`
