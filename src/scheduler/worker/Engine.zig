@@ -143,6 +143,8 @@ in_calls: std.atomic.Value(u32) = .init(0),
 /// Not 0 once a stop began: the poll claims nothing more, and a slot
 /// gives back what it takes from the queue without running it.
 stopping: std.atomic.Value(u32) = .init(0),
+/// The runs cancelled that have not ended yet.
+cancelling: std.atomic.Value(u32) = .init(0),
 /// The records claimed and not yet done with, queued or in a slot.
 busy: std.atomic.Value(u32) = .init(0),
 /// The tasks that still run, and one more for `start` while it spawns.
@@ -438,6 +440,16 @@ pub fn deinit(e: *Engine, io: Io) void {
     e.gpa.free(e.queue_buffer);
     e.gpa.free(e.instance);
     e.* = undefined;
+}
+
+/// The end of the grace of the stop, on the awake clock: `shutdown_grace`
+/// after it began; null while no stop began.
+pub fn graceEnd(e: *Engine, io: Io) ?i96 {
+    if (!e.isStopping()) return null;
+    e.mutex.lockUncancelable(io);
+    defer e.mutex.unlock(io);
+    const began = e.stop_began orelse return null;
+    return began.nanoseconds +| e.options.shutdown_grace.nanoseconds;
 }
 
 /// The entry of the job `name`.
