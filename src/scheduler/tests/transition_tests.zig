@@ -29,7 +29,7 @@ const tomorrow: Instant = .fromUtc(2026, 10, 25, 3, 30, 0, .h24);
 /// claim took over.
 const owner = "shop/00112233445566778899aabbccddeeff";
 const previous = "shop/ffeeddccbbaa99887766554433221100";
-const taken: Store.TookOver = .{ .owner = previous, .claimed_at = .fromUtc(2026, 10, 24, 3, 29, 0, .h24) };
+const taken: Store.TookOver = .{ .owner = previous, .claimed_at = .fromUtc(2026, 10, 24, 3, 29, 0, .h24), .attempt = 1, .scheduled_at = scheduled };
 
 const one_shot = "";
 const daily = "daily 03:30:00";

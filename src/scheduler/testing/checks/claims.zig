@@ -159,14 +159,20 @@ pub fn s9(r: *Runner) Error!void {
     const job = "s9-send";
     const lease = r.ms(1000);
     const first = try r.running(job, "k1", "s9-w1", lease);
+    // Moved by the client while it runs: a new scheduled_at with attempt 0,
+    // and the attempt and the moment the claim gave its run stay.
+    const moved = try r.updated(first, .{ .run_at = .{ .after = .fromSeconds(3600) } });
     // Taken over by another owner once the lease expired, then by the first
-    // owner again: attempt and fence grow, took_over names the owner before.
-    const second = try r.takeOver("s9-w2", first, lease);
+    // owner again: attempt and fence grow, took_over names the claim
+    // before: its owner, when it was made, the attempt and the moment it
+    // gave its run.
+    const second = try r.takeOver("s9-w2", moved, lease);
     const third = try r.takeOver("s9-w1", second.record, lease);
-    for ([_]Store.Claimed{ second, third }, [_]Record{ first, second.record }) |took, held| {
+    for ([_]Store.Claimed{ second, third }, [_]Record{ first, second.record }, [_]Record{ moved, second.record }) |took, claim, held| {
         const rec = took.record;
         const over = took.took_over orelse return r.fail("a claim of an expired lease gave no took_over", .{});
-        try r.expect(std.mem.eql(u8, over.owner, held.owner.?) and over.claimed_at.unix_ms == held.claimed_at.?.unix_ms, "took_over names {s} claimed at {f}, not {s} claimed at {f}", .{ over.owner, over.claimed_at, held.owner.?, held.claimed_at.? });
+        try r.expect(std.mem.eql(u8, over.owner, claim.owner.?) and over.claimed_at.unix_ms == claim.claimed_at.?.unix_ms, "took_over names {s} claimed at {f}, not {s} claimed at {f}", .{ over.owner, over.claimed_at, claim.owner.?, claim.claimed_at.? });
+        try r.expect(over.attempt == claim.attempt and over.scheduled_at.unix_ms == claim.scheduled_at.unix_ms, "took_over gave attempt {d} and scheduled_at {f}, not those the claim gave its run, {d} and {f}", .{ over.attempt, over.scheduled_at, claim.attempt, claim.scheduled_at });
         try r.expect(rec.attempt == held.attempt +% 1 and rec.fence == held.fence +% 1, "a takeover gave attempt {d} and fence {d}, not {d} and {d}", .{ rec.attempt, rec.fence, held.attempt +% 1, held.fence +% 1 });
         try r.expect(rec.claimed_at.?.unix_ms >= held.lease_until.?.unix_ms, "a takeover at {f} of a lease until {f}", .{ rec.claimed_at.?, held.lease_until.? });
         try r.expectSame(held, rec, &.{ "attempt", "fence", "owner", "claimed_at", "lease_until" }, "a takeover");

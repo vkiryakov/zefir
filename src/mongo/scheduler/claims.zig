@@ -141,12 +141,18 @@ fn claimFilter(a: std.mem.Allocator, branches: bson.RawDocument, hi: scheduler.I
 }
 
 /// `{$set: …}` of a claim: running, the owner, the tag, attempt and fence
-/// one more, the claim and its lease from `$$NOW`, and `prev`, the claim
-/// of an expired lease that it takes over.
+/// one more, the claim and its lease from `$$NOW`, `claim`, the attempt
+/// and the moment it gives the run, which a change of the client leaves,
+/// and `prev`, the claim of an expired lease that it takes over.
 fn claimStage(a: std.mem.Allocator, owner: []const u8, tag: []const u8, lease_ms: i64) bson.Builder.Error!bson.RawDocument {
     var b: bson.Builder = .init(a);
     try b.beginDocument("$set");
-    try b.put("prev", .{ .@"$cond" = .{ .{ .@"$eq" = .{ "$state", "running" } }, .{ .owner = "$owner", .claimed_at = "$claimed_at" }, "$$REMOVE" } });
+    try b.put("prev", .{ .@"$cond" = .{
+        .{ .@"$eq" = .{ "$state", "running" } },
+        .{ .owner = "$owner", .claimed_at = "$claimed_at", .attempt = "$claim.attempt", .scheduled_at = "$claim.scheduled_at" },
+        "$$REMOVE",
+    } });
+    try b.put("claim", .{ .attempt = .{ .@"$add" = .{ "$attempt", 1 } }, .scheduled_at = "$scheduled_at" });
     try b.putString("state", "running");
     try documents.putLiteral(&b, "owner", owner);
     try b.putString("tag", tag);
@@ -205,7 +211,7 @@ fn claimedOut(a: std.mem.Allocator, taken: []const documents.Read) std.mem.Alloc
     var out: documents.Out = .{ .bytes = try a.alloc(u8, size) };
     for (claimed, taken) |*c, read| c.* = .{
         .record = documents.copyRecord(&read.record, &out),
-        .took_over = if (read.took_over) |over| .{ .owner = out.text(over.owner), .claimed_at = over.claimed_at } else null,
+        .took_over = if (read.took_over) |over| .{ .owner = out.text(over.owner), .claimed_at = over.claimed_at, .attempt = over.attempt, .scheduled_at = over.scheduled_at } else null,
     };
     return claimed;
 }
@@ -346,7 +352,7 @@ fn ours(r: scheduler.Record, request: *const Store.FinishRequest) bool {
 /// then the fields of the claim and `pause_requested` go.
 fn transitionStages(a: std.mem.Allocator, request: *const Store.FinishRequest) bson.Builder.Error![2]bson.RawDocument {
     var unset: std.ArrayList([]const u8) = .empty;
-    try unset.appendSlice(a, &.{ "owner", "claimed_at", "lease_until", "prev", "pause_requested" });
+    try unset.appendSlice(a, &.{ "owner", "claimed_at", "lease_until", "claim", "prev", "pause_requested" });
     var b: bson.Builder = .init(a);
     try b.beginDocument("$set");
     try b.putString("tag", &documents.hex(request.tag));

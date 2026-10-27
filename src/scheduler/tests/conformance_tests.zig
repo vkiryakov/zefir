@@ -256,6 +256,45 @@ test "S17 fails a claim that gives a record twice after a lost reply" {
     try testing.expectEqualStrings("a claim with its reply lost gave s17-three/t1 twice", try failedWhy(report.outcome(.s17)));
 }
 
+/// A MemoryStore whose took_over gives the attempt and the moment of the
+/// record it took over, as a store that keeps neither with the claim
+/// would: after a move of the client, attempt 0 and the new moment.
+const RecordTookOverHarness = struct {
+    memory: MemoryStore = undefined,
+    vtable: Store.VTable = undefined,
+
+    pub fn setUp(h: *RecordTookOverHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        h.vtable = h.memory.store().vtable.*;
+        h.vtable.name = "record-took-over";
+        h.vtable.claim = claim;
+        return .{ .store = .{ .ptr = &h.memory, .vtable = &h.vtable }, .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *RecordTookOverHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+
+    fn claim(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.ClaimRequest, options: Store.CallOptions) scheduler.StoreError!Store.ClaimResult {
+        const result = try memoryOf(ptr).claim(io, ctx, request, options);
+        const claimed = try options.allocator.dupe(Store.Claimed, result.claimed);
+        for (claimed) |*c| if (c.took_over) |*over| {
+            over.attempt = c.record.attempt -% 1;
+            over.scheduled_at = c.record.scheduled_at;
+        };
+        return .{ .claimed = claimed, .next_in = result.next_in };
+    }
+};
+
+test "S9 fails a store whose took_over gives the attempt and the moment of the record" {
+    var harness: RecordTookOverHarness = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s9} });
+    defer report.deinit();
+    try testing.expectStringStartsWith(try failedWhy(report.outcome(.s9)), "took_over gave attempt 0 and scheduled_at ");
+}
+
 /// A MemoryStore whose history reads as if an `abandoned` row replaced the
 /// row of its claim whenever it came last, the owner's row too; a row of
 /// the owner that comes after it replaces it again.

@@ -6,7 +6,8 @@
 //! A record is `{_id: "<job>/<key>", job, key, tenant?, life: <32 hex>,
 //! plan, payload, trace?, state, scheduled_at, run_at?, wake_at?, attempt:
 //! Int32, fence: Int64, revision: Int64, pause_requested?, owner?, tag?,
-//! claimed_at?, lease_until?, prev?: {owner, claimed_at}, last?: {outcome,
+//! claimed_at?, lease_until?, claim?: {attempt, scheduled_at}, prev?:
+//! {owner, claimed_at, attempt, scheduled_at}, last?: {outcome,
 //! error?, attempt, started_at, finished_at}, unreadable_since?,
 //! created_at, updated_at, finished_at?, expires_at?}`, where `?` marks a
 //! field that is left out rather than null. A row is `{_id: "<life>/<fence>",
@@ -44,7 +45,7 @@ const RecordDoc = struct {
     tag: ?[]const u8 = null,
     claimed_at: ?bson.DateTime = null,
     lease_until: ?bson.DateTime = null,
-    prev: ?struct { owner: []const u8, claimed_at: bson.DateTime } = null,
+    prev: ?struct { owner: []const u8, claimed_at: bson.DateTime, attempt: u32, scheduled_at: bson.DateTime } = null,
     last: ?struct {
         outcome: scheduler.RunOutcome,
         @"error": ?[]const u8 = null,
@@ -148,7 +149,7 @@ pub fn readRecord(arena: Allocator, raw: bson.RawDocument, problem: *Problem) Re
             .unreadable_since = optionalInstant(doc.unreadable_since),
         },
         .tag = doc.tag,
-        .took_over = if (doc.prev) |prev| .{ .owner = prev.owner, .claimed_at = instant(prev.claimed_at) } else null,
+        .took_over = if (doc.prev) |prev| .{ .owner = prev.owner, .claimed_at = instant(prev.claimed_at), .attempt = prev.attempt, .scheduled_at = instant(prev.scheduled_at) } else null,
     };
 }
 

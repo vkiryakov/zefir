@@ -144,7 +144,8 @@ test "a document reads back as the record it was written from" {
         .tag = fixture.tag_hex ++ "-2",
         .claimed_at = bson.DateTime{ .milliseconds = 1_793_000_001_000 },
         .lease_until = bson.DateTime{ .milliseconds = 1_793_000_061_000 },
-        .prev = .{ .owner = "shop/0001", .claimed_at = bson.DateTime{ .milliseconds = 1_792_999_900_000 } },
+        .claim = .{ .attempt = @as(i32, 3), .scheduled_at = bson.DateTime{ .milliseconds = 1_793_000_000_000 } },
+        .prev = .{ .owner = "shop/0001", .claimed_at = bson.DateTime{ .milliseconds = 1_792_999_900_000 }, .attempt = @as(i32, 2), .scheduled_at = bson.DateTime{ .milliseconds = 1_792_999_890_000 } },
         .last = .{ .outcome = "failed", .@"error" = "PaymentDeclined", .attempt = 2, .started_at = bson.DateTime{ .milliseconds = 1_792_999_800_000 }, .finished_at = bson.DateTime{ .milliseconds = 1_792_999_850_000 } },
         .unreadable_since = bson.DateTime{ .milliseconds = 1_792_999_700_000 },
         .created_at = bson.DateTime{ .milliseconds = 1_792_000_000_000 },
@@ -185,6 +186,8 @@ test "a document reads back as the record it was written from" {
     const over = read.took_over orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("shop/0001", over.owner);
     try testing.expectEqual(@as(i64, 1_792_999_900_000), over.claimed_at.unix_ms);
+    try testing.expectEqual(@as(u32, 2), over.attempt);
+    try testing.expectEqual(@as(i64, 1_792_999_890_000), over.scheduled_at.unix_ms);
 
     // A copy in one allocation holds the same record.
     const copy = try documents.recordOut(testing.allocator, &r);

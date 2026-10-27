@@ -84,6 +84,10 @@ const Entry = struct {
     rec: Record,
     seq: u64,
     fixed: []u8,
+    /// The attempt and the moment that the claim of a running record gave
+    /// its run, for a claim that takes it over: a change of the client
+    /// moves `rec` and leaves these.
+    run: struct { attempt: u32, scheduled_at: Instant } = .{ .attempt = 0, .scheduled_at = Instant.invalid },
     by_ref: Refs.Node = unlinked(Refs),
     wake: Wakes.Node = unlinked(Wakes),
     finished: Times.Node = unlinked(Times),
@@ -501,6 +505,8 @@ pub fn claim(t: *Table, now: Instant, request: *const Store.ClaimRequest, a: All
         const took_over: ?Store.TookOver = if (e.rec.state == .running) .{
             .owner = out.text(e.rec.owner orelse ""),
             .claimed_at = e.rec.claimed_at orelse Instant.invalid,
+            .attempt = e.run.attempt,
+            .scheduled_at = e.run.scheduled_at,
         } else null;
         if (e.rec.owner) |old| t.gpa.free(old);
         e.rec.state = .running;
@@ -510,6 +516,7 @@ pub fn claim(t: *Table, now: Instant, request: *const Store.ClaimRequest, a: All
         e.rec.claimed_at = now;
         e.rec.lease_until = now.add(request.lease);
         e.rec.run_at = null;
+        e.run = .{ .attempt = e.rec.attempt, .scheduled_at = e.rec.scheduled_at };
         t.reindex(e);
         c.* = .{ .record = copyRecord(&e.rec, &out), .took_over = took_over };
     }

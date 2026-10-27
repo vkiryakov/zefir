@@ -510,7 +510,7 @@ test "claim never takes paused, finished, leased or future records" {
     try f.check();
 }
 
-test "an expired lease is taken over: attempt and fence grow, took_over names the owner and its claimed_at" {
+test "an expired lease is taken over: attempt and fence grow, took_over names the claim, also after a move" {
     var f: Fixture = .init(.{});
     defer f.deinit();
     const r = try f.running("a", "k", "w1", .fromMilliseconds(30));
@@ -524,6 +524,28 @@ test "an expired lease is taken over: attempt and fence grow, took_over names th
     const took_over = c.took_over orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("w1", took_over.owner);
     try testing.expectEqual(r.claimed_at, took_over.claimed_at);
+    try testing.expectEqual(@as(u32, 1), took_over.attempt);
+    try testing.expectEqual(r.scheduled_at, took_over.scheduled_at);
+
+    // Moved by the client during the run of w2: the record shows attempt 0
+    // and the new moment; the claim of w2 keeps its own, 2 and the moment
+    // of the run, for the claim that takes it over.
+    const moved = try f.update("a", "k", c.record.revision, .running, .{ .run_at = .{ .after = .fromSeconds(3600) } });
+    if (moved != .updated) return error.TestUnexpectedResult;
+    const now = try f.get("a", "k");
+    try testing.expectEqual(@as(u32, 0), now.attempt);
+    // w2 shortens its lease, and w3 takes it over once it passed.
+    const renew: Store.RenewRequest = .{ .ref = .{ .job = "a", .key = "k" }, .life = now.life, .owner = "w2", .fence = 2, .lease = .fromMilliseconds(30) };
+    try testing.expectEqual(Store.RenewResult.renewed, try f.store().renew(io, .root, &renew, f.options()));
+    try f.waitPast((try f.get("a", "k")).lease_until orelse return error.TestUnexpectedResult);
+    const took = try f.claim("w3", &.{}, &.{"a"}, 1, .fromSeconds(60));
+    try testing.expectEqual(@as(usize, 1), took.claimed.len);
+    try testing.expectEqual(@as(u32, 1), took.claimed[0].record.attempt);
+    try testing.expectEqual(now.scheduled_at, took.claimed[0].record.scheduled_at);
+    const over = took.claimed[0].took_over orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("w2", over.owner);
+    try testing.expectEqual(@as(u32, 2), over.attempt);
+    try testing.expectEqual(r.scheduled_at, over.scheduled_at);
     try f.check();
 }
 

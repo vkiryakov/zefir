@@ -35,7 +35,7 @@ fn runningDoc(a: std.mem.Allocator, key: []const u8, tag: []const u8, over: bool
     try b.putString("tag", tag);
     try b.putDateTime("claimed_at", .{ .milliseconds = at_ms + 1000 });
     try b.putDateTime("lease_until", .{ .milliseconds = at_ms + 61_000 });
-    if (over) try b.put("prev", .{ .owner = "w0", .claimed_at = bson.DateTime{ .milliseconds = at_ms - 60_000 } });
+    if (over) try b.put("prev", .{ .owner = "w0", .claimed_at = bson.DateTime{ .milliseconds = at_ms - 60_000 }, .attempt = @as(i32, 1), .scheduled_at = bson.DateTime{ .milliseconds = at_ms - 61_000 } });
     try b.putDateTime("created_at", .{ .milliseconds = at_ms });
     try b.putDateTime("updated_at", .{ .milliseconds = at_ms });
     return (try b.finish()).raw();
@@ -59,6 +59,8 @@ test "claim takes records one findAndModify at a time, each with its own tag" {
     const over = result.claimed[1].took_over orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("w0", over.owner);
     try testing.expectEqual(@as(i64, at_ms - 60_000), over.claimed_at.unix_ms);
+    try testing.expectEqual(@as(u32, 1), over.attempt);
+    try testing.expectEqual(@as(i64, at_ms - 61_000), over.scheduled_at.unix_ms);
     // max reached: no next_in, no aggregation.
     try testing.expectEqual(@as(?std.Io.Duration, null), result.next_in);
     try f.expectCommands(&.{ "findAndModify", "findAndModify" });
@@ -78,7 +80,8 @@ test "claim takes records one findAndModify at a time, each with its own tag" {
         try testing.expect(new == .boolean and new.boolean);
         const lease = .{ .@"$add" = .{ "$$NOW", @as(i64, 60_000) } };
         const expected = .{ .@"$set" = .{
-            .prev = .{ .@"$cond" = .{ .{ .@"$eq" = .{ "$state", "running" } }, .{ .owner = "$owner", .claimed_at = "$claimed_at" }, "$$REMOVE" } },
+            .prev = .{ .@"$cond" = .{ .{ .@"$eq" = .{ "$state", "running" } }, .{ .owner = "$owner", .claimed_at = "$claimed_at", .attempt = "$claim.attempt", .scheduled_at = "$claim.scheduled_at" }, "$$REMOVE" } },
+            .claim = .{ .attempt = .{ .@"$add" = .{ "$attempt", 1 } }, .scheduled_at = "$scheduled_at" },
             .state = "running",
             .owner = .{ .@"$literal" = "w1" },
             .tag = "",
@@ -285,7 +288,7 @@ test "finish writes the rows first, then the transition on the whole claim" {
             .attempt = 1,
             .wake_at = later,
         } },
-        .@"1" = .{ .@"$unset" = .{ "owner", "claimed_at", "lease_until", "prev", "pause_requested", "unreadable_since" } },
+        .@"1" = .{ .@"$unset" = .{ "owner", "claimed_at", "lease_until", "claim", "prev", "pause_requested", "unreadable_since" } },
     }), try fixture.docAt(transition, "u"));
 
     // Not applied: the same claim at another revision is changed; done
@@ -296,7 +299,7 @@ test "finish writes the rows first, then the transition on the whole claim" {
     }
     try fixture.expectDoc(bson.literal(.{
         .@"0" = .{ .@"$set" = .{ .tag = fixture.tag_hex, .state = "failed", .finished_at = "$$NOW" } },
-        .@"1" = .{ .@"$unset" = .{ "owner", "claimed_at", "lease_until", "prev", "pause_requested", "expires_at", "run_at", "unreadable_since", "wake_at" } },
+        .@"1" = .{ .@"$unset" = .{ "owner", "claimed_at", "lease_until", "claim", "prev", "pause_requested", "expires_at", "run_at", "unreadable_since", "wake_at" } },
     }), try fixture.docAt(try fixture.item(try f.entry(3), "updates"), "u"));
     // delete: a deleteOne on the same condition; nothing deleted and the
     // record is no longer this claim's: lost.

@@ -3091,7 +3091,11 @@ error: scheduler: Store.init: BadStore has no method claim; expected pub fn clai
 A record may be claimed when it is `pending` and its `run_at` has come, or
 `running` and its `lease_until` has passed, by the store's clock; a store
 keeps that moment for each record and sets it with every change of its
-state, as MongoDB's field `wake_at` does. A record whose key is `""`, the
+state, as MongoDB's field `wake_at` does. A claim that takes over a
+running record gives the claim before in `took_over`: its owner, when it
+was made, and the attempt and the moment it gave its run, which the store
+keeps with that claim, since a change of the client during the run moves
+them in the record. A record whose key is `""`, the
 record of a declaration, goes only to a claim that names its job in
 `any_key`; one that names it in `keyed_only` takes its records with keys
 only.

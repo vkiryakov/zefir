@@ -34,7 +34,9 @@
 //! of a declared job (key "") goes only to an instance that declares it.
 //! `run_at` of a running, succeeded or failed record is null; a change of
 //! the client to a running record (`Patch.run_at`) shows as a new
-//! `scheduled_at` with `attempt` 0. A claim is known by `(life, owner,
+//! `scheduled_at` with `attempt` 0, while the store keeps the attempt and
+//! the moment that the claim gave its run, for a claim that may take it
+//! over (`TookOver`). A claim is known by `(life, owner,
 //! fence)`, which `renew` and `finish` carry: the run of a removed record
 //! never renews or finishes a new record with the same key, even of the
 //! same owner and fence. A change of the client holds on `(life, revision,
@@ -429,12 +431,16 @@ pub const ClaimResult = struct {
 
 pub const Claimed = struct {
     record: Record,
-    /// The record was running with an expired lease: whose it was.
+    /// The record was running with an expired lease: the claim it took
+    /// over.
     took_over: ?TookOver,
 };
 
-/// The claim that a claim took over: its owner and when it was made.
-pub const TookOver = struct { owner: []const u8, claimed_at: Instant };
+/// The claim that a claim took over: its owner, when it was made, and the
+/// attempt and the moment (`scheduled_at`) that it gave its run, as the
+/// claim returned them: a change of the client during that run moves the
+/// record and leaves these.
+pub const TookOver = struct { owner: []const u8, claimed_at: Instant, attempt: u32, scheduled_at: Instant };
 
 pub const RenewRequest = struct { ref: Ref, life: Life, owner: []const u8, fence: u64, lease: Duration };
 
