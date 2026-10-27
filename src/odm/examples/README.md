@@ -1,4 +1,4 @@
-# odm
+# zefir-odm: a typed ODM for MongoDB in Zig
 
 > [!WARNING]
 > **No TLS yet: use it only in a network you trust.** odm reaches
@@ -142,15 +142,15 @@ while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user
 - [Tests without MongoDB](#tests-without-mongodb)
 - [For authors of drivers](#for-authors-of-drivers)
 
-Programs that `zig build e2e` in `tests/odm` builds and runs against
-mongod, checking what they print against this guide:
-[quick start](quick_start.zig) · [tenants](tenants.zig) ·
-[rotation](rotation.zig) · [errors](errors.zig).
-Programs that `zig build test-odm` runs without a server:
-[models](models.zig) · [queries](queries.zig) · [under App](app.zig).
-Tests that it runs:
-[the tests of an application](users_test.zig) ·
-[the conformance suite](conformance_test.zig).
+Every example of this guide is shown whole, and every program with what
+it printed. Programs against mongod:
+[quick start](#quick-start) · [tenants](#tenants) ·
+[rotation](#rotating-credentials) · [errors](#errors-and-what-is-safe-to-retry).
+Programs without a server:
+[models](#models) · [queries](#reading-and-changing-documents) · [under App](#under-zefirapp).
+Tests:
+[the tests of an application](#tests-without-mongodb) ·
+[the conformance suite](#for-authors-of-drivers).
 
 ## What an ODM is
 
@@ -499,8 +499,7 @@ the text form of BSON that MongoDB's tools show:
 //! and `field_rules`, the rules of zefir-validator. The program hands odm
 //! `odm.testing.FakeDriver`, a driver that runs no query and keeps a
 //! journal of what odm sent it, and prints those documents as Extended
-//! JSON, the text MongoDB's tools show them in. `zig build test-odm` runs
-//! it.
+//! JSON, the text MongoDB's tools show them in.
 
 const std = @import("std");
 const core = @import("core");
@@ -862,7 +861,7 @@ each kind, and prints what odm sent for it:
 //! the raw paths, on the users of models.zig. odm writes each typed call as
 //! BSON and hands it to the driver; here the driver is
 //! `odm.testing.FakeDriver`, and the program prints what it got, as
-//! Extended JSON. `zig build test-odm` runs it.
+//! Extended JSON.
 
 const std = @import("std");
 const core = @import("core");
@@ -2442,7 +2441,7 @@ the service that binds its tenants in its `start`:
 //! the order of their dependencies, starts the tenants, and at the stop
 //! shuts the registry down within its deadline, then frees it. The driver
 //! is `odm.testing.FakeDriver`, which runs no query; a service declares
-//! `mongo.OdmDriver` in its place. `zig build test-odm` runs it.
+//! `mongo.OdmDriver` in its place.
 
 const std = @import("std");
 const core = @import("core");
@@ -2943,7 +2942,6 @@ test "rename says whether the user was there" {
   with a panic.
 - The first test checks every model of the shop with `odm.assertModel`,
   as the compiler checks only the code that is used.
-- `zig build test-odm` runs these tests, in the build of zefir.
 
 ## For authors of drivers
 
@@ -3121,5 +3119,5 @@ test "the driver is zefir compatible" {
   runs in a task of its own, within 60 s; `Options.time_scale` stretches
   the times for a slow machine, and `.data = false` leaves out group D.
 
-`mongo.OdmDriver` passes both groups against mongod in `tests/odm`, and
-`FakeDriver` group C in the build of zefir, in this test.
+`mongo.OdmDriver`, the reference driver, passes both groups against
+mongod; `FakeDriver` passes group C, in the test above.

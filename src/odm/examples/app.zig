@@ -4,7 +4,7 @@
 //! the order of their dependencies, starts the tenants, and at the stop
 //! shuts the registry down within its deadline, then frees it. The driver
 //! is `odm.testing.FakeDriver`, which runs no query; a service declares
-//! `mongo.OdmDriver` in its place. `zig build test-odm` runs it.
+//! `mongo.OdmDriver` in its place.
 
 const std = @import("std");
 const core = @import("core");
