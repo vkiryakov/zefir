@@ -1,15 +1,5 @@
 # zefir-odm: a typed ODM for MongoDB in Zig
 
-> [!WARNING]
-> **No TLS yet: use it only in a network you trust.** odm reaches
-> MongoDB through zefir-mongo, which speaks plain TCP. SCRAM, the way it
-> logs in, never sends a password, but the commands and the documents of
-> every tenant travel unencrypted. Keep mongod and the service in a closed
-> network, the servers of tenants with servers of their own too, and give
-> each connection a user of its own with a long random password; across a
-> network you do not trust, use a tunnel: WireGuard, SSH or a service
-> mesh.
-
 **A typed ODM for MongoDB, for Zig services with many tenants.** MongoDB
 keeps *documents*, records like JSON objects, in *collections*. An ODM, an
 object-document mapper, maps them to the types of a program. With
@@ -23,6 +13,16 @@ its own, tenants come and go while the service runs, and a connection
 moves to a second user without a failed request. It is written against
 `std.Io` only, runs on [zio](https://github.com/lalinsky/zio) in
 production, and reaches MongoDB through zefir-mongo.
+
+> [!WARNING]
+> **No TLS yet: use it only in a network you trust.** odm reaches
+> MongoDB through zefir-mongo, which speaks plain TCP. SCRAM, the way it
+> logs in, never sends a password, but the commands and the documents of
+> every tenant travel unencrypted. Keep mongod and the service in a closed
+> network, the servers of tenants with servers of their own too, and give
+> each connection a user of its own with a long random password; across a
+> network you do not trust, use a tunnel: WireGuard, SSH or a service
+> mesh.
 
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
@@ -61,7 +61,7 @@ production, and reaches MongoDB through zefir-mongo.
 >   it.
 > - **Histograms of durations, an exporter of metrics, a span per
 >   operation**: `stats()` takes snapshots.
-> - **A driver of another author as a package of its own, built by CI**:
+> - **A driver of another author as a package of its own**:
 >   `FakeDriver` is the second implementation of the contract.
 > - **`upsertOne` with conditions built at run time**, an `odm.Filter` or
 >   an `odm.Update`, or with `in`, `nin` or `all` in its filter: use
@@ -221,29 +221,35 @@ records and core for deadlines:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "odm", .module = zefir.module("zefir-odm") },
-            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
-            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
-            .{ .name = "validator", .module = zefir.module("zefir-validator") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "odm", .module = zefir.module("zefir-odm") },
+                .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+                .{ .name = "validator", .module = zefir.module("zefir-validator") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -252,7 +258,7 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 > odm imports zefir-core, zefir-validator and zefir-mongo-bson, and no
 > driver: zefir-mongo imports odm, to implement its contract. A package
 > that only declares models, shared by several services, needs odm and
-> mongo-bson alone.
+> mongo-bson, and validator for `field_rules`.
 
 You need a mongod to talk to. With Docker:
 
@@ -262,9 +268,10 @@ docker run --rm -p 27017:27017 mongo:9.0.4
 
 ## Quick start
 
-The customers of the shop of one tenant, acme. The program connects,
-makes the e-mail of a customer unique, signs four customers up, finds the
-adults, gives one a birthday, lets one go, and counts the adults again:
+The customers of the shop of one tenant, acme. The program,
+`quick_start.zig`, connects, makes the e-mail of a customer unique, signs
+four customers up, finds the adults, gives one a birthday, lets one go,
+and counts the adults again:
 
 ```zig
 //! The quick start of the guide: the customers of a shop, for the tenant
@@ -738,12 +745,14 @@ and for each new tenant, whose database starts empty, see
 ### Optionals and null
 
 MongoDB has two ways to say "no value": a field that is null, and no
-field at all. odm keeps one of them: **it never writes a null.**
+field at all. odm keeps one of them: **it never writes a null for an
+optional.**
 
 - **Writing.** An optional that is null stays out of the document, at any
   depth: Ann has no `nickname` and no `profile`, and Bob's `profile` has
   no `site`. A null item of a list, `[]const ?E`, stays: it is an item,
-  not a field.
+  not a field. A `bson.Null` field, or a `bson.Value` that holds null, is
+  written as null: it is a value, not an optional.
 - **Reading.** A field that is not there reads as its default: the `age`
   of Cy is 0. An optional that is not there reads as null, and so does a
   null that another program wrote, as Cy's `nickname`. A required field
@@ -782,7 +791,7 @@ field at all. odm keeps one of them: **it never writes a null.**
 | a struct | document |
 | `[]const T`, `[N]T` | array |
 | `?T` | the value, or no field |
-| `bson.ObjectId`, `bson.DateTime`, `bson.Timestamp`, `bson.Binary`, `bson.Decimal128`, `bson.Regex`, `bson.RawDocument`, `bson.Value` | their own types |
+| `bson.ObjectId`, `bson.DateTime`, `bson.Timestamp`, `bson.Binary`, `bson.Decimal128`, `bson.Regex`, `bson.Null`, `bson.MinKey`, `bson.MaxKey`, `bson.RawDocument`, `bson.Value` | their own types |
 
 The compiler refuses the rest: `u64` and `usize`, as the integers of BSON
 are signed; `f32`, which a double would round; unions, pointers, `??T`,
@@ -1352,7 +1361,7 @@ fn search(users: odm.Collection(User), io: std.Io, ctx: core.Context, arena: std
   in the query, and `execute` returns it: the chain needs no `try`
   between its steps.
 - The query is sent only by `execute`, `executeAs`, `first` and `count`,
-  as the line `search` shows: two conditions of the four, in an `$and`.
+  as the line `search` shows: two conditions of the three, in an `$and`.
 
 Changes work the same way: `odm.Update(User).init(arena).with(…)` adds
 the operators of a literal, and two `with` of `set` make one `$set`. On
@@ -2428,9 +2437,9 @@ its `init` makes no call to the network and starts no task,
 guides of the modules write App `core.App`: it is `zefir.App` of the
 umbrella module.
 
-The module below declares what App builds: the driver, the registry,
-which the factory `Odm.registry` makes on it, and `Tenants`, the bean of
-the service that binds its tenants in its `start`:
+The module below, `app.zig`, declares what App builds: the driver, the
+registry, which the factory `Odm.registry` makes on it, and `Tenants`,
+the bean of the service that binds its tenants in its `start`:
 
 ```zig
 //! The registry under zefir.App, without a server: a module declares the
@@ -2658,7 +2667,7 @@ to the deadline a call is `DeadlineExceeded`, with a canceled token
 `Closed`.
 
 The users of the shop, as an application keeps them, on the `User` of
-[models.zig](#models):
+[models.zig](#models), in `Users.zig`:
 
 ```zig
 //! The users of a shop, as the application keeps them: a sign-up, which a
@@ -2725,7 +2734,7 @@ pub fn rename(users: Users, io: std.Io, ctx: core.Context, id: bson.ObjectId, na
 }
 ```
 
-And their tests:
+And their tests, `users_test.zig`:
 
 ```zig
 //! Tests of the users of the shop without MongoDB. Each runs `Users` on a
@@ -3027,7 +3036,8 @@ that passes it is "zefir compatible":
 
 Group C checks the contract without data; group D needs a server that runs
 the queries. The author of a driver runs the suite in the tests of the
-driver's package, through a harness, as here for `FakeDriver`:
+driver's package, through a harness, as `conformance_test.zig` does here
+for `FakeDriver`:
 
 ```zig
 //! A driver is "zefir compatible" when it passes the conformance suite of
