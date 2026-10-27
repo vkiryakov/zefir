@@ -131,6 +131,7 @@ test {
     _ = @import("Relay.zig");
     _ = @import("checks.zig");
     _ = @import("crud.zig");
+    _ = @import("write_concern.zig");
     _ = @import("connect.zig");
     _ = @import("auth.zig");
     _ = @import("pool.zig");

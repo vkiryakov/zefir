@@ -10,7 +10,7 @@
 pub const programs = [_][]const u8{"documents"};
 
 /// The programs that need mongod: tests/mongo runs them.
-pub const server_programs = [_][]const u8{ "quick_start", "connect", "orders", "reports", "errors", "app" };
+pub const server_programs = [_][]const u8{ "quick_start", "connect", "orders", "reports", "errors", "durable", "app" };
 
 /// The tests of the guide, against `mongo.testing.FakeServer`:
 /// `zig build test-mongo` runs them.

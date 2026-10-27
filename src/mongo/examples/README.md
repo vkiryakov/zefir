@@ -54,8 +54,8 @@ production.
 > - **`close` on Windows.** Under zio on Windows, `close` cannot cut a read
 >   that already waits for the server: such a call ends with the server's
 >   reply or at its own deadline.
-> - **A part of the CRUD API.** No `bulkWrite` and no `watch`; no read or
->   write concerns in the options of operations; no `createCollection` or
+> - **A part of the CRUD API.** No `bulkWrite` and no `watch`; no read
+>   concern in the options of operations; no `createCollection` or
 >   `renameCollection`, which `Database.runCommand` does, see
 >   [Reports, indexes and collections](#reports-indexes-and-collections).
 
@@ -115,6 +115,7 @@ while (try adults.next(io, op)) |doc| {
 - [Databases and collections](#databases-and-collections)
 - [Documents](#documents)
 - [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
+- [Durable writes](#durable-writes)
 - [Deadlines and cancellation](#deadlines-and-cancellation)
 - [The pool, closing and statistics](#the-pool-closing-and-statistics)
 - [Under zefir.App](#under-zefirapp)
@@ -126,7 +127,7 @@ Programs that `zig build e2e` in `tests/mongo` builds and runs against
 mongod, checking what they print against this guide:
 [quick start](quick_start.zig) · [connecting](connect.zig) ·
 [orders](orders.zig) · [reports](reports.zig) · [errors](errors.zig) ·
-[under zefir.App](app.zig).
+[durable writes](durable.zig) · [under zefir.App](app.zig).
 Examples that `zig build test-mongo` runs without a server:
 [documents](documents.zig) · [a write cut short](import_test.zig) ·
 [deadlines](deadlines_test.zig) · [tests of an application](users_test.zig).
@@ -1138,11 +1139,12 @@ the details of the latest, and `cursor.failureReply()` the reply of a
 All but the options of `runCommand` and `runCursorCommand`, whose command
 holds its own, have `comment`: a value that the server writes into its
 logs and its profiler next to the command. The writes have `partial` too,
-see [A write cut short](#a-write-cut-short). An option at its default is
-not sent, and none of them is `maxTimeMS`: the deadline comes from the
-context. A collection name is checked before every operation: an empty
-one, one with `$` or NUL, or one that is not UTF-8, is `InvalidArgument`,
-and nothing is sent.
+see [A write cut short](#a-write-cut-short); they and the `findOneAnd*`
+have `write_concern`, see [Durable writes](#durable-writes). An option at
+its default is not sent, and none of them is `maxTimeMS`: the deadline
+comes from the context. A collection name is checked before every
+operation: an empty one, one with `$` or NUL, or one that is not UTF-8,
+is `InvalidArgument`, and nothing is sent.
 
 ## Documents
 
@@ -1655,6 +1657,157 @@ test "an import cut at its third batch is IncompleteWrite, and partial says how 
     for (partial.inserted_ids) |id| try testing.expect(id == .object_id);
 }
 ```
+
+## Durable writes
+
+When mongod answers a write, the write is in its memory. To disk it goes
+through the *journal*, the log that mongod replays after a crash, and a
+standalone mongod writes its journal to disk every 100 ms. If mongod
+stops hard between two of those writes, as when it crashes, is killed or
+its machine loses power, the changes since the last one are lost, though
+their calls succeeded. For a page view that is fine; for an order that a
+customer has paid, it is not.
+
+`write_concern`, a `mongo.WriteConcern` in the options of a write, says
+when the server may answer. `insertOne`, `insertMany`, `updateOne`,
+`updateMany`, `replaceOne`, `deleteOne`, `deleteMany` and the three
+`findOneAnd*` take it:
+
+| `write_concern` | The command carries | mongod answers once the write is |
+|---|---|---|
+| null, the default | nothing | in its memory |
+| `.{ .journal = true }` | `writeConcern: {w: 1, j: true}` | in its journal on disk |
+| `.{ .w = .majority }` | `writeConcern: {w: "majority"}` | on a majority of the servers: a standalone mongod is a majority of one, and answers once the write is in its journal |
+| `.{ .w = .majority, .journal = true }` | `writeConcern: {w: "majority", j: true}` | in the journals of a majority of the servers |
+
+`durable.zig` takes an order and its payment, so that a crash of mongod
+loses neither:
+
+```zig
+//! Durable writes: the shop takes an order and the payment for it, and a
+//! crash of mongod must lose neither. The order goes in with `journal`:
+//! mongod answers once it is in its journal on disk. The payment asks for
+//! a majority of the servers too; a standalone mongod is a majority of
+//! one. Each run starts from an empty collection.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
+//!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
+//!                        it names one
+//!
+//! In tests/mongo, `zig build example-durable` runs it against the servers
+//! of the repository's docker-compose.yml.
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const mongo = @import("mongo");
+const zio = @import("zio");
+const bson = @import("mongo-bson");
+
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    mongo: struct {
+        uri: []const u8 = "mongodb://127.0.0.1:27017",
+        password: ?confy.Secret = null,
+    } = .{},
+};
+
+const Status = enum { placed, paid };
+
+/// An order, under the number the shop gives it.
+const Order = struct {
+    _id: i32,
+    customer: []const u8,
+    amount: i32,
+    status: Status = .placed,
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+
+    var client: mongo.Client = try .init(init.gpa, io, .{
+        .uri = config.mongo.uri,
+        .password = if (config.mongo.password) |password| password.expose() else null,
+    });
+    defer client.deinit();
+    const ctx = core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromSeconds(10)));
+    try client.connect(io, ctx, null);
+    defer client.close(io);
+    var ids: bson.ObjectId.Generator = .init(io);
+    const db: mongo.Database = .init(&client, "shop", &ids);
+
+    var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const op: mongo.OperationContext = .of(ctx);
+    const orders = db.collection("orders");
+    try orders.drop(io, op, .{ .allocator = arena });
+
+    // The order: mongod answers once it is in the journal on disk, so a
+    // crash after this call cannot lose it.
+    const placed = try orders.insertOne(io, op, Order{ ._id = 1, .customer = "ann", .amount = 18 }, .{
+        .allocator = arena,
+        .write_concern = .{ .journal = true },
+    });
+    app.info("Order placed", .{ .number = try placed.inserted_id.asI64() });
+
+    // The payment: a placed order becomes paid, acknowledged by a majority
+    // of the servers, each with it in its journal. The filter takes only a
+    // placed order, so a payment sent again changes nothing.
+    const paid = try orders.findOneAndUpdate(io, op, .{ ._id = 1, .status = .placed }, .{ .@"$set" = .{ .status = .paid } }, .{
+        .allocator = arena,
+        .return_document = .after,
+        .write_concern = .{ .w = .majority, .journal = true },
+    }) orelse return error.OrderNotFound;
+    const order = try bson.decode(Order, arena, paid.raw(), .{});
+    app.info("Order paid", .{ .number = order._id, .customer = order.customer, .amount = order.amount, .status = order.status });
+}
+```
+
+```text
+$ zig build run
+2026-10-27T09:17:45.264Z INFO  [app] Order placed number=1
+2026-10-27T09:17:45.265Z INFO  [app] Order paid number=1 customer=ann amount=18 status=paid
+```
+
+- **What `journal` costs.** mongod writes its journal to disk at once,
+  rather than at its next 100 ms, and answers after that: the call waits
+  for a write to the disk, which a call without it does not. Writes that
+  wait at the same time share one.
+- **`.majority`** on one standalone mongod waits for its journal, as
+  `journal` does. It is for data that must outlive the loss of a whole
+  server: a replica set, which the client does not support yet, keeps
+  such a write on most of its members before the call returns.
+- **A durable write may still have run.** When a call fails with
+  `ConnectionLost` or `Timeout`, the server may have the write, in its
+  journal too, see [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry).
+  The filter of the payment takes only a placed order, so sending it
+  again changes nothing once the first one went through.
+- **A write concern that fails** is `WriteFailed`, though the write ran:
+  the server applied it, but could not acknowledge it as asked. The
+  diagnostics hold its code and message; MaxTimeMSExpired (50) there is
+  `Timeout`.
+- **No `wtimeout` and no `w: 0`.** A standalone mongod never applies a
+  `wtimeout`, and the client waits for the reply of every write. The
+  connection string takes no write concern: `w`, `journal` and
+  `wTimeoutMS` there are `Unsupported`, and point to `write_concern`.
 
 ## Deadlines and cancellation
 
