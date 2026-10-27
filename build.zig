@@ -5,6 +5,7 @@ const app_guide = @import("src/core/examples/app/cases.zig");
 const core_guide = @import("src/core/examples/cases.zig");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
+const log_guide = @import("src/log/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
 const jwt_cases = @import("src/security/jwt/tests/cases.zig");
@@ -357,25 +358,10 @@ pub fn build(b: *std.Build) void {
     // "core in a minute" of the repository's README.md.
     addCoreGuide(b, test_core, core, target, optimize, tsan);
 
-    // log examples: `zig build test` builds and runs them, like the core ones.
-    for ([_][]const u8{ "service", "config", "alerts" }) |name| {
-        const example = b.addExecutable(.{
-            .name = b.fmt("log-{s}", .{name}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(b.fmt("src/log/examples/{s}.zig", .{name})),
-                .target = target,
-                .optimize = optimize,
-                .sanitize_thread = tsan,
-                .imports = &.{
-                    .{ .name = "core", .module = core },
-                    .{ .name = "log", .module = log },
-                },
-            }),
-        });
-        const run = addRun(b, example, tsan);
-        run.expectExitCode(0);
-        test_log.dependOn(&run.step);
-    }
+    // The examples of the zefir-log guide: its programs and their runs,
+    // the program that posts to Slack, which is only built, and the calls
+    // that must not compile.
+    addLogGuide(b, test_log, .{ .core = core, .confy = confy, .log = log }, target, optimize, tsan);
 
     // log panic programs: `flush`, `shutdown` or `unsubscribe` called from a
     // handler or the writer thread panics in safe builds. Each program must
@@ -2629,4 +2615,100 @@ fn addJwtCompileChecks(
         });
         test_step.dependOn(&t.step);
     }
+}
+
+/// The modules that the examples of the log guide import.
+const LogGuideModules = struct {
+    core: *std.Build.Module,
+    confy: *std.Build.Module,
+    log: *std.Build.Module,
+};
+
+/// The examples of src/log/examples/README.md, the guide of zefir-log, as
+/// cases.zig there lists them. Every program runs through example_main.zig,
+/// which exits with code 3 on a panic instead of aborting and with code 4
+/// past its time limit, and must exit with 0; what it prints on stdout and
+/// on stderr goes to readme_test.zig. The program that posts to Slack is
+/// only built, and each call that must not compile has to fail with the
+/// error the guide shows. readme_test.zig then checks that README.md shows
+/// every file as it is, every run as it printed and those calls with their
+/// errors, and that the README.md of the repository shows "log in a
+/// minute" and its run.
+fn addLogGuide(
+    b: *std.Build,
+    test_log: *std.Build.Step,
+    m: LogGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/log/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "log", .module = m.log },
+    };
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "log in a minute" of the repository's README.md is a program of the
+    // guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (log_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("log-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+        readme.addAnonymousImport(b.fmt("{s}.err", .{name}), .{ .root_source_file = run.captureStdErr(.{}) });
+    }
+    // Built, not run: a run would post to a Slack webhook.
+    for (log_guide.compiled) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("log-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_log.dependOn(&exe.step);
+    }
+    // Each test of compile_errors.zig, compiled on its own, must fail with
+    // the error of its case, from its start: `error: ` in front of it.
+    const compile_errors = b.createModule(.{
+        .root_source_file = b.path(dir ++ "compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    for (log_guide.compile_errors, 0..) |case, i| {
+        const t = b.addTest(.{
+            .name = b.fmt("log-guide-compile-error-{d}", .{i}),
+            .root_module = compile_errors,
+            .filters = &.{case.name},
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{case.text}) };
+        test_log.dependOn(&t.step);
+    }
+    test_log.dependOn(&addRun(b, b.addTest(.{ .name = "log-guide-readme", .root_module = readme }), tsan).step);
 }
