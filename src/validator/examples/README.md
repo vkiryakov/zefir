@@ -1,4 +1,4 @@
-# validator
+# zefir-validator: validation rules on Zig types
 
 **Validation rules declared on your structs.** Write the rules of each field
 next to the struct, check a value with one call, and get the first violation —
@@ -111,9 +111,9 @@ Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Strings](str
 [Dates](dates.md) · [Lists](lists.md) ·
 [Coming from class-validator](class_validator.md)
 
-Examples that `zig build test` compiles and runs:
-[Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig) ·
-[Names and transforms](names_and_transforms.zig) · [A codec by outside names](codec_test.zig)
+Whole examples, each with its run or its tests:
+[Getting started](#getting-started) · [validateSelf](#validateself-and-vfail) · [withMessage](#withmessage) · [DTO package test](#testing-a-dto-package) ·
+[Names and transforms](#a-talk-proposal-from-the-form-to-the-rules) · [A codec by outside names](#reading-and-writing-json-by-outside-names)
 
 ## How it works
 
@@ -2023,8 +2023,8 @@ The limits are `comptime_int` constants and part of the contract (see below).
 
 Every rule by category, with an example of its entry in `field_rules`. Each
 heading links to the page of its category, and each rule to its section on that
-page. [all_rules.zig](all_rules.zig) declares every example, so
-`zig build test` compiles them all.
+page. Every example is an entry of a struct that compiles, so each one is
+written as it works.
 
 [Common](#common) · [Numbers](#numbers) · [Lists](#lists) · [Custom](#custom) ·
 [Strings](#strings) · [Formats](#formats) · [Encodings](#encodings) ·

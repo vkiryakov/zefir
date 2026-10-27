@@ -1,4 +1,4 @@
-# Strings
+# zefir-validator: Strings
 
 Rules for string fields: `v.minLength`, `v.maxLength` and `v.length` count
 characters (code points), `v.minBytes` and `v.maxBytes` count bytes, `v.utf8`

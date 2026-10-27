@@ -1,4 +1,4 @@
-# Encodings and other formats
+# zefir-validator: Encodings and other formats
 
 Rules for strings that carry encoded data or a standard format: `v.json`,
 `v.jwt`, `v.base32`, `v.base58`, `v.base64` and `v.base64Url` check encodings,

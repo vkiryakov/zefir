@@ -1,4 +1,4 @@
-# Formats
+# zefir-validator: Formats
 
 Rules for strings that hold a value in a known format: numbers, booleans and
 coordinates written as text (`v.numberString`, `v.decimal`, `v.booleanString`,

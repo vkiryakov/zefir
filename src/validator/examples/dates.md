@@ -1,4 +1,4 @@
-# Dates
+# zefir-validator: Dates
 
 Rules for dates and times written as strings: Zig has no date type, so a DTO
 carries a date as the string it arrived as. `v.date`, `v.rfc3339`, `v.iso8601`

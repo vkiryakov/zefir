@@ -1,4 +1,4 @@
-# Coming from class-validator
+# zefir-validator: coming from class-validator
 
 For developers who know class-validator 0.15.1 and NestJS: how its ideas and
 decorators map to zefir-validator, and where zefir deliberately behaves

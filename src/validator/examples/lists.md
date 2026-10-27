@@ -1,4 +1,4 @@
-# Lists
+# zefir-validator: Lists
 
 Rules for slices and arrays: `v.minItems` and `v.maxItems` bound the number of
 items, `v.uniqueItems` and `v.uniqueBy` reject repeated items or keys,

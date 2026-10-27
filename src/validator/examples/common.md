@@ -1,4 +1,4 @@
-# Common rules
+# zefir-validator: Common rules
 
 Rules for values of several kinds: `v.equals` and `v.notEquals` compare a value
 with one value, `v.oneOf` and `v.noneOf` with a list of values, and `v.empty` and

@@ -1,4 +1,4 @@
-# Identifiers
+# zefir-validator: Identifiers
 
 Rules for strings that hold an identifier defined by a standard or a protocol:
 `v.uuid`, `v.mongoId`, `v.firebasePushId` and `v.hash` for IDs and digests;
