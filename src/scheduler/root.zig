@@ -45,6 +45,17 @@
 const std = @import("std");
 const calendar = @import("schedule/calendar.zig");
 const record = @import("record.zig");
+const job = @import("Job.zig");
+const context = @import("Context.zig");
+
+/// The declaration of a job type and its policy.
+pub const Job = job.Job;
+pub const Retry = job.Retry;
+pub const Misfire = job.Misfire;
+pub const WhenDone = job.WhenDone;
+/// The context of one run, and what is known about the run.
+pub const Context = context.Context;
+pub const RunInfo = context.RunInfo;
 
 pub const Diagnostics = @import("Diagnostics.zig");
 pub const Instant = @import("Instant.zig");
@@ -105,4 +116,5 @@ test {
     _ = @import("tests/memory_load_tests.zig");
     _ = @import("tests/faulty_store_tests.zig");
     _ = @import("tests/conformance_tests.zig");
+    _ = @import("tests/job_tests.zig");
 }

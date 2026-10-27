@@ -6,13 +6,28 @@ const std = @import("std");
 const Duration = std.Io.Duration;
 const Diagnostics = @import("Diagnostics.zig");
 const Instant = @import("Instant.zig");
+const job_type = @import("Job.zig");
 
-/// Which job: the name of its type and its key, as
-/// `.{ .job = "send-invoice", .key = "order-42" }` in an admin page. The
-/// record of a declared repeating job has the key "".
+/// Which job: the name of its type and its key. `.of(SendInvoice,
+/// "order-42")` in code, or `.{ .job = "send-invoice", .key = "order-42" }`
+/// in an admin page. The record of a declared repeating job has the key "".
 pub const Ref = struct {
     job: []const u8,
     key: []const u8,
+
+    /// The job of type `J` with `key`; the compiler checks `J`.
+    pub fn of(comptime J: type, key: []const u8) Ref {
+        job_type.assertJob(J);
+        return .{ .job = J.scheduler_job.name, .key = key };
+    }
+
+    /// The record of the declaration of `J`: the key "". This is how the
+    /// parked record of a declaration that left the code is removed:
+    /// `client.cancel(io, ctx, .declared(NightlyCleanup), .{})`.
+    pub fn declared(comptime J: type) Ref {
+        job_type.assertJob(J);
+        return .{ .job = J.scheduler_job.name, .key = "" };
+    }
 };
 
 /// The options of a call of the client: `d.message()` says why it failed.

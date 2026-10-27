@@ -43,9 +43,30 @@ pub const compile_errors = [_]Fixture{
         "ctx: core.Context, request: *const scheduler.Store.ClaimRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.ClaimResult" },
     .{ .file = dir ++ "store_renew_signature.zig", .expect = "scheduler: Store.init: BadStore.renew has the wrong signature; expected pub fn renew(self: *BadStore, io: std.Io, " ++
         "ctx: core.Context, request: *const scheduler.Store.RenewRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.RenewResult" },
+    // Job types, reached through Ref.of and Ref.declared: the declaration,
+    // the name, run, Payload, and the values of the policy.
+    .{ .file = dir ++ "job_no_declaration.zig", .expect = "scheduler: SendInvoice has no scheduler_job: declare pub const scheduler_job: scheduler.Job = .{ .name = \"send-invoice\" };" },
+    .{ .file = dir ++ "job_declaration_type.zig", .expect = "scheduler: SendInvoice.scheduler_job is a []const u8: " ++ write_job },
+    .{ .file = dir ++ "job_declaration_untyped.zig", .expect = "scheduler: SendInvoice.scheduler_job is an anonymous struct: " ++ write_job },
+    .{ .file = dir ++ "job_name.zig", .expect = "scheduler: SendInvoice: the name \"Send\": a name is 1–64 bytes of a-z, 0-9, '-', '_' and '.', starting with a letter or a digit" },
+    .{ .file = dir ++ "job_run_signature.zig", .expect = "scheduler: SendInvoice: expected pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: SendInvoice.Payload) !void" },
+    .{ .file = dir ++ "job_no_run.zig", .expect = "scheduler: NightlyCleanup: expected pub fn run(self: *NightlyCleanup, ctx: *scheduler.Context) !void" },
+    .{ .file = dir ++ "job_payload_not_struct.zig", .expect = "scheduler: SendInvoice: Payload is the JSON object of a run: a struct" },
+    .{ .file = dir ++ "job_repeat_payload.zig", .expect = "scheduler: NightlyCleanup: the declared record of a repeat gets Payload{}: give every field of Payload a default, or drop .repeat" },
+    .{ .file = dir ++ "job_repeat_invalid.zig", .expect = "scheduler: NightlyCleanup: repeat: fixedDelay(0ns): a delay is a whole number of milliseconds, 1 or more" },
+    .{ .file = dir ++ "job_retry_attempts.zig", .expect = "scheduler: SendInvoice: retry.attempts is 0: write 1 or more, or null for the default" },
+    .{ .file = dir ++ "job_retry_multiplier.zig", .expect = "scheduler: SendInvoice: retry.multiplier is 0: write 1 for a constant pause, or more" },
+    .{ .file = dir ++ "job_retry_delay.zig", .expect = "scheduler: SendInvoice: retry.delay must be more than zero" },
+    .{ .file = dir ++ "job_retry_max_delay.zig", .expect = "scheduler: SendInvoice: retry.max_delay is less than retry.delay" },
+    .{ .file = dir ++ "job_timeout.zig", .expect = "scheduler: SendInvoice: timeout must be more than zero" },
+    .{ .file = dir ++ "job_history.zig", .expect = "scheduler: SendInvoice: history.keep_for must be more than zero" },
+    .{ .file = dir ++ "job_when_done_succeeded.zig", .expect = "scheduler: SendInvoice: when_done.succeeded.keep_for must be more than zero" },
+    .{ .file = dir ++ "job_when_done_failed.zig", .expect = "scheduler: SendInvoice: when_done.failed.keep_for must be more than zero" },
+    .{ .file = dir ++ "job_misfire_skip.zig", .expect = "scheduler: NightlyCleanup: misfire.skip must be more than zero" },
 };
 
 const twelve = "an hour of the 12-hour clock is 1–12; ";
 const every_month = "a day of monthlyOn is 1–28, which every month has; ";
+const write_job = "write pub const scheduler_job: scheduler.Job = .{ … }";
 
 const dir = "src/scheduler/tests/compile_errors/";
