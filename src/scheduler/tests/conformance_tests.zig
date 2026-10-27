@@ -390,6 +390,28 @@ fn lifeBlind(vtable: *Store.VTable) void {
     }.update;
 }
 
+/// A finish that refuses a claim whose lease expired, though no claim took
+/// the record over.
+fn expiredLost(vtable: *Store.VTable) void {
+    vtable.name = "expired-lost";
+    vtable.finish = struct {
+        fn finish(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.FinishRequest, options: Store.CallOptions) scheduler.StoreError!Store.FinishResult {
+            const memory = memoryOf(ptr);
+            if (try memory.get(io, ctx, &request.ref, options)) |now| {
+                if (now.lease_until) |until| if (until.unix_ms <= memory.now(io).unix_ms) return .lost;
+            }
+            return memory.finish(io, ctx, request, options);
+        }
+    }.finish;
+}
+
+test "a store that refuses the finish of an expired lease nobody took fails S10" {
+    var harness: PatchedHarness = .{ .patch = expiredLost };
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s10} });
+    defer report.deinit();
+    try testing.expectEqualStrings("finish of a lease that expired and that no claim took answered lost, not done", try failedWhy(report.outcome(.s10)));
+}
+
 test "a store whose update does not hold on the life fails S4" {
     var harness: PatchedHarness = .{ .patch = lifeBlind };
     var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s4} });

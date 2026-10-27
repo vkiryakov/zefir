@@ -185,17 +185,22 @@ pub fn s10(r: *Runner) Error!void {
     }
     try r.expectSame(longer, try r.fetch(job, "k1"), &.{}, "a renew that answered lost");
 
-    // Leases that expired and that nobody took: still the owner's (A6).
-    _ = try r.create(job, "k2", .{ .after = .zero });
-    _ = try r.create(job, "k3", .{ .after = .zero });
-    const pair = try r.claim("s10-w1", &.{job}, &.{}, 2, r.ms(1000));
-    try r.expect(pair.claimed.len == 2, "a claim of 2 due records took {d}", .{pair.claimed.len});
-    try r.waitPast(pair.claimed[1].record.lease_until.?);
-    const late = pair.claimed[0].record;
+    // Leases that expired and that nobody took: still the owner's, to renew
+    // and to finish (A6).
+    for ([_][]const u8{ "k2", "k3", "k4" }) |key| _ = try r.create(job, key, .{ .after = .zero });
+    const three = try r.claim("s10-w1", &.{job}, &.{}, 3, r.ms(1000));
+    try r.expect(three.claimed.len == 3, "a claim of 3 due records took {d}", .{three.claimed.len});
+    for (three.claimed) |c| try r.waitPast(c.record.lease_until.?);
+    const late = three.claimed[0].record;
     const kept = try r.renew(late, "s10-w1", r.ms(60_000));
     try r.expect(kept == .renewed, "renew of a lease that expired and that no claim took answered {t}, not renewed", .{kept});
+    const over = three.claimed[2].record;
+    const ended = try r.finish(r.finishOf(over, "s10-w1", .{ .done = .{ .state = .succeeded, .keep = .forever } }));
+    try r.expect(ended == .done, "finish of a lease that expired and that no claim took answered {t}, not done", .{ended});
+    const done = try r.fetch(job, over.key);
+    try r.expect(done.state == .succeeded and done.owner == null, "a finish to done of a lease that expired left {s}/{s} {t}", .{ job, over.key, done.state });
     // The same owner on a takeover: its old fence is lost.
-    const old = pair.claimed[1].record;
+    const old = three.claimed[1].record;
     _ = try r.takeOver("s10-w1", old, r.ms(60_000));
     const stale = try r.renew(old, "s10-w1", r.ms(60_000));
     try r.expect(stale == .lost, "renew of the fence before a takeover by the same owner answered {t}, not lost", .{stale});
