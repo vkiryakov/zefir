@@ -23,7 +23,9 @@ it reads straight into Zig types. It is written against `std.Io` only,
 and runs on [zio](https://github.com/lalinsky/zio) in production.
 
 > [!IMPORTANT]
-> **Not in v0.1 (TODO):**
+> **Not in v0.1 (TODO).** v0.1 is the first version of zefir-redis,
+> released with zefir v0.10.0, and the client's own texts name it, such as
+> "TLS is not supported in v0.1".
 >
 > - **One standalone server only.** Sentinel and Cluster come later, and
 >   with them replicas to read from and sharded pub/sub. A client refuses a
@@ -925,7 +927,7 @@ replies](#commands-and-replies) has the rules every one follows.
 
 | Function | Command | Returns |
 |---|---|---|
-| `zadd(key, members, .{ .only, .compare, .changed })` | ZADD [NX\|XX] [GT\|LT] [CH] | `u64`: how many were added |
+| `zadd(key, members, .{ .only, .compare, .changed })` | ZADD [NX\|XX] [GT\|LT] [CH] | `u64`: how many were added, or with `.changed` added or changed |
 | `zincrby(key, by, member)`, `zscore(key, member)` | ZINCRBY, ZSCORE | `f64`, `?f64` |
 | `zrank(key, member)`, `zrevrank(key, member)` | ZRANK, ZREVRANK | `?u64` |
 | `zrem(key, members)`, `zcard(key)`, `zcount(key, min, max)` | ZREM, ZCARD, ZCOUNT | `u64` |
@@ -2135,8 +2137,10 @@ sent it or the client's own text; `code()`, the first word of the server's
 error, such as `WRONGTYPE`, and `isCode(name)` to test it; `phase`, where
 the error happened; and for a pipeline or a transaction `command`, the
 index of the command it is about, and `answered`, the replies that came
-before a break. Every call starts it afresh. A subscriber and an iterator
-keep their own, for the errors of their `next`. The client's texts never
+before a break. Every call starts it afresh. An iterator writes what went
+wrong with a page to the Diagnostics in `.diagnostics` of `client.iterate`,
+afresh for each page it fetches; only a subscriber keeps its own,
+`sub.diagnostics()`, for the errors of its `next`. The client's texts never
 hold arguments, values or passwords; a server's text may quote arguments,
 as `ERR unknown command` does, so log it where such values may go.
 
