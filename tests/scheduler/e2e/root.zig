@@ -20,6 +20,7 @@ const mongo = @import("mongo");
 pub const servers = struct {
     /// mongo-plain: no authentication, test commands on.
     pub const plain = "mongodb://127.0.0.1:27117";
+    pub const plain_port: u16 = 27117;
     /// mongo-stall: the tests pause it by its container name, so that it
     /// stops answering.
     pub const stall = "mongodb://127.0.0.1:27119";
@@ -112,12 +113,23 @@ pub const Admin = struct {
 
     /// Runs `body` in `database`, and fails with the server's reason.
     pub fn command(a: *Admin, io: Io, database: []const u8, body: anytype) !void {
+        (try a.reply(io, database, body)).deinit();
+    }
+
+    /// The reply of `body` in `database`, from `testing.allocator`; the
+    /// caller `deinit`s it.
+    pub fn reply(a: *Admin, io: Io, database: []const u8, body: anytype) !bson.OwnedDocument {
         var d: mongo.Diagnostics = .{};
-        const reply = a.at(database).runCommand(io, .of(within(io, .fromSeconds(30))), body, .{ .allocator = testing.allocator, .diagnostics = &d }) catch |err| {
+        return a.at(database).runCommand(io, .of(within(io, .fromSeconds(30))), body, .{ .allocator = testing.allocator, .diagnostics = &d }) catch |err| {
             std.debug.print("a command in {s}: {t}: {s}\n", .{ database, err, d.message() });
             return err;
         };
-        reply.deinit();
+    }
+
+    /// The collection `name` of `database`, for what the tests write and
+    /// read past the store.
+    pub fn collection(a: *Admin, database: []const u8, name: []const u8) mongo.Collection {
+        return a.at(database).collection(name);
     }
 
     fn at(a: *Admin, name: []const u8) mongo.Database {
@@ -144,4 +156,5 @@ pub fn docker(args: []const []const u8) !void {
 test {
     testing.refAllDecls(@This());
     _ = @import("conformance.zig");
+    _ = @import("explain.zig");
 }
