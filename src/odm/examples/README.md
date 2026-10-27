@@ -20,12 +20,12 @@ nothing at run time; and what a query finds comes back as that struct.
 One registry keeps the connections and the tenants of a service: each
 tenant has a database of its own, on a shared server or on a server of
 its own, tenants come and go while the service runs, and a connection
-changes its credentials without a failed request. It is written against
+moves to a second user without a failed request. It is written against
 `std.Io` only, runs on [zio](https://github.com/lalinsky/zio) in
 production, and reaches MongoDB through zefir-mongo.
 
 > [!IMPORTANT]
-> **Not in v1 (TODO):**
+> **Not implemented yet (TODO):**
 >
 > - **Replica sets and sharded clusters**, with their discovery of servers
 >   and failover: zefir-mongo connects to one standalone mongod.
@@ -114,7 +114,8 @@ while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user
   binds each tenant to a connection and a database; tenants come and go
   by events with versions, while the service runs.
 - **Credentials that change on the fly.** A connection moves to a new
-  login, and its old generation drains: no request fails.
+  login, and its old generation drains: when that login is a second user,
+  no request fails, see [Rotating credentials](#rotating-credentials).
 - **Errors that say whether to retry.** Each says whether the server may
   have run the call; the details are in the diagnostics of the session.
 - **Tests without MongoDB.** `odm.testing.FakeDriver` answers what a test
@@ -759,11 +760,11 @@ field at all. odm keeps one of them: **it never writes a null.**
   one of them, and the required key is in every document: the documents
   without the optional are in it with null, and two of them collide on
   the other keys, such as two users of one shop without a nickname under
-  `.{ .shop = .asc }, .{ .nickname = .asc }`. Partial indexes are not in
-  v1 (see the list at the top): keep such a uniqueness on optional keys
-  only, or check it in the application. A null that another program
-  wrote is in a sparse index too, so two such documents collide even in
-  a unique sparse index of one key.
+  `.{ .shop = .asc }, .{ .nickname = .asc }`. Partial indexes are not
+  implemented yet (see the TODO list at the top): keep such a uniqueness
+  on optional keys only, or check it in the application. A null that
+  another program wrote is in a sparse index too, so two such documents
+  collide even in a unique sparse index of one key.
 - **Filters and updates** follow from it: `.nickname = null` finds both
   kinds, and an update clears a field with `unset`, see
   [null and missing fields](#null-and-missing-fields).
@@ -773,7 +774,7 @@ field at all. odm keeps one of them: **it never writes a null.**
 | Zig | BSON |
 |---|---|
 | `bool` | boolean |
-| `i8`–`i32`, `u8`–`u16` | int32 |
+| `i8`–`i32`, `u8`–`u31` | int32 |
 | `i33`–`i64`, `u32`–`u63` | int64 |
 | `f64` | double |
 | `[]const u8` | string, in UTF-8 |
@@ -1255,7 +1256,8 @@ changes:
   `push`, `add_to_set`, `pull` and `pop` would change its length, and the
   model would not read the document again, so they do not compile.
 - **One update changes a path once**, as MongoDB refuses two changes of
-  one path, or of a struct and its field:
+  one path, or of a struct and its field, so a second change does not
+  compile:
 
   ```text
   // .{ .push = .{ .tags = "vip" }, .pull = .{ .tags = "student" } }
@@ -2021,9 +2023,7 @@ calls `replaceConnection` with its URI and password; once the call
 returned, the old generation is closed, and the secrets system drops the
 first user. Until then both users log in: the old generation may still
 open network connections, as its pool needs them, and they still get in.
-So no request fails: 200 here, with two rotations, there and back. The
-end-to-end tests of odm make about 5 500 calls of 16 tasks through three
-rotations, and none fails.
+So no request fails: 200 here, with two rotations, there and back.
 
 **Not a new password of the same user.** When the secrets system changes
 the password of the user in place, the server refuses the old password to
@@ -2032,14 +2032,12 @@ its calls until it drains, and opens a new connection when its pool needs
 one: under a growing load, after `maxIdleTimeMS`, after a connection
 broke. Its first refused login clears its pool and pauses it, so its calls
 get `AuthenticationFailed`, and the ones after `Unavailable`, until
-`replaceConnection` returns. In the end-to-end test of this case, with
-idle connections closed after 50 ms, each run saw about 3
-`AuthenticationFailed` and 50 `Unavailable` in that window, and no error
-after it. How many calls fall in the window depends on the load, so no
-test promises a number for it. The other order fails too: while the
-server does not know the new password, the new generation cannot log in,
-and the replacement rolls back, as the last part of `rotation.zig` shows:
-the driver's warning, the registry's, and generation 3 kept.
+`replaceConnection` returns; after it, no call fails. How many calls
+fall in that window depends on the load. The other order fails too:
+while the server does not know the new password, the new generation
+cannot log in, and the replacement rolls back, as the last part of
+`rotation.zig` shows: the driver's warning, the registry's, and
+generation 3 kept.
 
 **The same event again changes nothing.** `replaceConnection` with the
 settings of the current generation succeeds without a new generation, so
@@ -2106,7 +2104,7 @@ change. odm makes no call twice by itself.
 | `IncompleteWrite` | may have run | a write of several batches stopped in the middle |
 | `ProtocolViolation` | may have run | the reply broke MongoDB's protocol |
 | `CommandFailed` | may have run | the server answered `ok: 0`; its code is in the diagnostics |
-| `DuplicateKey` | may have run | a unique index refused a document: code 11000; the documents before it went in |
+| `DuplicateKey` | may have run | a unique index refused a document: code 11000, 11001 or 12582; the documents before it went in |
 | `WriteFailed` | may have run | the server refused a document for another reason |
 | `InvalidBson`, `DecodeFailed` | may have run | a document of the server is broken, or does not fit the model |
 | `OutOfMemory` | may have run | always: where it ran out is unknown |
@@ -2968,8 +2966,8 @@ what to write:
 error: odm.Client.init: my_driver.Client has no method insert; expected pub fn insert(self: *@This(), io: std.Io, ctx: core.Context, request: *const odm.Client.InsertRequest, options: odm.Client.CallOptions) odm.DriverError!odm.Client.InsertResult
 ```
 
-The rules of the contract, which the header of `src/odm/driver.zig`
-holds in full:
+The rules of the contract, in short; the header of `src/odm/driver.zig`
+holds them in full:
 
 1. A client is called from any task at once; a cursor serves one task at
    a time.
