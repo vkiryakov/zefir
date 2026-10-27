@@ -1,4 +1,4 @@
-# nats
+# zefir-nats: a NATS client for Zig
 
 **A NATS client for Zig services.** NATS is a message server that lets
 services talk without knowing where the others run. A service *publishes* a
@@ -7,9 +7,7 @@ message to a *subject*, a name such as `orders.created`; every service that
 *request* and wait for one *reply*, as with a remote call. This module is the
 client side: it connects to a NATS server, keeps the connection alive, and
 gives your tasks publish, subscribe, request and reply. It is written
-against `std.Io` only, so it runs on any `std.Io` that has real
-concurrency; [zio](https://github.com/lalinsky/zio) is the one meant for
-production.
+against `std.Io` only, and runs on [zio](https://github.com/lalinsky/zio).
 
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
@@ -21,6 +19,9 @@ production.
 > - **TLS and mTLS**: the client speaks plaintext TCP only, so passwords
 >   and messages travel unencrypted. Use it on a network you trust.
 > - **WebSocket** and the **services API** (`$SRV`).
+
+A first look: connect to a server, subscribe to every order event, publish
+one, and take it:
 
 ```zig
 var client: nats.Client = try .init(gpa, io, .{ .servers = &.{"nats://127.0.0.1:4222"} });
@@ -71,17 +72,10 @@ std.log.info("{s}: {s}", .{ msg.subject, msg.payload });
 - [Statistics](#statistics)
 - [Errors](#errors)
 - [Security](#security)
-- [Threaded or zio](#threaded-or-zio)
+- [Running on zio](#running-on-zio)
 - [Logs](#logs)
 - [Compatibility](#compatibility)
-- [Performance](#performance)
 - [Protocol coverage](#protocol-coverage)
-
-Examples that `zig build e2e` in `tests/nats` builds and runs against real
-servers:
-[publish and subscribe](pub_sub.zig) · [queue groups](queue_group.zig) ·
-[request and reply](request_reply.zig) · [scatter and gather](scatter_gather.zig) ·
-[user and password](user_password_auth.zig) · [a whole service on zio](zio_app.zig)
 
 ## How NATS works
 
@@ -160,9 +154,9 @@ flowchart LR
    the server has not seen it; a server that takes nothing at all for two
    intervals while data waits counts as gone too.
 
-All of it runs on the `std.Io` you give the client: with zio, the tasks are
-coroutines on zio's executors; with `std.Io.Threaded`, each task is a
-thread.
+All of it runs on the `std.Io` you give the client: on zio, these three
+tasks are coroutines on its executors, next to the tasks of your service.
+See [Running on zio](#running-on-zio).
 
 ### Connection options
 
@@ -212,9 +206,8 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.11.0, fetch `#v0.11.0` instead.
 
-The client needs an `std.Io` with real concurrency. For services, add zio
-too. zio has no release for Zig 0.17 yet, so pin the commit Zefir is tested
-with:
+The client runs on zio, which comes from your build, not from Zefir. zio
+has no release for Zig 0.17 yet, so pin the commit Zefir is tested with:
 
 ```sh
 zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
@@ -224,25 +217,38 @@ Then import the modules in `build.zig`. The examples also use Zefir's
 confy for settings, log for records and core for deadlines:
 
 ```zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+// build.zig
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "nats", .module = zefir.module("zefir-nats") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "nats", .module = zefir.module("zefir-nats") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    b.step("run", "Run the app").dependOn(&run.step);
+}
 ```
+
+Each program of this guide is a whole `src/main.zig`, and `zig build run`
+runs it.
 
 > [!TIP]
 > nats is also part of the umbrella module: with `zefir.module("zefir")`
@@ -257,83 +263,23 @@ docker run --rm -p 4222:4222 nats:2.15.0-alpine
 
 ## Quick start
 
-Two programs, as two services would be. The **receiver** is the mailer: it
-subscribes to every order event and sends an email for each. The
-**sender** is the shop: it publishes an event for every order a customer
-places. ([pub_sub.zig](pub_sub.zig) runs both in one process; the tests
-run it.)
-
-**`src/receiver.zig`**
-
-```zig
-const std = @import("std");
-const confy = @import("confy");
-const log = @import("log");
-const nats = @import("nats");
-const zio = @import("zio");
-
-/// The client logs through std.log; this sends its records to the logger.
-pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
-
-const Config = struct {
-    nats: struct {
-        url: []const u8 = "nats://127.0.0.1:4222",
-    } = .{},
-};
-
-/// An order event, in JSON on the wire. A cancellation carries the id only.
-const Order = struct { id: u32, customer: ?[]const u8 = null, total: ?[]const u8 = null };
-
-pub fn main(init: std.process.Init) !void {
-    var config: Config = undefined;
-    confy.loadOrExit(init.arena.allocator(), &config, .{
-        .io = init.io,
-        .environ = init.environ_map,
-        .env_prefix = "APP_",
-        .sources = &.{.osEnv()},
-    });
-
-    // The logger outlives the runtime, so it takes `init.io`, through which
-    // any thread may log: the tasks of the runtime too.
-    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
-    defer logger.deinit();
-    logger.installStdLog();
-
-    // One runtime for the whole program: the client runs its tasks on it.
-    const rt = try zio.Runtime.init(init.gpa, .{});
-    defer rt.deinit();
-    const io = rt.io();
-
-    var mailer: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "mailer" });
-    defer mailer.deinit();
-    try mailer.connect();
-    // `>` matches one token or more: orders.created, orders.cancelled, ...
-    const order_events = try mailer.subscribe("orders.>", .{});
-    defer order_events.deinit();
-    // Once flush returns, the server has the subscription.
-    try mailer.flush(.{});
-
-    const mailer_log = logger.scoped("mailer");
-    mailer_log.info("Waiting for orders", .{ .subject = "orders.>" });
-    // Until Ctrl+C: `next` waits for the next message as long as it takes.
-    while (true) {
-        var msg = (try order_events.next(.{})) orelse break;
-        defer msg.deinit();
-        const event = try std.json.parseFromSlice(Order, init.gpa, msg.payload, .{});
-        defer event.deinit();
-        // The subject says what happened; a wildcard subscription gets them all.
-        if (std.mem.eql(u8, msg.subject, "orders.created")) {
-            mailer_log.info("Confirmation sent", .{ .order_id = event.value.id, .to = event.value.customer, .total = event.value.total });
-        } else {
-            mailer_log.info("Cancellation sent", .{ .order_id = event.value.id, .reason = msg.headers.get("Reason") });
-        }
-    }
-}
-```
-
-**`src/sender.zig`**
+Two services of a shop. The **mailer** subscribes to every order event and
+sends an email for each; the **shop** publishes an event for every order a
+customer places, and one when an order is cancelled. In production each is
+a program of its own. Here both run in one program, each with its own
+client, so that one run shows both sides: `pub_sub.zig`, as your
+`src/main.zig`.
 
 ```zig
+//! Publish and subscribe. The shop publishes an event for every order a
+//! customer places; the mailer subscribes to every order event and sends
+//! an email for each. Two services, two clients: each would be its own
+//! program in production.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_NATS_URL   the server; nats://127.0.0.1:4222 by default
+
 const std = @import("std");
 const confy = @import("confy");
 const log = @import("log");
@@ -373,10 +319,21 @@ pub fn main(init: std.process.Init) !void {
     defer logger.deinit();
     logger.installStdLog();
 
-    // One runtime for the whole program: the client runs its tasks on it.
+    // One runtime for the whole program: the clients run their tasks on it.
     const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
     const io = rt.io();
+
+    // The mailer subscribes first: NATS keeps no message for a subscriber
+    // that comes later.
+    var mailer: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "mailer" });
+    defer mailer.deinit();
+    try mailer.connect();
+    // `>` matches one token or more: orders.created, orders.cancelled, ...
+    const order_events = try mailer.subscribe("orders.>", .{});
+    defer order_events.deinit();
+    // Once flush returns, the server has the subscription.
+    try mailer.flush(.{});
 
     var shop: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "shop" });
     defer shop.deinit();
@@ -398,34 +355,24 @@ pub fn main(init: std.process.Init) !void {
     shop_log.info("Order cancelled", .{ .order_id = 1002 });
     // publish only queued the events; flush returns once the server has them.
     try shop.flush(.{});
+
+    const mailer_log = logger.scoped("mailer");
+    for (0..orders.len + 1) |_| {
+        var msg = (try order_events.next(.{ .timeout = seconds(5) })) orelse break;
+        defer msg.deinit();
+        const event = try std.json.parseFromSlice(Order, init.gpa, msg.payload, .{});
+        defer event.deinit();
+        // The subject says what happened; a wildcard subscription gets them all.
+        if (std.mem.eql(u8, msg.subject, "orders.created")) {
+            mailer_log.info("Confirmation sent", .{ .order_id = event.value.id, .to = event.value.customer, .total = event.value.total });
+        } else {
+            mailer_log.info("Cancellation sent", .{ .order_id = event.value.id, .reason = msg.headers.get("Reason") });
+        }
+    }
 }
-```
 
-In `build.zig`, one executable for each, with the imports from
-[Installation](#installation):
-
-```zig
-// Two programs, each with the imports from Installation and a step that
-// runs it: `zig build run-receiver` and `zig build run-sender`.
-for ([_][]const u8{ "receiver", "sender" }) |name| {
-    const exe = b.addExecutable(.{
-        .name = name,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "nats", .module = zefir.module("zefir-nats") },
-                .{ .name = "zio", .module = zio.module("zio") },
-                .{ .name = "confy", .module = zefir.module("zefir-confy") },
-                .{ .name = "log", .module = zefir.module("zefir-log") },
-                .{ .name = "core", .module = zefir.module("zefir-core") },
-            },
-        }),
-    });
-    b.installArtifact(exe);
-    const run = b.addRunArtifact(exe);
-    b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s}", .{name})).dependOn(&run.step);
+fn seconds(n: i64) std.Io.Timeout {
+    return .{ .duration = .{ .raw = .fromSeconds(n), .clock = .awake } };
 }
 ```
 
@@ -435,76 +382,60 @@ Line by line:
   sets the server, and without it the default stays. A bad value stops
   the program with a message before it does anything.
 - The logger writes one line per record; `installStdLog` sends the
-  client's own records, which go through std.log, to it as well.
+  clients' own records, which go through std.log, to it as well.
 - `zio.Runtime.init` starts the runtime that runs every task of the
-  program, the client's tasks included. `rt.io()` is its `std.Io`.
+  program, the clients' tasks included. `rt.io()` is its `std.Io`.
 - `nats.Client.init` checks the options and copies them; nothing touches
   the network yet. `connect()` connects, and from then on the client must
-  stay where it is: see [Threaded or zio](#threaded-or-zio).
-- In the receiver, `subscribe("orders.>", .{})` returns a subscription
-  that the client owns; `deinit()` ends it.
+  stay where it is: see [Running on zio](#running-on-zio).
+- The mailer subscribes before the shop publishes: NATS keeps no message
+  for a subscriber that comes later. `subscribe("orders.>", .{})` returns
+  a subscription that the client owns; `deinit()` ends it.
 - `flush` waits until the server has processed everything sent before it.
-  In the receiver that is the subscription: from then on the server sends
-  it every order event, so only then does it say it waits.
-- `next` waits for the next message, here as long as it takes. The
-  message is yours: `deinit()` frees it.
-- In the sender, `publish` returns once a copy of the message is in the
-  client's queue, and `flush` waits until the server has them all.
-  Without it the program could end with events still in the queue.
+  For the mailer that is the subscription: from then on the server sends
+  it every order event.
+- `publish` returns once a copy of the message is in the shop's queue;
+  `publishMessage` sends headers with it. The shop's `flush` waits until
+  the server has them all: without it, the program could go on with
+  events still in the queue.
+- `next` waits for the next message, here five seconds at most, and the
+  mailer takes the four events. The message is yours: `deinit()` frees
+  it.
 
-Start the receiver first, against the server from
-[Installation](#installation): NATS keeps no message for a subscriber that
-comes later.
-
-```text
-$ zig build run-receiver
-2026-10-14T13:57:52.103Z INFO  [mailer] Waiting for orders subject=orders.>
-```
-
-Then, in another terminal, the sender:
+Against the server from [Installation](#installation):
 
 ```text
-$ zig build run-sender
-2026-10-14T13:57:52.539Z INFO  [shop] Order placed order_id=1001
-2026-10-14T13:57:52.539Z INFO  [shop] Order placed order_id=1002
-2026-10-14T13:57:52.539Z INFO  [shop] Order placed order_id=1003
-2026-10-14T13:57:52.539Z INFO  [shop] Order cancelled order_id=1002
+$ zig build run
+2026-10-27T20:48:48.342Z INFO  [shop] Order placed order_id=1001
+2026-10-27T20:48:48.342Z INFO  [shop] Order placed order_id=1002
+2026-10-27T20:48:48.342Z INFO  [shop] Order placed order_id=1003
+2026-10-27T20:48:48.342Z INFO  [shop] Order cancelled order_id=1002
+2026-10-27T20:48:48.352Z INFO  [mailer] Confirmation sent order_id=1001 to=ada@example.com total=42.50
+2026-10-27T20:48:48.352Z INFO  [mailer] Confirmation sent order_id=1002 to=alan@example.com total=7.99
+2026-10-27T20:48:48.352Z INFO  [mailer] Confirmation sent order_id=1003 to=grace@example.com total=120.00
+2026-10-27T20:48:48.353Z INFO  [mailer] Cancellation sent order_id=1002 reason=out-of-stock
 ```
 
-The receiver gets every event:
-
-```text
-2026-10-14T13:57:52.540Z INFO  [mailer] Confirmation sent order_id=1001 to=ada@example.com total=42.50
-2026-10-14T13:57:52.540Z INFO  [mailer] Confirmation sent order_id=1002 to=alan@example.com total=7.99
-2026-10-14T13:57:52.540Z INFO  [mailer] Confirmation sent order_id=1003 to=grace@example.com total=120.00
-2026-10-14T13:57:52.540Z INFO  [mailer] Cancellation sent order_id=1002 reason=out-of-stock
-```
-
-It goes on waiting for more; Ctrl+C stops it.
+The mailer reads only once the shop's `flush` has returned, so the shop's
+lines come first. A real mailer would go on waiting for events until the
+service stops; [Drain](#drain) shows how a service stops without losing
+the work it took.
 
 ## The examples
 
-Every example in this directory is a complete program that reads its
-settings with confy and logs with zefir-log. The package in `tests/nats`
-builds them and runs them against the NATS servers of the repository's
-`docker-compose.yml`, in Docker:
+Every example of this guide is a whole program that reads its settings
+with confy and logs with zefir-log. Each is shown whole in its chapter,
+with a run. They connect to `nats://127.0.0.1:4222`, the server of
+[Installation](#installation), unless `APP_NATS_URL` names another.
 
-```sh
-cd tests/nats
-zig build example-pub_sub   # start the servers, run one example and show what it prints
-zig build examples          # run them all, checking what they print
-zig build e2e               # the end-to-end tests, then the examples
-zig build down              # stop the servers
-```
-
-| Example                                          | What it shows                                                                       |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| [pub_sub.zig](pub_sub.zig)                       | publish, publish with headers, a wildcard subscription, `flush`                     |
-| [queue_group.zig](queue_group.zig)               | three workers share the orders in a queue group, then drain                         |
-| [request_reply.zig](request_reply.zig)           | a pricing service answers requests within a deadline; no responders                 |
-| [scatter_gather.zig](scatter_gather.zig)         | one request, an answer from every warehouse; stopping early                         |
-| [user_password_auth.zig](user_password_auth.zig) | a user and a password from the configuration, the password a `confy.Secret`         |
-| [zio_app.zig](zio_app.zig)                       | a whole service: one runtime, one shared client, events, Ctrl+C and drain, restarts |
+| Example                  | Chapter                                           | What it shows                                                                       |
+| ------------------------ | ------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `pub_sub.zig`            | [Quick start](#quick-start)                       | publish, publish with headers, a wildcard subscription, `flush`                     |
+| `queue_group.zig`        | [Queue groups](#queue-groups)                     | three workers share the orders in a queue group, then drain                         |
+| `request_reply.zig`      | [Request and reply](#request-and-reply)           | a pricing service answers requests within a deadline; no responders                 |
+| `scatter_gather.zig`     | [Scatter and gather](#scatter-and-gather)         | one request, an answer from every warehouse; stopping early                         |
+| `user_password_auth.zig` | [Security](#security)                             | a user and a password from the configuration, the password a `confy.Secret`         |
+| `zio_app.zig`            | [A whole service on zio](#a-whole-service-on-zio) | a whole service: one runtime, one shared client, events, Ctrl+C and drain, restarts |
 
 ## Publish and subscribe
 
@@ -690,8 +621,9 @@ flowchart LR
     end
 ```
 
-From [queue_group.zig](queue_group.zig): three workers join the group, the
-shop places nine orders, and the workers drain.
+In `queue_group.zig`, three workers join the group, the shop places nine
+orders, and the workers drain. Each worker subscribes with the same queue
+group:
 
 ```zig
 for (&subs) |*sub| {
@@ -700,6 +632,8 @@ for (&subs) |*sub| {
     subscribed += 1;
 }
 ```
+
+and takes its orders in a task of its own:
 
 ```zig
 /// One worker: handles orders until its subscription ends. Returns how
@@ -719,10 +653,124 @@ fn work(io: std.Io, worker_log: log.Logger, sub: *nats.Subscription, number: usi
 }
 ```
 
-The orders go out at random, so every run splits them differently:
+The whole program, `queue_group.zig`:
+
+```zig
+//! Queue groups. Three workers share the orders: the server hands each
+//! order to one member of the group `order-workers`, so every order is
+//! handled once, and more workers handle more orders. At the end the
+//! workers drain: they finish the orders they took, then stop.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_NATS_URL   the server; nats://127.0.0.1:4222 by default
+
+const std = @import("std");
+const confy = @import("confy");
+const log = @import("log");
+const nats = @import("nats");
+const zio = @import("zio");
+
+/// The client logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
+const worker_count = 3;
+const order_count = 9;
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // any thread may log: the tasks of the runtime too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+
+    // Four executors: the workers really run at the same time.
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .exact(4) });
+    defer rt.deinit();
+    const io = rt.io();
+
+    // The workers' client. Here the three workers share it; in production
+    // each is usually a process of its own, and the group works the same.
+    var workers: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "order-workers" });
+    defer workers.deinit();
+    try workers.connect();
+
+    var subs: [worker_count]*nats.Subscription = undefined;
+    var subscribed: usize = 0;
+    defer for (subs[0..subscribed]) |sub| sub.deinit();
+    for (&subs) |*sub| {
+        // Same subject, same queue group: each order goes to one of them.
+        sub.* = try workers.subscribe("orders.created", .{ .queue = "order-workers" });
+        subscribed += 1;
+    }
+    try workers.flush(.{});
+
+    const worker_log = logger.scoped("worker");
+    var tasks: [worker_count]std.Io.Future(nats.Subscription.NextError!u32) = undefined;
+    var started: usize = 0;
+    defer for (tasks[0..started]) |*task| {
+        _ = task.cancel(io) catch 0;
+    };
+    for (subs, 1..) |sub, number| {
+        tasks[started] = try io.concurrent(work, .{ io, worker_log, sub, number });
+        started += 1;
+    }
+
+    // The shop, another service, places the orders.
+    var shop: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "shop" });
+    defer shop.deinit();
+    try shop.connect();
+    for (1..order_count + 1) |id| {
+        var buffer: [16]u8 = undefined;
+        try shop.publish("orders.created", try std.fmt.bufPrint(&buffer, "{d}", .{id}));
+    }
+    // Once the server has the orders, they are on their way to the workers.
+    try shop.flush(.{});
+
+    // The workers stop taking orders, finish the ones they have, and the
+    // client closes; each `next()` then returns null.
+    try workers.drain(.{});
+    var total: u32 = 0;
+    for (tasks[0..started]) |*task| total += try task.await(io);
+    logger.scoped("shop").info("All orders handled", .{ .orders = total });
+}
+
+/// One worker: handles orders until its subscription ends. Returns how
+/// many it handled.
+fn work(io: std.Io, worker_log: log.Logger, sub: *nats.Subscription, number: usize) nats.Subscription.NextError!u32 {
+    var handled: u32 = 0;
+    while (true) {
+        var order = (try sub.next(.{})) orelse break;
+        defer order.deinit();
+        // The work an order takes.
+        try io.sleep(.fromMilliseconds(20), .awake);
+        handled += 1;
+        worker_log.info("Order handled", .{ .worker = number, .order_id = order.payload });
+    }
+    worker_log.info("Worker done", .{ .worker = number, .orders = handled });
+    return handled;
+}
+```
+
+The server hands the orders out at random, so every run splits them
+differently. One run printed:
 
 ```text
-$ zig build example-queue_group
+$ zig build run
 2026-10-13T18:08:27.232Z INFO  [worker] Order handled worker=2 order_id=6
 2026-10-13T18:08:27.232Z INFO  [worker] Order handled worker=1 order_id=5
 2026-10-13T18:08:27.232Z INFO  [worker] Order handled worker=3 order_id=1
@@ -771,9 +819,9 @@ sequenceDiagram
     Note over C: reply 1 wakes request 1
 ```
 
-From [request_reply.zig](request_reply.zig): the checkout prices a cart,
-with 500 ms for the whole checkout. Each quote gets what is left of that
-time: a `core.Context` deadline turns into the request's timeout.
+In `request_reply.zig`, the checkout prices a cart, with 500 ms for the
+whole checkout. Each quote gets what is left of that time: a
+`core.Context` deadline turns into the request's timeout.
 
 ```zig
 // The checkout has 500 ms in all; each quote gets what is left of it.
@@ -817,16 +865,143 @@ if (checkout.request("shipping.quote", "berlin", .{})) |reply| {
 }
 ```
 
+The whole program, `request_reply.zig`: the pricing service and the
+checkout in one process, each with its own client, as two services would
+be.
+
+```zig
+//! Request and reply. The pricing service answers `pricing.quote`
+//! requests with the price of a product. The checkout prices a cart: it
+//! asks for a quote for every item, all within the deadline of the
+//! checkout itself, and learns at once when no service listens.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_NATS_URL   the server; nats://127.0.0.1:4222 by default
+
+const std = @import("std");
+const confy = @import("confy");
+const core = @import("core");
+const log = @import("log");
+const nats = @import("nats");
+const zio = @import("zio");
+
+/// The client logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
+/// The pricing service's catalog: price in cents by product.
+const catalog = [_]struct { sku: []const u8, cents: u32 }{
+    .{ .sku = "coffee-beans", .cents = 1299 },
+    .{ .sku = "grinder", .cents = 4900 },
+    .{ .sku = "filter-papers", .cents = 399 },
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // any thread may log: the tasks of the runtime too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+
+    const rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // The pricing service. Its subscription joins the queue group
+    // `pricing`: run more instances, and each request goes to one of them.
+    var pricing: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "pricing" });
+    defer pricing.deinit();
+    try pricing.connect();
+    const quotes = try pricing.subscribe("pricing.quote", .{ .queue = "pricing" });
+    defer quotes.deinit();
+    try pricing.flush(.{});
+    var service = try io.concurrent(servePrices, .{ &pricing, quotes, logger.scoped("pricing") });
+    defer service.cancel(io) catch {};
+
+    // The checkout.
+    var checkout: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "checkout" });
+    defer checkout.deinit();
+    try checkout.connect();
+    const checkout_log = logger.scoped("checkout");
+
+    // The checkout has 500 ms in all; each quote gets what is left of it.
+    const ctx = core.Context.root.withDeadline(.after(std.Io.Clock.awake.now(io), .fromMilliseconds(500)));
+    var total: u32 = 0;
+    for ([_][]const u8{ "coffee-beans", "grinder", "filter-papers" }) |sku| {
+        var reply = try checkout.request("pricing.quote", sku, .{ .timeout = ctx.deadline.?.toTimeout() });
+        defer reply.deinit();
+        const cents = try std.fmt.parseInt(u32, reply.payload, 10);
+        total += cents;
+        checkout_log.info("Quote received", .{ .sku = sku, .cents = cents, .currency = reply.headers.get("Currency") });
+    }
+    checkout_log.info("Cart priced", .{ .items = 3, .total_cents = total });
+
+    // No one serves `shipping.quote`: the server says so at once, and the
+    // request fails with NoResponders instead of waiting for its timeout.
+    if (checkout.request("shipping.quote", "berlin", .{})) |reply| {
+        var unexpected = reply;
+        unexpected.deinit();
+    } else |err| switch (err) {
+        error.NoResponders => checkout_log.warn("No shipping service, shipping priced later", .{}),
+        else => return err,
+    }
+
+    // The pricing service stops: its subscription ends once it has
+    // answered what it took, and the client closes.
+    try pricing.drain(.{});
+    try service.await(io);
+}
+
+const ServeError = nats.Subscription.NextError || nats.Client.RespondError || std.fmt.BufPrintError;
+
+/// Answers every request of `quotes` with the price of the product it
+/// names, until the subscription ends.
+fn servePrices(client: *nats.Client, quotes: *nats.Subscription, pricing_log: log.Logger) ServeError!void {
+    while (true) {
+        var request = (try quotes.next(.{})) orelse return;
+        defer request.deinit();
+        const cents = for (catalog) |item| {
+            if (std.mem.eql(u8, item.sku, request.payload)) break item.cents;
+        } else {
+            pricing_log.warn("Unknown product", .{ .sku = request.payload });
+            try client.respondMessage(&request, .{ .headers = &.{.{ .name = "Error", .value = "unknown-sku" }} });
+            continue;
+        };
+        var buffer: [16]u8 = undefined;
+        // The reply goes to the request's reply subject, the requester's inbox.
+        try client.respondMessage(&request, .{
+            .headers = &.{.{ .name = "Currency", .value = "EUR" }},
+            .payload = try std.fmt.bufPrint(&buffer, "{d}", .{cents}),
+        });
+        pricing_log.info("Quote sent", .{ .sku = request.payload, .cents = cents });
+    }
+}
+```
+
 ```text
-$ zig build example-request_reply
-2026-10-13T18:07:20.508Z INFO  [pricing] Quote sent sku=coffee-beans cents=1299
-2026-10-13T18:07:20.508Z INFO  [checkout] Quote received sku=coffee-beans cents=1299 currency=EUR
-2026-10-13T18:07:20.508Z INFO  [pricing] Quote sent sku=grinder cents=4900
-2026-10-13T18:07:20.509Z INFO  [checkout] Quote received sku=grinder cents=4900 currency=EUR
-2026-10-13T18:07:20.509Z INFO  [pricing] Quote sent sku=filter-papers cents=399
-2026-10-13T18:07:20.509Z INFO  [checkout] Quote received sku=filter-papers cents=399 currency=EUR
-2026-10-13T18:07:20.509Z INFO  [checkout] Cart priced items=3 total_cents=6598
-2026-10-13T18:07:20.510Z WARN  [checkout] No shipping service, shipping priced later
+$ zig build run
+2026-10-27T20:48:48.462Z INFO  [pricing] Quote sent sku=coffee-beans cents=1299
+2026-10-27T20:48:48.474Z INFO  [checkout] Quote received sku=coffee-beans cents=1299 currency=EUR
+2026-10-27T20:48:48.483Z INFO  [pricing] Quote sent sku=grinder cents=4900
+2026-10-27T20:48:48.489Z INFO  [checkout] Quote received sku=grinder cents=4900 currency=EUR
+2026-10-27T20:48:48.492Z INFO  [pricing] Quote sent sku=filter-papers cents=399
+2026-10-27T20:48:48.494Z INFO  [checkout] Quote received sku=filter-papers cents=399 currency=EUR
+2026-10-27T20:48:48.494Z INFO  [checkout] Cart priced items=3 total_cents=6598
+2026-10-27T20:48:48.497Z WARN  [checkout] No shipping service, shipping priced later
 ```
 
 Every request ends. The timeout, 2 seconds unless you give another, covers
@@ -886,16 +1061,16 @@ answer: ask every warehouse how many units it has, ask every instance for
 its health. That is *scatter and gather*. `requestMany` sends one request
 and returns a stream of the responses as they come.
 
-From [scatter_gather.zig](scatter_gather.zig): three warehouses subscribe
-to `inventory.stock` without a queue group, so each of them gets every
-request.
+In `scatter_gather.zig`, three warehouses subscribe to `inventory.stock`
+without a queue group, so each of them gets every request, and the shop
+adds their answers up as they come:
 
 ```zig
-// Everyone's answer: the stream ends after three replies, or after
-// 500 ms, whichever comes first.
+// Everyone's answer: the stream ends after three replies, or after two
+// seconds, whichever comes first.
 {
     const replies = try shop.requestMany("inventory.stock", "sku-42", .{
-        .timeout = .{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } },
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
         .max_responses = warehouses.len,
     });
     defer replies.deinit();
@@ -921,7 +1096,7 @@ To stop earlier, on a condition of your own, leave the loop: the stream's
 // stream's deinit drops the replies that come later.
 {
     const replies = try shop.requestMany("inventory.stock", "sku-42", .{
-        .timeout = .{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } },
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
     });
     defer replies.deinit();
     var found: u32 = 0;
@@ -934,14 +1109,165 @@ To stop earlier, on a condition of your own, leave the loop: the stream's
 }
 ```
 
-```text
-$ zig build example-scatter_gather
-2026-10-13T18:08:28.115Z INFO  [shop] Stock reported warehouse=berlin units=12
-2026-10-13T18:08:28.145Z INFO  [shop] Stock reported warehouse=paris units=30
-2026-10-13T18:08:28.175Z INFO  [shop] Stock reported warehouse=madrid units=0
-2026-10-13T18:08:28.175Z INFO  [shop] Stock counted sku=sku-42 warehouses=3 units=42
-2026-10-13T18:08:28.218Z INFO  [shop] Enough stock found needed=20 found=42
+The whole program, `scatter_gather.zig`. Each warehouse is a service with
+a client of its own, and answers a while after a request: Berlin after
+100 ms, Paris after 400 and Madrid after 700, so their answers always come
+in that order.
+
+```zig
+//! Scatter and gather: one request, many replies. The shop asks every
+//! warehouse how many units of a product it has and adds the answers up
+//! as they come. Then it asks again, but stops as soon as enough units
+//! are found.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_NATS_URL   the server; nats://127.0.0.1:4222 by default
+
+const std = @import("std");
+const confy = @import("confy");
+const log = @import("log");
+const nats = @import("nats");
+const zio = @import("zio");
+
+/// The client logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
+/// The warehouses: their stock of the product, and how long they take to
+/// answer. Their answers come 300 ms apart, so they always come in this
+/// order.
+const Warehouse = struct { name: []const u8, units: u32, delay_ms: i64 };
+
+const warehouses = [_]Warehouse{
+    .{ .name = "berlin", .units = 12, .delay_ms = 100 },
+    .{ .name = "paris", .units = 30, .delay_ms = 400 },
+    .{ .name = "madrid", .units = 0, .delay_ms = 700 },
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // any thread may log: the tasks of the runtime too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+
+    const rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // Every warehouse is a service of its own, with its own client. They
+    // subscribe without a queue group, so each of them gets every request.
+    var clients: [warehouses.len]nats.Client = undefined;
+    var subs: [warehouses.len]*nats.Subscription = undefined;
+    var tasks: [warehouses.len]std.Io.Future(ServeError!void) = undefined;
+    var started: usize = 0;
+    defer for (clients[0..started], subs[0..started], tasks[0..started]) |*client, sub, *task| {
+        task.cancel(io) catch {};
+        sub.deinit();
+        client.deinit();
+    };
+    for (warehouses, &clients, &subs, &tasks) |warehouse, *client, *sub, *task| {
+        client.* = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = warehouse.name });
+        errdefer client.deinit();
+        try client.connect();
+        sub.* = try client.subscribe("inventory.stock", .{});
+        errdefer sub.*.deinit();
+        try client.flush(.{});
+        task.* = try io.concurrent(serveStock, .{ io, client, sub.*, warehouse });
+        started += 1;
+    }
+
+    var shop: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "shop" });
+    defer shop.deinit();
+    try shop.connect();
+    const shop_log = logger.scoped("shop");
+
+    // Everyone's answer: the stream ends after three replies, or after two
+    // seconds, whichever comes first.
+    {
+        const replies = try shop.requestMany("inventory.stock", "sku-42", .{
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+            .max_responses = warehouses.len,
+        });
+        defer replies.deinit();
+        var total: u32 = 0;
+        var count: u32 = 0;
+        while (true) {
+            var reply = (try replies.next(.{})) orelse break;
+            defer reply.deinit();
+            const units = try std.fmt.parseInt(u32, reply.payload, 10);
+            total += units;
+            count += 1;
+            shop_log.info("Stock reported", .{ .warehouse = reply.headers.get("Warehouse"), .units = units });
+        }
+        shop_log.info("Stock counted", .{ .sku = "sku-42", .warehouses = count, .units = total });
+    }
+
+    // Enough is enough: stop at the first replies that cover 20 units. The
+    // stream's deinit drops the replies that come later.
+    {
+        const replies = try shop.requestMany("inventory.stock", "sku-42", .{
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
+        });
+        defer replies.deinit();
+        var found: u32 = 0;
+        while (found < 20) {
+            var reply = (try replies.next(.{})) orelse break;
+            defer reply.deinit();
+            found += try std.fmt.parseInt(u32, reply.payload, 10);
+        }
+        shop_log.info("Enough stock found", .{ .needed = 20, .found = found });
+    }
+
+    // The warehouses stop: each answers what it took, then closes.
+    for (clients[0..started]) |*client| try client.drain(.{});
+    for (tasks[0..started]) |*task| try task.await(io);
+}
+
+const ServeError = nats.Subscription.NextError || nats.Client.RespondError || std.fmt.BufPrintError;
+
+/// Answers every stock request with the warehouse's units, until the
+/// subscription ends.
+fn serveStock(io: std.Io, client: *nats.Client, requests: *nats.Subscription, warehouse: Warehouse) ServeError!void {
+    while (true) {
+        var request = (try requests.next(.{})) orelse return;
+        defer request.deinit();
+        // Looking the product up takes a while.
+        try io.sleep(.fromMilliseconds(warehouse.delay_ms), .awake);
+        var buffer: [16]u8 = undefined;
+        try client.respondMessage(&request, .{
+            .headers = &.{.{ .name = "Warehouse", .value = warehouse.name }},
+            .payload = try std.fmt.bufPrint(&buffer, "{d}", .{warehouse.units}),
+        });
+    }
+}
 ```
+
+```text
+$ zig build run
+2026-10-27T20:48:48.661Z INFO  [shop] Stock reported warehouse=berlin units=12
+2026-10-27T20:48:48.959Z INFO  [shop] Stock reported warehouse=paris units=30
+2026-10-27T20:48:49.260Z INFO  [shop] Stock reported warehouse=madrid units=0
+2026-10-27T20:48:49.260Z INFO  [shop] Stock counted sku=sku-42 warehouses=3 units=42
+2026-10-27T20:48:49.694Z INFO  [shop] Enough stock found needed=20 found=42
+```
+
+The second time the shop stops at Paris: Berlin's 12 units and Paris's 30
+cover the 20 it needs, and Madrid's answer, which comes later, is dropped.
 
 The stream ends at its deadline (`timeout`, 2 seconds by default, never
 `.none`) or after `max_responses` responses (32 by default), whichever comes
@@ -1095,6 +1421,8 @@ mailer_log.info("Burst over", .{
 });
 ```
 
+A run of it logged:
+
 ```text
 2026-10-14T15:33:39.622Z WARN  [nats] subscription 1 is a slow consumer: messages dropped
 2026-10-14T15:33:40.060Z INFO  [mailer] Burst over received=10000 waiting=1024 dropped=8976
@@ -1181,12 +1509,13 @@ stateDiagram-v2
     closed --> [*]: deinit()
 ```
 
-Here is [zio_app.zig](zio_app.zig) taking orders from the `restart` server
-of `docker-compose.yml` while `docker restart zefir-nats-e2e-restart` runs
-in another terminal:
+Here is [a whole service on zio](#a-whole-service-on-zio), `zio_app.zig`,
+taking orders for seven seconds from a server on port 14230, while a
+`docker restart` of that server's container runs in another terminal. A
+run of it, with the lines in between left out:
 
 ```text
-$ APP_NATS_URL=nats://127.0.0.1:14230 APP_RUN_SECONDS=7 ./zio_app
+$ APP_NATS_URL=nats://127.0.0.1:14230 APP_RUN_SECONDS=7 zig build run
 2026-10-13T18:39:04.191Z INFO  [app] Started server=127.0.0.1:14230
 2026-10-13T18:39:04.191Z INFO  [events] Connected server=127.0.0.1:14230
 2026-10-13T18:39:04.394Z INFO  [orders] Order taken order_id=1 cart=coffee-beans,grinder
@@ -1298,8 +1627,7 @@ millisecond.
   once the connection lasted `min_delay`. A server that says so as soon
   as the client connects, on every connection, is paced like any that
   drops it. A [drain](#drain) under way finishes on the server it is on.
-- An attempt the `io` has no room for, as on `std.Io.Threaded` with a
-  `concurrent_limit` that the application's tasks fill, fails like any
+- An attempt for which the `io` cannot start a task fails like any
   other: the client tries again after the next wait, and a reader or
   writer that cannot start ends the new connection the same way.
 - `reconnect.enabled = false` closes the client when the connection drops.
@@ -1388,7 +1716,7 @@ lame duck mode stays and finishes on that server.
 `drain(.{})` gives it 30 seconds; at the deadline it closes anyway and
 returns `Timeout`. A connection lost during a drain closes the client too,
 with `Disconnected`, and what the subscriptions still held is freed unread,
-as with `close()`. From [zio_app.zig](zio_app.zig):
+as with `close()`. From [a whole service on zio](#a-whole-service-on-zio):
 
 ```zig
 app_log.info("Stopping", .{});
@@ -1648,8 +1976,8 @@ This version is for a network you trust.
   plaintext connection can forge a log line or send your terminal a
   sequence.
 
-From [user_password_auth.zig](user_password_auth.zig), where the password
-comes from the configuration as a `confy.Secret`:
+`user_password_auth.zig` connects as a user with a password. Both come
+from the configuration, the password as a `confy.Secret`:
 
 ```zig
 const Config = struct {
@@ -1660,6 +1988,9 @@ const Config = struct {
     },
 };
 ```
+
+The whole configuration goes to the log, where the password comes out as
+`[REDACTED]`, and the client gets the password through `expose()`:
 
 ```zig
 // The whole configuration may be logged: the password comes out as [REDACTED].
@@ -1686,36 +2017,138 @@ client.connect() catch |err| switch (err) {
 logger.info("Connected", .{ .user = config.nats.user });
 ```
 
+The whole program, `user_password_auth.zig`:
+
+```zig
+//! A server that wants a user and a password. Both come from the
+//! configuration, the password as a `confy.Secret`: the logger writes it
+//! as [REDACTED], and the program reads it with `expose()` only where the
+//! client gets it. The client keeps its own copy of the credentials and
+//! wipes it when it is freed.
+//!
+//! The password travels in plaintext, as this client does not do TLS: use
+//! it on a trusted network only.
+//!
+//! Settings, from the environment or a `.env` file in the working
+//! directory:
+//!
+//!   APP_NATS_URL        the server; nats://127.0.0.1:4222 by default
+//!   APP_NATS_USER       the user
+//!   APP_NATS_PASSWORD   the password
+
+const std = @import("std");
+const confy = @import("confy");
+const log = @import("log");
+const nats = @import("nats");
+const zio = @import("zio");
+
+/// The client logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+        user: []const u8,
+        password: confy.Secret,
+    },
+};
+
+pub fn main(init: std.process.Init) !u8 {
+    var config: Config = undefined;
+    // A missing user or password stops the program here, and says which.
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{ .env(".env"), .osEnv() },
+    });
+
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // any thread may log: the tasks of the runtime too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+
+    const rt = try zio.Runtime.init(init.gpa, .{});
+    defer rt.deinit();
+    const io = rt.io();
+
+    // The whole configuration may be logged: the password comes out as [REDACTED].
+    logger.info("Connecting", .{ .config = config });
+    var client: nats.Client = try .init(init.gpa, io, .{
+        .servers = &.{config.nats.url},
+        .name = "billing",
+        .auth = .{ .user_password = .{
+            .username = config.nats.user,
+            .password = config.nats.password.expose(),
+        } },
+    });
+    defer client.deinit();
+    client.connect() catch |err| switch (err) {
+        // A wrong user or password. Not worth retrying with the same ones.
+        // Returning, rather than exiting, lets `deinit` wipe the client's
+        // copy of the credentials.
+        error.AuthenticationFailed => {
+            logger.err("The server refused the user or the password", .{ .user = config.nats.user });
+            return 1;
+        },
+        else => return err,
+    };
+    logger.info("Connected", .{ .user = config.nats.user });
+
+    const round_trip = try client.rtt(.{});
+    logger.info("Server reached", .{ .rtt_us = round_trip.toMicroseconds() });
+    try client.drain(.{});
+    return 0;
+}
+```
+
+To try it, start a second server next to the one of
+[Installation](#installation), on port 14223, that wants the user `alice`
+with the password `secret`:
+
+```sh
+docker run --rm -p 14223:4222 nats:2.15.0-alpine nats-server --user alice --pass secret
+```
+
+With that password, the client connects, and `rtt` measures a round trip
+to the server:
+
 ```text
 $ APP_NATS_URL=nats://127.0.0.1:14223 APP_NATS_USER=alice APP_NATS_PASSWORD=secret zig build run
-2026-10-13T18:08:29.059Z INFO  Connecting config.nats.url=nats://127.0.0.1:14223 config.nats.user=alice config.nats.password=[REDACTED]
-2026-10-13T18:08:29.061Z INFO  Connected user=alice
-2026-10-13T18:08:29.062Z INFO  Server reached rtt_us=829
+2026-10-27T20:48:50.024Z INFO  Connecting config.nats.url=nats://127.0.0.1:14223 config.nats.user=alice config.nats.password=[REDACTED]
+2026-10-27T20:48:50.032Z INFO  Connected user=alice
+2026-10-27T20:48:50.035Z INFO  Server reached rtt_us=3381
+```
 
+With a wrong one, the server refuses the client, and the program ends with
+exit code 1, which `zig build run` reports after these lines:
+
+```text
 $ APP_NATS_URL=nats://127.0.0.1:14223 APP_NATS_USER=alice APP_NATS_PASSWORD=wrong zig build run
-2026-10-13T18:39:21.463Z INFO  Connecting config.nats.url=nats://127.0.0.1:14223 config.nats.user=alice config.nats.password=[REDACTED]
-2026-10-13T18:39:21.470Z ERROR The server refused the user or the password user=alice
+2026-10-27T20:48:50.056Z INFO  Connecting config.nats.url=nats://127.0.0.1:14223 config.nats.user=alice config.nats.password=[REDACTED]
+2026-10-27T20:48:50.060Z ERROR The server refused the user or the password user=alice
+```
 
+Without a password, confy stops the program before it connects, and says
+which setting is missing; the exit code is 1 again:
+
+```text
 $ APP_NATS_URL=nats://127.0.0.1:14223 APP_NATS_USER=alice zig build run
 error(confy): 1 configuration problem:
   nats.password: missing (set APP_NATS_PASSWORD)
 ```
 
-## Threaded or zio
+## Running on zio
 
-The client runs on any `std.Io` that can run tasks at the same time;
-without that, `connect()` fails with `ConcurrencyUnavailable`. Two are
-known to work, both tested:
-
-|                     | `std.Io.Threaded`                                                                                                                                                | zio                                                      |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| A waiting task      | an OS thread                                                                                                                                                     | a coroutine with a small stack                           |
-| Good for            | tools, tests, a few connections and waiters                                                                                                                      | services: thousands of tasks waiting at once             |
-| DNS                 | macOS, and Linux with glibc: the system's blocking `getaddrinfo`, which cancelation may not stop; Linux without glibc: std's own resolver; Windows: `DnsQueryEx` | zio's own resolver on Linux                              |
-| Where it comes from | `init.io` in `main`                                                                                                                                              | your build: `zio.Runtime.init(gpa, .{})`, then `rt.io()` |
-
-With zio, create one runtime for the whole application and give its `io`
-to every component, as [zio_app.zig](zio_app.zig) does:
+The client starts tasks of its own: the reader, the writer and the
+manager of [How the client works](#how-the-client-works). It runs them on
+the `std.Io` it is given, and zio runs them as coroutines, each with a
+small stack, on its executors, next to the tasks of your service: a
+service may have thousands of tasks waiting in a client at once. Create
+one runtime for the whole application in `main`, and give its `io` to
+every part of it, as [the whole service](#a-whole-service-on-zio) below
+does:
 
 ```zig
 // One runtime for the application, with an executor per CPU core. The
@@ -1725,6 +2158,22 @@ defer rt.deinit();
 const io = rt.io();
 ```
 
+`.executors = .auto` starts an executor per CPU core, or as many as a
+container's CPU limit allows. Most programs of this guide pass `.{}`, one
+executor, on which every task takes its turn; `queue_group.zig` asks for
+four, so that its workers run at the same time. A connection is one
+stream of bytes that one task writes, so a client publishes about as fast
+on one executor as on several: more executors pay off when your own work
+needs the cores.
+
+**Host names.** A server given by its name, such as
+`nats://nats.internal:4222`, is looked up again on each attempt to
+connect, within the attempt's `connect_timeout`. zio looks a name up
+without blocking a thread: on Linux with a resolver of its own, which
+reads `/etc/hosts` and `/etc/resolv.conf`, and on macOS and Windows
+through the system's asynchronous lookup. When `connect_timeout` runs
+out, or `close()` or a cancel ends the attempt, the lookup stops with it.
+
 > [!WARNING]
 > **A connected client must not move.** `connect()` starts tasks that keep
 > a pointer to the client. Do not copy it, and do not return it from a
@@ -1733,22 +2182,26 @@ const io = rt.io();
 > builds, a method called on a moved client panics with
 > `nats.Client moved after connect(): keep it where connect() ran (see the guide)`.
 > Initialize it where it will live, `var client: nats.Client = try .init(…)`
-> in the function that uses it, or through a pointer:
->
-> ```zig
-> /// Connects `client` where it will stay: once connected, a client must not move.
-> fn connectInPlace(client: *nats.Client, gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
->     client.* = try .init(gpa, io, .{ .servers = &.{url} });
->     errdefer client.deinit();
->     try client.connect();
-> }
-> ```
->
-> ```zig
-> var client: nats.Client = undefined;
-> try connectInPlace(&client, gpa, io, "nats://127.0.0.1:4222");
-> defer client.deinit();
-> ```
+> in the function that uses it, or through a pointer, as below.
+
+A function that connects a client in the place where its caller keeps it:
+
+```zig
+/// Connects `client` where it will stay: once connected, a client must not move.
+fn connectInPlace(client: *nats.Client, gpa: std.mem.Allocator, io: std.Io, url: []const u8) !void {
+    client.* = try .init(gpa, io, .{ .servers = &.{url} });
+    errdefer client.deinit();
+    try client.connect();
+}
+```
+
+and the caller, in whose function the client lives:
+
+```zig
+var client: nats.Client = undefined;
+try connectInPlace(&client, gpa, io, "nats://127.0.0.1:4222");
+defer client.deinit();
+```
 
 A few more rules:
 
@@ -1768,12 +2221,179 @@ A few more rules:
   the `connect()` that started connecting closes the client; another
   `connect()` that waited for it just returns.
 
-> [!NOTE]
-> **DNS with `std.Io.Threaded` on macOS, and on Linux with glibc.** There,
-> a host name is resolved by the system's blocking `getaddrinfo`, which
-> cancelation may not interrupt. `connect_timeout` covers DNS, TCP and the handshake of one
-> attempt, but a slow resolver can stretch an attempt, and a `close()`
-> during it, past that. An IP address, or zio, avoids it.
+### A whole service on zio
+
+`zio_app.zig` is the order service of a shop, whole: one runtime on every
+CPU core, one client that every task shares, a task that takes orders in
+a queue group, one that logs the events of the connection, and, for the
+demo, customers who place an order every 200 ms. It runs until Ctrl+C or
+SIGTERM, or for `APP_RUN_SECONDS` seconds, then drains.
+[Reconnect and the fate of data](#reconnect-and-the-fate-of-data) shows a
+run of it through a restart of its server.
+
+```zig
+//! A whole service on zio: the order service of a shop. One zio runtime
+//! runs everything on all CPU cores; one NATS client serves every task of
+//! the service: one takes orders, one logs what happens to the
+//! connection. The demo plays the customers too: a task places an order
+//! every 200 ms.
+//!
+//! The service runs until Ctrl+C or SIGTERM, then drains: it answers the
+//! orders it took, and closes. A server restart does not stop it: the
+//! client reconnects and subscribes again, and the customers' orders go
+//! through once it is back.
+//!
+//! Settings, from the environment:
+//!
+//!   APP_NATS_URL      the server; nats://127.0.0.1:4222 by default
+//!   APP_RUN_SECONDS   stop after this many seconds, as if Ctrl+C came
+
+const std = @import("std");
+const confy = @import("confy");
+const log = @import("log");
+const nats = @import("nats");
+const zio = @import("zio");
+
+/// The client logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+    run_seconds: ?u32 = null,
+};
+
+pub fn main(init: std.process.Init) !void {
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
+    // The logger outlives the runtime, so it takes `init.io`, through which
+    // any thread may log: the tasks of the runtime too.
+    const logger: log.Logger = try .init(init.gpa, init.io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+
+    // One runtime for the application, with an executor per CPU core. The
+    // parts of the service take its `io`: the client and the tasks.
+    const rt = try zio.Runtime.init(init.gpa, .{ .executors = .auto });
+    defer rt.deinit();
+    const io = rt.io();
+    const app_log = logger.scoped("app");
+
+    // One client for the whole service: every method may be called from
+    // any task at once. It must not move once connected.
+    var client: nats.Client = try .init(init.gpa, io, .{ .servers = &.{config.nats.url}, .name = "order-service" });
+    defer client.deinit();
+    try client.connect();
+    app_log.info("Started", .{ .server = client.connectedServer() });
+
+    var events = try io.concurrent(logEvents, .{ &client, logger.scoped("events") });
+    defer events.cancel(io) catch {};
+
+    // Every instance of the service joins the queue group: start three,
+    // and each order goes to one of them.
+    const orders = try client.subscribe("orders.place", .{ .queue = "order-service" });
+    defer orders.deinit();
+    try client.flush(.{});
+    var service = try io.concurrent(takeOrders, .{ &client, orders, logger.scoped("orders") });
+    defer service.cancel(io) catch {};
+
+    var customers = try io.concurrent(placeOrders, .{ io, &client, logger.scoped("customers") });
+    defer customers.cancel(io) catch {};
+
+    // Until Ctrl+C, SIGTERM, or the run time is over.
+    var stop: std.Io.Event = .unset;
+    var on_interrupt = try io.concurrent(stopOnSignal, .{ io, &stop, .interrupt });
+    defer on_interrupt.cancel(io) catch {};
+    var on_terminate = try io.concurrent(stopOnSignal, .{ io, &stop, .terminate });
+    defer on_terminate.cancel(io) catch {};
+    var timer: ?std.Io.Future(std.Io.Cancelable!void) = if (config.run_seconds) |seconds|
+        try io.concurrent(stopAfter, .{ io, &stop, seconds })
+    else
+        null;
+    defer if (timer) |*t| t.cancel(io) catch {};
+    try stop.wait(io);
+
+    app_log.info("Stopping", .{});
+    // No new orders; then the service answers the ones it took and closes.
+    customers.cancel(io) catch {};
+    try client.drain(.{});
+    try service.await(io);
+    try events.await(io);
+    const stats = client.stats();
+    app_log.info("Stopped", .{ .messages_in = stats.messages_in, .messages_out = stats.messages_out, .reconnects = stats.reconnects });
+}
+
+const TakeError = nats.Subscription.NextError || nats.Client.PublishError || nats.Client.RespondError || std.fmt.BufPrintError;
+
+/// The order service: confirms every order, and publishes an
+/// `orders.created` event for the rest of the shop.
+fn takeOrders(client: *nats.Client, orders: *nats.Subscription, orders_log: log.Logger) TakeError!void {
+    var next_id: u32 = 1;
+    while (true) {
+        var order = (try orders.next(.{})) orelse return;
+        defer order.deinit();
+        const id = next_id;
+        next_id += 1;
+        var buffer: [64]u8 = undefined;
+        const event = try std.fmt.bufPrint(&buffer, "{{\"id\":{d},\"cart\":\"{s}\"}}", .{ id, order.payload });
+        try client.publish("orders.created", event);
+        try client.respond(&order, try std.fmt.bufPrint(&buffer, "{d}", .{id}));
+        orders_log.info("Order taken", .{ .order_id = id, .cart = order.payload });
+    }
+}
+
+const PlaceError = nats.Client.RequestError || std.Io.Cancelable;
+
+/// The customers of the demo: an order every 200 ms. A lost connection
+/// fails the orders waiting at that moment; the next ones go through once
+/// the client is back.
+fn placeOrders(io: std.Io, client: *nats.Client, customers_log: log.Logger) PlaceError!void {
+    while (true) {
+        try io.sleep(.fromMilliseconds(200), .awake);
+        var confirmation = client.request("orders.place", "coffee-beans,grinder", .{}) catch |err| switch (err) {
+            // Restarting, or no instance of the service up yet: try again later.
+            error.Disconnected, error.Timeout, error.NoResponders, error.BufferFull => {
+                customers_log.warn("Order failed", .{ .reason = err });
+                continue;
+            },
+            else => |e| return e,
+        };
+        defer confirmation.deinit();
+        customers_log.info("Order confirmed", .{ .order_id = confirmation.payload });
+    }
+}
+
+/// Logs what happens to the connection, until the client has closed.
+fn logEvents(client: *nats.Client, events_log: log.Logger) nats.Client.NextEventError!void {
+    while (try client.nextEvent(.{})) |event| switch (event) {
+        .connected => |server| events_log.info("Connected", .{ .server = server }),
+        .disconnected => |lost| events_log.warn("Disconnected", .{ .server = lost.server, .reason = lost.reason }),
+        .reconnecting => |attempt| events_log.info("Reconnecting", .{ .server = attempt.server, .attempt = attempt.attempt }),
+        .reconnected => |server| events_log.info("Reconnected", .{ .server = server }),
+        .closed => |reason| events_log.info("Closed", .{ .reason = reason }),
+        else => events_log.info("Event", .{ .kind = std.meta.activeTag(event) }),
+    };
+}
+
+fn stopOnSignal(io: std.Io, stop: *std.Io.Event, kind: zio.SignalKind) !void {
+    var signal = try zio.Signal.init(kind);
+    defer signal.deinit();
+    try signal.wait();
+    stop.set(io);
+}
+
+fn stopAfter(io: std.Io, stop: *std.Io.Event, seconds: u32) std.Io.Cancelable!void {
+    try io.sleep(.fromSeconds(seconds), .awake);
+    stop.set(io);
+}
+```
 
 ## Logs
 
@@ -1799,10 +2419,10 @@ your own records; std.log's scope becomes the record's scope.
   in 2.2. Tested against 2.15.0 (`nats:2.15.0-alpine`); the parser's test
   frames come from 2.15.1.
 - **Zig 0.17.0.**
-- **zio** at commit `d15034f`, the one the tests use.
-- **Linux, macOS and Windows.** The tests without a server run on all
-  three in CI; the tests against real servers run on Linux in CI and on
-  macOS by hand. Windows is not tested against a real server.
+- **zio** at commit `d15034f`, the one [Installation](#installation) pins.
+- **Linux, macOS and Windows.** On all three the client is tested against
+  a server that the tests play themselves; against real servers, on Linux
+  and macOS only.
 
 <details>
 <summary>Windows: a stack trace after closing, in Debug builds</summary>
@@ -1830,76 +2450,6 @@ lines against `limits.max_control_line_bytes` before it sends them. If
 your server allows longer lines, raise both together.
 
 </details>
-
-## Performance
-
-```sh
-cd tests/nats
-zig build bench
-```
-
-starts the servers of `docker-compose.yml` and runs, against the plain one,
-`tests/nats/bench/main.zig`, built with ReleaseFast: publishing messages
-of 16 bytes to 16 KiB, publishing to a subscriber of another client, and
-request/reply with 1, 16 and 256 requests at a time, on zio with one
-executor and with four. For each it prints the messages per second and the
-megabytes per second, and for requests the median, 99th percentile and
-slowest round trip, after 100 requests that are not timed: the first one
-also subscribes the inbox.
-
-A run of it follows. Its numbers describe one shared machine and are no
-promise for yours: run the benchmark where your service runs, against
-your server.
-
-**GitHub Actions ubuntu-latest (shared runner), ReleaseFast.** The workflow
-`.github/workflows/bench.yml` runs `zig build bench` on a GitHub-hosted
-runner: Ubuntu 24.04, 4 vCPUs of an AMD EPYC 7763, 16 GB, Docker 28.0.4; the
-server runs on the same 4 vCPUs.
-[Run 38567461016](https://github.com/vkiryakov/zefir/actions/runs/38567461016),
-with commas added to the numbers for reading:
-
-```text
-zefir-nats benchmark: fast build, linux x86_64, server nats://127.0.0.1:14222
-
-zio, 1 executor
-  scenario                           messages  messages/s        MB/s
-  publish, 16 B                     1,000,000   3,737,354        59.8
-  publish, 128 B                    1,000,000   2,472,614       316.5
-  publish, 1024 B                     300,000     827,963       847.8
-  publish, 16384 B                     30,000      49,086       804.2
-  publish to a subscriber, 16 B       300,000   1,453,245        23.3
-  publish to a subscriber, 128 B      300,000   1,188,980       152.2
-  publish to a subscriber, 1024 B     100,000     436,045       446.5
-  request/reply, 16 B                requests  requests/s      p50 µs      p99 µs      max µs
-  1 at a time                          10,000       2,852         339         611       2,551
-  16 at a time                         50,000      37,841         406         758       3,163
-  256 at a time                        49,920     209,165       1,151       2,174       3,024
-
-zio, 4 executors
-  scenario                           messages  messages/s        MB/s
-  publish, 16 B                     1,000,000   3,425,807        54.8
-  publish, 128 B                    1,000,000   2,765,288       354.0
-  publish, 1024 B                     300,000     798,326       817.5
-  publish, 16384 B                     30,000      44,849       734.8
-  publish to a subscriber, 16 B       300,000   1,570,656        25.1
-  publish to a subscriber, 128 B      300,000   1,051,854       134.6
-  publish to a subscriber, 1024 B     100,000     392,203       401.6
-  request/reply, 16 B                requests  requests/s      p50 µs      p99 µs      max µs
-  1 at a time                          10,000       2,825         342         657       2,371
-  16 at a time                         50,000      34,436         434         889       2,586
-  256 at a time                        49,920     156,147       1,487       3,273       5,469
-```
-
-A shared runner is not the same machine twice. Two more runs of the same
-commit, [38569109348](https://github.com/vkiryakov/zefir/actions/runs/38569109348)
-and [38569121532](https://github.com/vkiryakov/zefir/actions/runs/38569121532),
-gave from 2,771 to 5,350 requests per second one at a time.
-
-One connection is one stream of bytes, written by one task, so a client
-publishes about as fast on one executor as on four. With 256 requests at
-a time, the three runs were 20 to 40 percent slower on four executors.
-More executors pay off when your own work, not the client, needs the
-cores.
 
 ## Protocol coverage
 
@@ -1940,23 +2490,3 @@ Everything a Core NATS client sends and receives:
 | WebSocket                                          | ❌ TODO                |
 | JetStream, key-value and object stores             | ❌ TODO                |
 | the services API (`$SRV`)                          | ❌ TODO                |
-
-<details>
-<summary>How the client is tested</summary>
-
-- **Without a server**, on Linux, macOS and Windows: the parser against
-  frames recorded from a real server, cut at every byte; malformed input
-  and every size limit; a fuzz test of the parser; every error the server
-  can send; and the client against a fake server on loopback: handshake,
-  heartbeat, reconnects, refused credentials, lame duck, drain, overflow,
-  and a reply racing its timeout a thousand times.
-- **Against real servers** in Docker (`zig build e2e`), on zio with one
-  executor and with four: every feature above, a user and password right,
-  wrong and missing, TLS-required and TLS-first servers, a restart, a
-  three-node cluster with failover and lame duck mode, a paused server, a
-  password change, and 10,000 requests through one inbox.
-- **Stress** (`zig build stress`), in Debug and ReleaseSafe: 50,000
-  requests at once, a storm of cut connections, and a close or a drain
-  while 1,321 tasks wait.
-
-</details>

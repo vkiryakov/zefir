@@ -217,20 +217,39 @@ Every record is one line of JSON on stdout, ready for a log collector. The field
 ## nats in a minute
 
 > [!NOTE]
-> The example needs zio in your `build.zig.zon` and `build.zig`; the [guide's Installation](src/nats/examples/README.md#installation) shows both.
+> The example needs zio in your `build.zig.zon` and `build.zig`, and confy among its imports; the [guide's Installation](src/nats/examples/README.md#installation) shows them.
 
-Connect to a NATS server, subscribe to a subject, publish to it and take the message. The client runs on any `std.Io` with real concurrency; [zio](https://github.com/lalinsky/zio) is the one for services:
+Connect to a NATS server, subscribe to a subject, publish to it and take the message. The client runs on [zio](https://github.com/lalinsky/zio), and confy reads the server's address from `APP_NATS_URL`:
 
 ```zig
 const std = @import("std");
+const confy = @import("confy");
 const nats = @import("nats");
 const zio = @import("zio");
 
+/// The client logs through std.log; this leaves out its debug records.
+pub const std_options: std.Options = .{ .log_level = .info };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
 pub fn main(init: std.process.Init) !void {
+    // APP_NATS_URL sets the server; without it, the default stays.
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
     const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
-    var client: nats.Client = try .init(init.gpa, rt.io(), .{ .servers = &.{"nats://127.0.0.1:4222"} });
+    var client: nats.Client = try .init(init.gpa, rt.io(), .{ .servers = &.{config.nats.url} });
     defer client.deinit();
     try client.connect();
 
@@ -246,13 +265,12 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+Against a server started with `docker run --rm -d -p 4222:4222 nats:2.15.0-alpine`:
+
 ```text
-$ docker run --rm -d -p 4222:4222 nats:2.15.0-alpine
-$ zig build run -Doptimize=ReleaseSafe
+$ zig build run
 info: orders.created: {"id":1001}
 ```
-
-A Debug build also shows the client's own `debug(nats)` records: connecting, connected, closing.
 
 `flush` waits until the server has the subscription, and `publish` returns once a copy of the message is in the client's queue. Every queue has a limit, a dropped connection comes back with its subscriptions, all requests share one reply subscription, and `drain()` stops a service without losing the work it took. **[Read the nats guide →](src/nats/examples/README.md)**
 

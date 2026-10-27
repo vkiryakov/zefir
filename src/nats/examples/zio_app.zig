@@ -13,9 +13,6 @@
 //!
 //!   APP_NATS_URL      the server; nats://127.0.0.1:4222 by default
 //!   APP_RUN_SECONDS   stop after this many seconds, as if Ctrl+C came
-//!
-//! In tests/nats, `zig build example-zio_app` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
