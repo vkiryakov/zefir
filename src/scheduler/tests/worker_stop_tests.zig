@@ -125,7 +125,9 @@ test "a handler that never yields makes shutdown return ShutdownTimeout" {
     try reach(&probe.runs, 1, 5);
     const deadline = fromNow(3000);
     try testing.expectError(error.ShutdownTimeout, w.shutdown(io, deadline));
-    try testing.expect(msPast(deadline) >= -260 and msPast(deadline) <= -50);
+    // It gives up 250 ms before the deadline, never sooner; how late the
+    // wake-up comes is the machine's.
+    try testing.expect(msPast(deadline) >= -260 and msPast(deadline) < 0);
     try testing.expectEqual(@as(u32, 1), probe.cancelled.load(.acquire));
     try testing.expectEqual(Worker.State.draining, w.state());
 }

@@ -14,6 +14,7 @@ const Store = scheduler.Store;
 const io = fixture.io;
 const quick = fixture.quick;
 const reach = fixture.reach;
+const counted = fixture.counted;
 const nowMs = fixture.nowMs;
 
 const Kept = Job(.{ .name = "kept", .retry = .{ .attempts = 1 }, .history = .forever });
@@ -64,6 +65,7 @@ test "a failing one-shot job retries and ends failed" {
     try testing.expectEqual(@as(u32, 3), last.attempt);
     try testing.expectEqual(@as(u32, 3), probe.runs.load(.acquire));
     try testing.expectEqual(@as(u64, 3), w.stats().failed);
+    try counted(&w, "gave_up", 1, 5);
     try testing.expectEqual(@as(u64, 1), w.stats().gave_up);
 }
 
@@ -230,6 +232,7 @@ test "a late run past its skip threshold writes skipped and runs nothing" {
     try testing.expectEqual(scheduler.RunOutcome.skipped, (r.last orelse return error.TestUnexpectedResult).outcome);
     try testing.expect(r.scheduled_at.unix_ms > f.memory.store().now(io).unix_ms);
     try testing.expectEqual(@as(u32, 0), probe.runs.load(.acquire));
+    try counted(&w, "skipped", 1, 5);
     try testing.expectEqual(@as(u64, 1), w.stats().skipped);
 }
 
@@ -239,14 +242,19 @@ test "coalesce runs once for the missed moments" {
     defer f.deinit();
     var probe: Probe = .{};
     var job: Ghostly = .{ .probe = &probe };
-    try f.schedule(Ghostly, "x", .{ .repeat = .everyHours(1) });
-    try moveBack(&f, .of(Ghostly, "x"), 3 * 60 * 60 * 1000);
+    // Every day at the hour twelve hours from now, moved three days back:
+    // its next moment cannot come during the test.
+    const hour = @divFloor(f.memory.store().now(io).unix_ms, 60 * 60 * 1000);
+    const opposite: u8 = @intCast(@mod(hour + 12, 24));
+    try f.schedule(Ghostly, "x", .{ .repeat = .dailyAt(opposite, 0, 0, .h24) });
+    try moveBack(&f, .of(Ghostly, "x"), 3 * 24 * 60 * 60 * 1000);
     var w: scheduler.Worker(struct { job: *Ghostly }) = try .init(testing.allocator, io, f.store(), .{ .job = &job }, quick);
     defer w.deinit(io);
     try w.start(io);
     try reach(&probe.ended, 1, 5);
     try testing.expect(probe.missed.load(.acquire) >= 2);
     _ = try rowOf(&f, .of(Ghostly, "x"), .succeeded);
+    try counted(&w, "coalesced", 1, 5);
     try io.sleep(.fromMilliseconds(300), .awake);
     try testing.expectEqual(@as(u32, 1), probe.runs.load(.acquire));
     try testing.expectEqual(@as(u64, 1), w.stats().coalesced);
@@ -330,6 +338,7 @@ test "unreadable past unreadable_limit ends failed" {
     try testing.expectEqual(scheduler.Client.Changed.changed, try f.client.reschedule(io, .root, .of(Kept, "x"), .{ .after = .zero }, .{}));
     const r = (try f.until(.of(Kept, "x"), .failed, 5)) orelse return error.TestUnexpectedResult;
     try testing.expectEqualDeep(@as(?[]const u8, "UnreadablePayload"), (r.last orelse return error.TestUnexpectedResult).error_name);
+    try counted(&w, "gave_up", 1, 5);
     try testing.expectEqual(@as(u64, 1), w.stats().gave_up);
 }
 
@@ -368,8 +377,9 @@ test "stats follow the slots and the runs" {
     try testing.expectEqual(@as(u16, 4), w.stats().workers);
     try testing.expectEqual(@as(u16, 3), w.stats().running);
     try reach(&probe.ended, 3, 5);
+    // A slot leaves `running` once it counted its run.
     const give_up = nowMs() + 5000;
-    while (w.stats().succeeded < 3) : (try io.sleep(.fromMilliseconds(5), .awake)) if (nowMs() >= give_up) return error.Timeout;
+    while (w.stats().succeeded < 3 or w.stats().running > 0) : (try io.sleep(.fromMilliseconds(5), .awake)) if (nowMs() >= give_up) return error.Timeout;
     const s = w.stats();
     try testing.expectEqual(@as(u16, 0), s.running);
     try testing.expectEqual(@as(u64, 3), s.claimed);

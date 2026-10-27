@@ -88,6 +88,18 @@ pub fn reach(counter: *const std.atomic.Value(u32), n: u32, seconds: i64) !void 
     }
 }
 
+/// Waits until the counter `field` of the stats of the worker `w` reaches
+/// `n`, for at most `seconds`. A slot counts the event of a transition only
+/// once the store took it, after the record changed: a test that saw the
+/// record change waits for the count.
+pub fn counted(w: anytype, comptime field: []const u8, n: u64, seconds: i64) !void {
+    const give_up = nowMs() + seconds * 1000;
+    while (@field(w.stats(), field) < n) {
+        if (nowMs() >= give_up) return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+}
+
 /// A store with faults on demand over a MemoryStore, and a client of the
 /// MemoryStore itself, which the faults do not touch. Made in place.
 pub const Fixture = struct {

@@ -87,10 +87,12 @@ test "start writes declared jobs, fixes a changed plan and leaves parked ones al
     try testing.expectEqualSlices(u8, &first.life, &moved.life);
 
     // A version that knows the job without .repeat, and declares another
-    // one, finds the record parked: it warns and never claims it.
+    // one, finds the record parked: it warns and never claims it. The
+    // other declaration runs at a full hour, which may come during the test.
     var keyed_probe: Probe = .{};
+    var hourly_probe: Probe = .{};
     var keyed: PulseKeyed = .{ .probe = &keyed_probe };
-    var hourly: Hourly = .{ .probe = &keyed_probe };
+    var hourly: Hourly = .{ .probe = &hourly_probe };
     testing.log_level = .err;
     defer testing.log_level = .warn;
     var w3: scheduler.Worker(struct { pulse: *PulseKeyed, hourly: *Hourly }) = try .init(testing.allocator, io, f.store(), .{ .pulse = &keyed, .hourly = &hourly }, quick);
