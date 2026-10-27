@@ -63,6 +63,10 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "job_when_done_succeeded.zig", .expect = "scheduler: SendInvoice: when_done.succeeded.keep_for must be more than zero" },
     .{ .file = dir ++ "job_when_done_failed.zig", .expect = "scheduler: SendInvoice: when_done.failed.keep_for must be more than zero" },
     .{ .file = dir ++ "job_misfire_skip.zig", .expect = "scheduler: NightlyCleanup: misfire.skip must be more than zero" },
+    // Worker(Jobs): a field that is no pointer to a job, two jobs of one
+    // name.
+    .{ .file = dir ++ "jobs_not_pointer.zig", .expect = "scheduler: Worker(Jobs): a field of Jobs points to a job: invoices: *SendInvoice" },
+    .{ .file = dir ++ "jobs_same_name.zig", .expect = "scheduler: Worker(Jobs): SendInvoice and Reminder share the name \"send-invoice\"" },
 };
 
 const twelve = "an hour of the 12-hour clock is 1–12; ";

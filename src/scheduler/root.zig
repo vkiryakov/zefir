@@ -81,6 +81,12 @@ pub const Run = record.Run;
 /// Puts jobs on a time by a key and manages them.
 pub const Client = @import("Client.zig");
 
+/// Runs the jobs of `Jobs`, a struct of pointers to job types: claims the
+/// due ones, holds a lease on each while it runs, records the outcome.
+pub const Worker = @import("Worker.zig").Worker;
+/// The counters of a worker: `worker.stats()`.
+pub const Stats = @import("worker/stats.zig").Stats;
+
 /// The store contract: `scheduler.MemoryStore`, `mongo.SchedulerStore` or a
 /// store of your own behind one interface.
 pub const Store = @import("Store.zig");
@@ -128,4 +134,5 @@ test {
     _ = @import("tests/transition_tests.zig");
     _ = @import("tests/declared_tests.zig");
     _ = @import("tests/run_info_tests.zig");
+    _ = @import("tests/worker_init_tests.zig");
 }
