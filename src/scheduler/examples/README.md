@@ -243,7 +243,8 @@ zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7
 Then import the modules in `build.zig`: scheduler; mongo, for a store in
 MongoDB; core, whose `core.Context` the calls of the client take. The
 programs of this guide also use Zefir's confy for settings and log for
-records:
+records, and those on MongoDB mongo-bson, for the `mongo.Database` that
+drops their collections when they start:
 
 ```zig
 // build.zig
@@ -259,6 +260,7 @@ const exe = b.addExecutable(.{
         .imports = &.{
             .{ .name = "scheduler", .module = zefir.module("zefir-scheduler") },
             .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
             .{ .name = "core", .module = zefir.module("zefir-core") },
             .{ .name = "zio", .module = zio.module("zio") },
             .{ .name = "confy", .module = zefir.module("zefir-confy") },
