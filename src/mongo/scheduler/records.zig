@@ -303,7 +303,8 @@ pub fn remove(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const schedul
         if (c.read(id, &md) catch |e| return c.unknown(err, e)) |_| {
             return if (Call.classOf(err) == .answered) c.refused(err) else c.unknown(err, null);
         }
-        c.ran(err);
+        // Gone, by this delete or by another one: the store cannot tell
+        // which, so it does not say that its own write is in place.
         return true;
     };
     return result.deleted > 0;

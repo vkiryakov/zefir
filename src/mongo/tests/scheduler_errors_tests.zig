@@ -540,3 +540,29 @@ test "after a lost reply, finish answers lost only when its transition cannot ha
     }
     try f.expectCommands(&.{ "update", "find", "update", "find", "update", "find", "update", "find", "update", "find", "update", "find" });
 }
+
+test "a renewal that may have run and failed again tells both errors" {
+    var f: Fixture = .{};
+    const a = f.a();
+    try f.start(&.{
+        .close_connection,
+        .{ .reply = try Script.failure(a, .{ .code = 2, .code_name = "BadValue", .errmsg = "the second try was refused" }) },
+    });
+    defer f.stop();
+    const renew: Store.RenewRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .life = fixture.life, .owner = "w1", .fence = 1, .lease = .fromSeconds(60) };
+    try testing.expectError(error.OutcomeUnknown, f.store.renew(io, fixture.no_deadline, &renew, f.call()));
+    try expectClean(&f);
+    // The first error with its own details, then the renewal sent again.
+    const text = f.diagnostics.message();
+    const first = std.mem.find(u8, text, "renew: the write may have run (error.ConnectionLost of zefir-mongo: ") orelse {
+        std.debug.print("the diagnostics: {s}\n", .{text});
+        return error.TestUnexpectedResult;
+    };
+    const again = std.mem.find(u8, text, "sending it again failed: error.CommandFailed of zefir-mongo: ") orelse {
+        std.debug.print("the diagnostics: {s}\n", .{text});
+        return error.TestUnexpectedResult;
+    };
+    const refused = std.mem.find(u8, text, "the second try was refused") orelse return error.TestUnexpectedResult;
+    try testing.expect(first < again and again < refused);
+    try f.expectCommands(&.{ "findAndModify", "findAndModify" });
+}

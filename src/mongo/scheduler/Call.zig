@@ -185,6 +185,13 @@ pub fn unknownSince(c: *Call, err: mongo.Error) StoreError {
     return c.fail(error.OutcomeUnknown, code(&c.md), "{s}: the write may have run (error.{t} of zefir-mongo: {s}), and what changed the record since leaves no mark of it", .{ c.what, err, c.md.message() });
 }
 
+/// The write that failed with `err`, whose details `first` keeps, may have
+/// run, and sending it again, which changes nothing the second time,
+/// failed with `again`, whose details are in `md`.
+pub fn unknownResent(c: *Call, err: mongo.Error, first: *const mongo.Diagnostics, again: mongo.Error) StoreError {
+    return c.fail(error.OutcomeUnknown, code(first) orelse code(&c.md), "{s}: the write may have run (error.{t} of zefir-mongo: {s}), and sending it again failed: error.{t} of zefir-mongo: {s}", .{ c.what, err, first.message(), again, c.md.message() });
+}
+
 /// The write that failed with `err` ran, by its reply or the record read
 /// again; one that ran without its write concern, the log says.
 pub fn ran(c: *Call, err: mongo.Error) void {

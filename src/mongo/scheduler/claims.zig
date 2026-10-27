@@ -234,7 +234,9 @@ pub fn renew(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Stor
             .memory => return error.OutOfMemory,
             .answered, .no_reply => {},
         }
-        return renewOnce(&c, id, &life, filter, stage, request.lease) catch |again| c.unknown(err, again);
+        // The renewal sent again writes its own details.
+        const first = c.md;
+        return renewOnce(&c, id, &life, filter, stage, request.lease) catch |again| c.unknownResent(err, &first, again);
     };
 }
 
@@ -335,7 +337,8 @@ fn finishLost(c: *Call, id: []const u8, request: *const Store.FinishRequest, err
     var md: mongo.Diagnostics = .{};
     const now = (c.read(id, &md) catch |e| return c.unknown(err, e)) orelse {
         if (request.next != .delete) return c.unknownSince(err);
-        c.ran(err);
+        // Removed by this transition or by a cancel, which the store cannot
+        // tell apart, so it does not say that its own write is in place.
         return .done;
     };
     if (records.sameTag(now.tag, request.tag)) {
