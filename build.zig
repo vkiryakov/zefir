@@ -1220,6 +1220,11 @@ pub fn build(b: *std.Build) void {
     }
     test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
 
+    // The guide of nats shows its examples as they are, and its snippets
+    // compile. The programs need NATS servers and zio: tests/nats builds
+    // and runs them.
+    addNatsGuide(b, test_nats, nats, log, target, optimize, tsan);
+
     addRpcGuide(b, test_rpc, .{
         .core = core,
         .validator = validator,
@@ -1417,6 +1422,50 @@ fn addRpcGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_rpc.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The guide of zefir-nats, src/nats/examples/README.md: fragments.zig, the
+/// snippets of the guide that are no part of a whole program, built as a
+/// test that runs none of them, and readme_test.zig, which checks that
+/// README.md shows every file of the examples as it is, and the
+/// repository's README.md its "nats in a minute". The programs need NATS
+/// servers and zio: tests/nats builds and runs them, and checks their runs
+/// against both.
+fn addNatsGuide(
+    b: *std.Build,
+    test_nats: *std.Build.Step,
+    nats: *std.Build.Module,
+    log: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/nats/examples/";
+    const fragments = b.addTest(.{
+        .name = "nats-guide-fragments",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "fragments.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "nats", .module = nats },
+                .{ .name = "log", .module = log },
+            },
+        }),
+    });
+    test_nats.dependOn(&addRun(b, fragments, tsan).step);
+    const readme = b.addTest(.{
+        .name = "nats-guide-readme",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+        }),
+    });
+    readme.root_module.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    test_nats.dependOn(&addRun(b, readme, tsan).step);
 }
 
 /// The modules that the examples of the mongo guide import here.

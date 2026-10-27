@@ -1,8 +1,13 @@
 //! The end-to-end tests, examples, stress tests and benchmark of
-//! zefir-nats against real NATS servers, on zio. The servers are those of
-//! docker-compose.yml at the repository root.
+//! zefir-nats against real NATS servers, on zio, and the check that the
+//! guide, src/nats/examples/README.md, and "nats in a minute" of the
+//! repository's README.md show the runs of their programs as they
+//! printed. The servers are those of docker-compose.yml at the repository
+//! root.
 //!
-//!   zig build e2e              start the servers, run the tests and the examples
+//!   zig build e2e              start the servers, run the tests and the
+//!                              examples, then the runs of the guide and
+//!                              its check
 //!   zig build examples         start the servers, run the examples
 //!   zig build example-<name>   start the servers, run one example, such as
 //!                              example-pub_sub
@@ -13,8 +18,10 @@
 //!                              built with ReleaseFast unless
 //!                              -Dbench-optimize says otherwise
 //!   zig build check            build the tests, the examples and the
-//!                              benchmark without running them; no servers
-//!                              needed, so CI runs it on every system
+//!                              benchmark without running them (not the
+//!                              check of the guide, which embeds what the
+//!                              runs print); no servers needed, so CI runs
+//!                              it on every system
 //!   zig build up               only start the servers
 //!   zig build down             stop the servers; it also resets them after a run
 //!                              that died while a test held one paused
@@ -100,6 +107,60 @@ const examples = [_]Example{
             "INFO  [app] Stopping\n",
             "INFO  [events] Closed reason=drained\n",
         },
+    },
+};
+
+/// A run of a program of src/nats/examples that the guide, or README.md of
+/// the repository, shows as it printed: guide_test.zig checks it.
+const GuideRun = struct {
+    /// The file, without `.zig`.
+    program: []const u8,
+    /// The name of the run: what it printed goes to the check as
+    /// `<name>.out`.
+    name: []const u8,
+    /// The settings of its run here, against the servers of
+    /// docker-compose.yml.
+    env: []const [2][]const u8,
+    /// The run as the document shows it: what a reader types, against a
+    /// server of their own.
+    command: []const u8,
+    /// Where it prints what the document shows: the records of zefir-log
+    /// go to stdout, those of std.log, confy's report of the settings
+    /// among them, to stderr.
+    output: enum { stdout, stderr } = .stdout,
+    exit_code: u8 = 0,
+    /// The document that shows it: `guide` or `root_readme`.
+    doc: []const u8 = "guide",
+};
+
+/// The runs, in the order of the documents: the programs of `root_readme`
+/// and `server_programs` of src/nats/examples/cases.zig, which
+/// guide_test.zig checks.
+const guide_runs = [_]GuideRun{
+    .{ .program = "minute", .name = "minute", .env = &.{.{ "APP_NATS_URL", plain }}, .command = "$ zig build run", .output = .stderr, .doc = "root_readme" },
+    .{ .program = "pub_sub", .name = "pub_sub", .env = &.{.{ "APP_NATS_URL", plain }}, .command = "$ zig build run" },
+    .{ .program = "request_reply", .name = "request_reply", .env = &.{.{ "APP_NATS_URL", plain }}, .command = "$ zig build run" },
+    .{ .program = "scatter_gather", .name = "scatter_gather", .env = &.{.{ "APP_NATS_URL", plain }}, .command = "$ zig build run" },
+    .{
+        .program = "user_password_auth",
+        .name = "user_password_auth",
+        .env = &.{ .{ "APP_NATS_URL", auth }, .{ "APP_NATS_USER", "alice" }, .{ "APP_NATS_PASSWORD", "secret" } },
+        .command = "$ APP_NATS_URL=" ++ auth ++ " APP_NATS_USER=alice APP_NATS_PASSWORD=secret zig build run",
+    },
+    .{
+        .program = "user_password_auth",
+        .name = "user_password_auth-refused",
+        .env = &.{ .{ "APP_NATS_URL", auth }, .{ "APP_NATS_USER", "alice" }, .{ "APP_NATS_PASSWORD", "wrong" } },
+        .command = "$ APP_NATS_URL=" ++ auth ++ " APP_NATS_USER=alice APP_NATS_PASSWORD=wrong zig build run",
+        .exit_code = 1,
+    },
+    .{
+        .program = "user_password_auth",
+        .name = "user_password_auth-missing",
+        .env = &.{ .{ "APP_NATS_URL", auth }, .{ "APP_NATS_USER", "alice" } },
+        .command = "$ APP_NATS_URL=" ++ auth ++ " APP_NATS_USER=alice zig build run",
+        .output = .stderr,
+        .exit_code = 1,
     },
 };
 
@@ -189,6 +250,46 @@ pub fn build(b: *std.Build) void {
         one.step.dependOn(&up.step);
         b.step(b.fmt("example-{s}", .{example.run}), b.fmt("Run the {s} example against the NATS servers", .{example.run})).dependOn(&one.step);
     }
+
+    // The runs that the guide and the repository's README.md show: `e2e`
+    // runs them after the examples, one after another, and what each
+    // prints goes to the check of the guide, which runs last.
+    const guide = addGuideCheck(b, zefir, target, optimize);
+    var embedded: std.StringHashMapUnmanaged(void) = .empty;
+    for (guide_runs) |guide_run| {
+        const exe = built.get(guide_run.program) orelse exe: {
+            const exe = addExample(b, zefir, zio, guide_run.program, target, optimize);
+            built.put(b.allocator, guide_run.program, exe) catch @panic("OOM");
+            break :exe exe;
+        };
+        const checked = b.addRunArtifact(exe);
+        // The servers are outside the build graph: run every time.
+        checked.has_side_effects = true;
+        for (guide_run.env) |pair| checked.setEnvironmentVariable(pair[0], pair[1]);
+        checked.expectExitCode(guide_run.exit_code);
+        checked.step.dependOn(&up.step);
+        checked.step.dependOn(after_tests);
+        after_tests = &checked.step;
+        // A run with side effects keeps what it printed in a directory
+        // named by its arguments, its environment and this name, and runs
+        // may share their environment: the name keeps them apart.
+        const basename = b.fmt("{s}.out", .{guide_run.name});
+        const out = switch (guide_run.output) {
+            .stdout => checked.captureStdOut(.{ .basename = basename }),
+            .stderr => checked.captureStdErr(.{ .basename = basename }),
+        };
+        guide.root_module.addAnonymousImport(basename, .{ .root_source_file = out });
+        if (embedded.contains(guide_run.program)) continue;
+        embedded.put(b.allocator, guide_run.program, {}) catch @panic("OOM");
+        guide.root_module.addAnonymousImport(b.fmt("{s}.zig", .{guide_run.program}), .{
+            .root_source_file = zefir.path(b.fmt("src/nats/examples/{s}.zig", .{guide_run.program})),
+        });
+    }
+    const run_guide = b.addRunArtifact(guide);
+    run_guide.stdio = .inherit;
+    run_guide.has_side_effects = true;
+    run_guide.step.dependOn(after_tests);
+    e2e_step.dependOn(&run_guide.step);
 
     // The benchmark: `bench` runs it, built with ReleaseFast unless
     // -Dbench-optimize says otherwise; `e2e` builds it with ReleaseFast
@@ -315,6 +416,52 @@ fn addExample(
             .imports = &.{.{ .name = "example", .module = example }},
         }),
     });
+}
+
+/// The check of the guide, guide_test.zig, without what the runs printed:
+/// the caller embeds each program as `<program>.zig` and what each run
+/// printed as `<name>.out`.
+fn addGuideCheck(b: *std.Build, zefir: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step.Compile {
+    const options = b.addOptions();
+    var programs: [guide_runs.len][]const u8 = undefined;
+    var names: [guide_runs.len][]const u8 = undefined;
+    var commands: [guide_runs.len][]const u8 = undefined;
+    var docs: [guide_runs.len][]const u8 = undefined;
+    for (guide_runs, &programs, &names, &commands, &docs) |guide_run, *program, *name, *command, *doc| {
+        program.* = guide_run.program;
+        name.* = guide_run.name;
+        command.* = guide_run.command;
+        doc.* = guide_run.doc;
+    }
+    options.addOption([]const []const u8, "programs", &programs);
+    options.addOption([]const []const u8, "names", &names);
+    options.addOption([]const []const u8, "commands", &commands);
+    options.addOption([]const []const u8, "docs", &docs);
+    const guide = b.addTest(.{
+        .name = "guide",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("guide_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "guide-check", .module = b.createModule(.{
+                    .root_source_file = zefir.path("src/nats/examples/guide_check.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }) },
+                .{ .name = "cases", .module = b.createModule(.{
+                    .root_source_file = zefir.path("src/nats/examples/cases.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }) },
+                .{ .name = "guide_runs", .module = options.createModule() },
+            },
+        }),
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
+    });
+    guide.root_module.addAnonymousImport("guide", .{ .root_source_file = zefir.path("src/nats/examples/README.md") });
+    guide.root_module.addAnonymousImport("root_readme", .{ .root_source_file = zefir.path("README.md") });
+    return guide;
 }
 
 /// A run of `exe` with the settings of `example`: `.check` checks what it
