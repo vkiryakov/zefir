@@ -2531,15 +2531,16 @@ try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake 
    started go back to the store at once, due now, with the attempt they
    had.
 2. The running jobs go on for `shutdown_grace`, but no longer than 2 s and
-   250 ms before the deadline of `shutdown`: 2 s for the cancels and the
-   outcomes, 250 ms for the caller.
+   250 ms before the deadline of `shutdown`: 2 s for the cancels, the
+   outcomes and the end of the worker's tasks, 250 ms for the caller.
 3. When the grace ends, each slot cancels its run, waits for its end, and
    gives the job back with the attempt it had, so the stop costs no
    attempt; the history gets a row `interrupted`, `Shutdown`.
 4. `shutdown` returns once the worker stopped, and no later than 250 ms
-   before its deadline. A deadline already past cancels the runs at once,
-   and `shutdown` returns at once; the jobs whose return the store did not
-   take in time come back when their leases end, with an attempt counted.
+   before its deadline, unless a call of the store holds it, see below. A
+   deadline already past cancels the runs at once, and `shutdown` returns
+   at once; the jobs whose return the store did not take in time come
+   back when their leases end, with an attempt counted.
 
 `error.ShutdownTimeout` means that the worker had not stopped 250 ms
 before the deadline because a handler did not end after its cancel,
