@@ -191,6 +191,13 @@ application's zefir, together with the test of
 its own (the deadline, the peer, the `std.Io` of a call) and the tests in
 `src/root.zig` (where a reply goes, a message of the wrong kind).
 
+`consumer/build.zig.zon` takes zefir by the relative path `../../..`, which
+leads nowhere in a copy of this directory. In a copy, `consumer/` is your
+application: delete the `.zefir` entry of its `build.zig.zon`, then run
+`zig fetch --save` in `consumer/`, as
+[Installation](../../src/rpc/examples/README.md#installation) of the guide
+of rpc shows.
+
 The report of the suite on the mailbox, as `{f}` writes it:
 
 ```text

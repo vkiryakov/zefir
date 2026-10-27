@@ -503,8 +503,8 @@ pub const Client = struct {
     /// The reply queue and the task that reads it, once `connect` has run.
     replies: ?*Queue = null,
     task: std.Io.Future(void) = undefined,
-    /// The `std.Io` of `connect`: in Debug, `call` checks that it gets the
-    /// same.
+    /// The `std.Io` of `connect`: in safe builds, `call` checks that it gets
+    /// the same.
     io_vtable: ?*const std.Io.VTable = null,
 
     pub const Options = struct {

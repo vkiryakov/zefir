@@ -28,14 +28,14 @@ test "README.md shows the report of the conformance suite on the mailbox as it i
     defer report.deinit();
     const text = try std.fmt.allocPrint(testing.allocator, "{f}", .{&report});
     defer testing.allocator.free(text);
-    // A note that only a slow machine gets, such as that of T18 when an
-    // answer came after its start returned, may be missing from README.md;
-    // the notes it shows must be in the report, in their places.
+    // Only a slow machine gets the note of T18 that an answer came after
+    // its start returned, and README.md does not show it. Every other line
+    // of the report must be in README.md, in its place.
     var shown: std.ArrayList(u8) = .empty;
     defer shown.deinit(testing.allocator);
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text, "\n"), '\n');
     while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "  note ") and std.mem.find(u8, readme, line) == null) continue;
+        if (std.mem.startsWith(u8, line, "  note     T18  the answer came after start returned")) continue;
         try shown.appendSlice(testing.allocator, line);
         try shown.append(testing.allocator, '\n');
     }
