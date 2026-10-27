@@ -47,6 +47,64 @@ its jobs in memory or in MongoDB.
 > - **`wtimeout` and read concerns in zefir-mongo**, which come with
 >   replica sets.
 
+From [the quick start](#quick-start): a job, and the request that puts it
+on its time.
+
+```zig
+/// The job: the invoice of an order. Its fields are what it needs, the
+/// data of one run is its Payload, and `run` does the work.
+const SendInvoice = struct {
+    app: log.Logger,
+    sent: std.atomic.Value(u32) = .init(0),
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
+
+    pub const Payload = struct { order_id: u64, amount_cents: u64 };
+
+    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+        self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
+        _ = self.sent.fetchAdd(1, .release);
+    }
+};
+```
+
+```zig
+// The invoice of order 42, a second from now. The key names the job,
+// so the same request again changes nothing.
+const request: scheduler.Client.Request(SendInvoice) = .{
+    .key = "order-42",
+    .when = .{ .after = .fromSeconds(1) },
+    .payload = .{ .order_id = 42, .amount_cents = 1999 },
+};
+app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+```
+
+- **Jobs are types.** A struct with what it needs as its fields, the data
+  of a run as its `Payload`, and the work in `run`. The compiler checks a
+  job wherever the code names it, and the payload of every request; a
+  mistake stops the build with the line to write instead.
+- **Schedules checked when the program compiles.** Steps such as
+  `.everyMinutes(15)`, times of day such as `.dailyAt(11, 0, 0, .pm)`,
+  where 12 AM is midnight and 12 PM is noon, weekly and monthly ones,
+  pauses between runs, and cron.
+- **A job for each key.** The invoice of each order, the report of each
+  tenant: a key is taken once, so scheduling again is safe, and the key
+  finds the job to move, pause or cancel.
+- **Several instances, one owner.** A claim gives a due job to one
+  worker, a lease keeps it while it runs, and when an instance dies, its
+  leases run out and the others take its jobs.
+- **At least once, said plainly.** After a failure a run may come twice:
+  each run has a key that is the same for all its attempts, and each claim
+  a number, for the systems that a job writes to.
+- **Failures planned for.** Retries with growing pauses, errors that end
+  them, timeouts, a history of the attempts, and failed jobs kept to retry
+  by hand.
+- **Any store.** Memory for one instance and for tests, MongoDB for
+  several instances; a store of your own works once it passes the
+  conformance suite.
+- **Tests without a server.** `testing.call` runs a handler alone, and
+  `testing.FaultyStore` fails any store on demand.
+
 ## Contents
 
 1. [What the scheduler does](#what-the-scheduler-does)
@@ -71,11 +129,155 @@ what they print against this guide: [quick start](quick_start.zig) ·
 [schedules](schedules.zig) · [orders](orders.zig) ·
 [failures](failures.zig) · [under App](app.zig). Tests that it runs:
 [the jobs of the invoices](jobs_test.zig), which test
-[Invoices.zig](Invoices.zig).
+[Invoices.zig](Invoices.zig) · [the conformance suite](conformance_test.zig).
 Programs that `zig build e2e` in `tests/scheduler` builds and runs against
 mongod, checking what they print against this guide:
 [quick start on MongoDB](mongo_quick_start.zig) ·
 [instances](instances.zig).
+
+## What the scheduler does
+
+A service often has work that is not for now: the invoice of an order, a
+minute after the order; a reminder, three days later; a report, every
+Monday at 9 AM. A timer in the memory of the process would do it, until
+the process restarts and forgets the timer, or until the service runs in
+three instances and each sends the report. The scheduler keeps such work
+in a store that every instance shares, and makes sure that one instance
+takes each piece:
+
+```mermaid
+flowchart LR
+    handler["a handler<br/>of the service"] -->|"schedule, cancel,<br/>pause, list…"| client["scheduler.Client"]
+    client --> store[("the store:<br/>MemoryStore or<br/>mongo.SchedulerStore")]
+    w1["scheduler.Worker<br/>of instance 1"] -->|"claim, renew,<br/>finish"| store
+    w2["scheduler.Worker<br/>of instance 2"] -->|"claim, renew,<br/>finish"| store
+    w1 -->|"run"| j1["SendInvoice.run"]
+    w2 -->|"run"| j2["SendInvoice.run"]
+```
+
+- **A job** is a type of yours: `SendInvoice`, with what it needs as its
+  fields, the declaration `scheduler_job`, the data of one run as its
+  `Payload`, and the method `run`. A job *of* that type is one piece of
+  work, such as the invoice of order 42.
+- **The store** keeps a *record* for each job: its type, its key, its
+  time, its payload as JSON, its state. `scheduler.MemoryStore` keeps them
+  in the memory of one process, `mongo.SchedulerStore` in MongoDB, where
+  every instance sees them; both are behind one interface,
+  `scheduler.Store`.
+- **The client**, `scheduler.Client`, puts jobs on their time and finds
+  and changes them by their key. A handler, a controller or another job
+  calls it.
+- **The worker**, `scheduler.Worker(Jobs)`, runs in each instance. It
+  asks the store for the jobs that are due, of the types it knows, and no
+  more than it has free slots; the store gives each due job to one worker,
+  which runs it, keeps a lease on it while it runs, and writes the
+  outcome.
+
+A record goes through these states:
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: schedule, or a declaration at the start of a worker
+    pending --> running: claimed, its time come
+    running --> running: claimed again, its lease run out
+    running --> pending: a retry, the next run, or a stop
+    running --> paused: the run ends after a pause
+    running --> succeeded: a one-shot job done, and kept
+    running --> failed: its attempts spent, and kept
+    running --> [*]: done, nothing kept; or cancelled
+    pending --> paused: pause
+    paused --> pending: unpause
+    failed --> pending: retry
+    pending --> [*]: cancel
+    paused --> [*]: cancel
+    succeeded --> [*]: its time kept is over
+    failed --> [*]: its time kept is over
+```
+
+A *one-shot* job runs once, and then it is done; a *repeating* job goes
+back to `pending` after each run, for its next time, and ends only when
+it is cancelled. Every time is the store's: whether a job is due, whether
+a lease ran out, when a run began. The instances may disagree about the
+time, and still agree on what is due.
+
+**Which store.** `MemoryStore` needs nothing but memory: for a service
+of one instance, for tests, and for jobs that each instance must run on
+its own, such as dropping what it keeps in its memory. Its jobs go with
+the process. `mongo.SchedulerStore` keeps the jobs of a service of
+several instances, in a database that outlives them all, see
+[MongoDB](#mongodb).
+
+**The promise is "at least once".** A job that is due runs, as long as a
+worker that knows its type runs and the store answers; one instance at a
+time runs it; and a job whose instance died runs again elsewhere. So a
+run may come twice after a failure, and a job keeps the systems it writes
+to safe from that, by the key of its run or the number of its claim; see
+[Several instances](#several-instances).
+
+## Installation
+
+Add Zefir to your `build.zig.zon`:
+
+```sh
+zig fetch --save git+https://github.com/vkiryakov/zefir#dev
+```
+
+zefir-scheduler is on the `dev` branch until the next release. The
+command fetches the latest commit of `dev`; `--save` pins that commit.
+The latest release, v0.11.0, came before zefir-scheduler, so `#v0.11.0`
+does not have it.
+
+A service runs on [zio](https://github.com/lalinsky/zio). zio has no
+release for Zig 0.17 yet, so pin the commit Zefir is tested with:
+
+```sh
+zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
+```
+
+Then import the modules in `build.zig`: scheduler; mongo, for a store in
+MongoDB; core, whose `core.Context` the calls of the client take. The
+programs of this guide also use Zefir's confy for settings and log for
+records:
+
+```zig
+// build.zig
+const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+const exe = b.addExecutable(.{
+    .name = "shop",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "scheduler", .module = zefir.module("zefir-scheduler") },
+            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+            .{ .name = "core", .module = zefir.module("zefir-core") },
+            .{ .name = "zio", .module = zio.module("zio") },
+            .{ .name = "confy", .module = zefir.module("zefir-confy") },
+            .{ .name = "log", .module = zefir.module("zefir-log") },
+        },
+    }),
+});
+b.installArtifact(exe);
+b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+```
+
+> [!TIP]
+> zefir-scheduler is also part of the umbrella module: with
+> `zefir.module("zefir")` imported as `zefir`, it is
+> `@import("zefir").scheduler`. It imports zefir-core only, and no
+> database: `mongo.SchedulerStore` lives in zefir-mongo, which imports
+> zefir-scheduler to implement its store contract. A service that keeps
+> its jobs in memory needs scheduler and core alone.
+
+`MemoryStore` needs no server. For a store in MongoDB you need a mongod to
+talk to; with Docker:
+
+```sh
+docker run --rm -p 27017:27017 mongo:9.0.4
+```
 
 ## Quick start
 
@@ -201,6 +403,138 @@ On MongoDB the same program needs a client of MongoDB and the store's
 indexes, and nothing else changes: see
 [the quick start on MongoDB](#the-quick-start-on-mongodb).
 
+## Jobs
+
+A job type is a struct with three declarations. This is the invoice of
+the shop's tests, from [Invoices.zig](#tests-of-your-jobs):
+
+```zig
+/// The invoice of an order: a job for each order, by its key.
+pub const SendInvoice = struct {
+    billing: *Billing,
+
+    pub const scheduler_job: scheduler.Job = .{
+        .name = "send-invoice",
+        // A run past 30 s is cancelled, and counts as a failed attempt.
+        .timeout = .fromSeconds(30),
+        // An order that is gone gets no invoice, however often it tries.
+        .retry = .{ .give_up_on = &.{error.OrderGone} },
+        // A row of history for each attempt, kept for 90 days.
+        .history = .{ .keep_for = .fromSeconds(90 * 24 * 60 * 60) },
+    };
+
+    /// The data of one run: the store keeps it as JSON.
+    pub const Payload = struct {
+        order_id: u64,
+        amount_cents: u64,
+        /// A field that a later version added has a default, so the jobs
+        /// that an earlier version scheduled still read.
+        note: ?[]const u8 = null,
+    };
+
+    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+        // The run key is the same for every attempt of this run: the key
+        // of idempotency for the billing service.
+        try self.billing.send(ctx.io(), ctx.info().run_key, payload.order_id);
+    }
+};
+```
+
+### The declaration
+
+`pub const scheduler_job: scheduler.Job` says that the type is a job, and
+how its jobs run. Every field but the name has a default:
+
+| Field | Default | What it is |
+|---|---|---|
+| `name` | — | the name the store keeps the jobs by: 1–64 bytes of `a-z`, `0-9`, `-`, `_` and `.`, starting with a letter or a digit |
+| `timeout` | `null`, no limit | how long one run may take; past it, the run is cancelled and counts as a failed attempt |
+| `retry` | 5 attempts of a one-shot job, pauses from 1 s to 2 min | what follows a failed attempt, see [Failures and retries](#failures-and-retries) |
+| `repeat` | `null` | a repeating job that the code declares, see [Rollouts and declared jobs](#rollouts-and-declared-jobs) |
+| `misfire` | `.coalesce` | what a late run of a repeating job does, see [Missed runs](#missed-runs) |
+| `history` | `.none` | whether to keep a row of history for each claim, and how long, see [History and retention](#history-and-retention) |
+| `when_done` | succeeded: none; failed: 30 days | how long to keep a finished one-shot job |
+
+Keep the name while records of the job exist: a record of an old name is
+a job that no worker knows, and nobody runs it.
+
+### The payload
+
+`Payload` is the data of one run, a struct that the store keeps as JSON:
+`std.json` writes it when the client schedules the job and reads it when
+a worker runs it. Its fields are numbers, strings, bools, enums (by
+name), optionals, slices and structs of them; every string is UTF-8,
+since JSON is, and the client refuses another one before the store hears
+of it. A job without data has no `Payload`, and its `run` no third
+param.
+
+A payload outlives the code that wrote it: a job scheduled for next week
+runs on the version of the service that runs then. So change a payload
+the way JSON forgives:
+
+- a field with a default can be added: a record of the older version
+  lacks it, and the field takes its default, as `note` above does;
+- a field can be dropped: a reader skips the fields it does not know;
+- anything else, such as a field that changes its type, is a new job
+  with a new name.
+
+A worker that cannot read the payload of a job it claimed, because a newer
+version wrote it, gives the job back for another instance, see
+[Rollouts and declared jobs](#rollouts-and-declared-jobs).
+
+### `run` and its context
+
+`pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload:
+Payload) !void` does the work. It returns any error it likes: an error is
+a failed attempt, and its name goes to the history and to `last`. `ctx` is
+borrowed for this run only:
+
+| Call | What it gives |
+|---|---|
+| `ctx.io()` | the `std.Io` of the worker: every wait of the job goes through it |
+| `ctx.operation()` | a `core.Context` for the calls the job makes: the deadline of its `timeout`, the token that the worker cancels, and the trace of the code that scheduled the job, which the run goes on with |
+| `ctx.allocator()` | an arena of the run, freed after the worker wrote the outcome; tasks the job starts must not use it |
+| `ctx.info()` | what is known of the run, a `*const scheduler.RunInfo` |
+
+The worker cancels the run, its token and the task that runs `run`
+together, when its `timeout` passes, when the worker stops, when its
+lease is lost or cannot be confirmed, and when the client cancels the
+job. A handler stops at its next point of cancellation, a wait on its
+`io`, or where it asks `ctx.operation().isCancelled()`.
+
+`ctx.info()`:
+
+| Field | What it is |
+|---|---|
+| `job`, `key`, `tenant` | the job; the key of a declared job is `""` |
+| `run_key` | `"<job>/<key>/<scheduled_at in ms>"`: the same for every attempt of this run, so the key of idempotency for other systems |
+| `attempt`, `attempts` | the number of this attempt, from 1, and how many the policy allows |
+| `scheduled_at` | the time of the run by the plan, the same for every attempt |
+| `started_at` | when the store gave the job to this instance, by its clock |
+| `missed` | for a repeating job, how many more runs of its schedule this one stands for |
+| `life`, `fence` | the life of the record, 16 random bytes, new for a record made again with the same key, and the number of this claim in that life, one more with each claim |
+| `instance` | the worker that runs it: `"shop/7f3a…"` |
+
+### What the compiler checks
+
+`Ref.of`, `Client.schedule` and `Worker(Jobs)` check a job type when the
+program compiles. Each error starts with `scheduler: `, names the type,
+and says what to write:
+
+```text
+error: scheduler: SendInvoice has no scheduler_job: declare pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
+error: scheduler: SendInvoice: the name "Send": a name is 1–64 bytes of a-z, 0-9, '-', '_' and '.', starting with a letter or a digit
+error: scheduler: SendInvoice: expected pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: SendInvoice.Payload) !void
+error: scheduler: NightlyCleanup: the declared record of a repeat gets Payload{}: give every field of Payload a default, or drop .repeat
+error: scheduler: SendInvoice: retry.attempts is 0: write 1 or more, or null for the default
+error: scheduler: Worker(Jobs): a field of Jobs points to a job: invoices: *SendInvoice
+error: scheduler: Worker(Jobs): SendInvoice and Reminder share the name "send-invoice"
+```
+
+The request of `schedule` is `Client.Request(J)`: its field `payload` is
+a `J.Payload`, there only when `J` has one, so the compiler checks the
+payload of every request against the job.
+
 ## When jobs run
 
 The `when` of a request is a `scheduler.When`, one of three:
@@ -219,8 +553,9 @@ of the process, and `{f}` writes one as RFC 3339,
 `.after` 0 to 100 years; anything else is `error.InvalidArgument` before
 the store hears of it. `fromUtc` with values that only the run knows, and
 that make no moment, such as the 29th of February 2026, gives
-`Instant.invalid`, which a call refuses the same way. Every time is UTC: a shop in Berlin that wants
-9 AM in Berlin writes 8 AM, and 7 AM in summer, see the TODO list above.
+`Instant.invalid`, which a call refuses the same way. Every time is UTC:
+a shop in Berlin that wants 9 AM in Berlin writes 8 AM, and 7 AM in
+summer, see the TODO list above.
 
 ### Ready-made schedules
 
@@ -1006,11 +1341,346 @@ $ zig build run
   billing service that saw the first attempt knows the run.
 - **The history** keeps a row for each claim, here because the job asks
   for it: `fence` counts the claims of the record, and `attempt` the
-  attempts of its run. The rows of order 2 show its
-  failed claim and the claim after `retry`, each the first attempt of the
-  same run.
+  attempts of its run. The rows of order 2 show its failed claim and the
+  claim after `retry`, each the first attempt of the same run.
 - **The counters** of the worker: 7 claims, 3 succeeded, 4 failed
   attempts, the timeout among them, and 1 job given up.
+
+## Several instances
+
+A service in several instances runs a worker in each, all on one store,
+and the store keeps each job to one owner at a time. This chapter is how,
+what that promises, and how a job keeps the systems it writes to safe
+when a promise reaches its end.
+
+### Claims and leases
+
+The worker has one task that polls and `workers` tasks, its *slots*, that
+run jobs, 10 by default. The poll asks the store for the due jobs of its
+types, at most as many as it has free slots, the oldest first; this is a
+*claim*. The store marks each job it gives `running`, with this worker as
+its *owner*, a *fence* one more than the job's claims before, and a
+*lease* that ends `lease` later by the store's clock, 60 s by default.
+The poll comes again every `poll_every`, 1 s, or sooner when the store
+says the next job is due sooner, and at once when it took as many as it
+had free slots.
+
+A slot runs the job and, while it runs, *renews* the lease every
+`renew_every`, 20 s. A renewal holds while the job's life, owner and fence
+are those of the claim; the outcome, at the end, is written on that
+condition too. If anything else took the job meanwhile, the store refuses
+both, and the late owner changes nothing.
+
+A worker that dies renews nothing. Its lease runs out, and the next claim
+of another worker takes the job: its attempt counts, the fence grows, and
+the history, if the job keeps one, gets a row `abandoned` for the attempt
+that was lost. A worker that lives but cannot reach the store stops its
+run first:
+
+```mermaid
+sequenceDiagram
+    participant A as Worker A
+    participant S as Store
+    participant B as Worker B
+    A->>S: claim (sent at t0)
+    S-->>A: fence 7, a lease until T0+60 s by the store's clock
+    Note over A: its own deadline: t0+40 s
+    A->>S: renew (t0+20 s)
+    S-->>A: renewed
+    Note over A: its own deadline: t0+60 s
+    A--xS: renew (t0+40 s), tried again, no answer
+    Note over A: t0+60 s: A cancels the run
+    Note over S: the lease ends at T0+80 s
+    B->>S: claim
+    S-->>B: fence 8, attempt +1, taken over from A
+    A->>S: finish (fence 7)
+    S-->>A: lost
+```
+
+The worker keeps its own deadline of each lease: the moment it sent the
+last claim or renewal that the store confirmed, plus `lease`, minus
+`renew_every`. The store's lease began after that send, so it ends no
+sooner than `lease` after it; the run stops `renew_every` before another
+instance could take the job. `init` wants `lease` more than twice
+`renew_every`, so that a renewal may fail once and still come in time.
+The deadline is on the clock `boot`, which goes on while the machine
+sleeps: a laptop that sleeps through its lease cancels its run when it
+wakes.
+
+### What is promised, and what is not
+
+**Promised:**
+
+1. **One owner.** At any moment of the store's clock a job has at most one
+   owner. A claim is atomic, and a renewal or an outcome counts only from
+   the claim that holds the job: neither an owner whose job was taken
+   over nor the run of a cancelled job changes a new job of the same key.
+2. **At least once.** A job that is due, and each run of a repeating job
+   that its misfire policy keeps, runs at least once, while a worker that
+   knows its type runs, the store answers, and its attempts last.
+3. **No job lost with an instance.** The lease of an instance that died
+   runs out, 60 s by default, and another instance takes its jobs; the
+   attempt counts, and a job that kills every instance that runs it ends
+   `failed` once its attempts are spent.
+4. **A late owner writes nothing.** The store refuses the outcome of an
+   owner whose job was taken over.
+5. **Without the store, nothing runs.** No job runs without a claim:
+   while the store does not answer, the worker waits.
+6. **A stop in time.** An instance that cannot confirm its lease cancels
+   its run `renew_every` before the end of the lease by the store's
+   clock.
+
+**Not promised:**
+
+- **Exactly once.** A run may come twice: when its handler ignores the
+  cancel and outlasts its lease; when an instance dies after the effect
+  and before it wrote the outcome; when the reply to the outcome is lost
+  and cannot be read back; when the clock of the store jumps ahead; when
+  the process stops longer than `renew_every`, as a virtual machine
+  paused by its cloud does. A handler makes its effects safe to repeat,
+  below.
+- **Fencing by itself.** The fence grows with each claim, but protects a
+  system only if that system checks it, below.
+- **An exact time.** A job starts no sooner than its time by the store's
+  clock, and usually within `poll_every` after it when a slot is free.
+- **An order.** Each claim takes the oldest due jobs first, but among
+  instances and slots there is no strict order.
+- **`MemoryStore`** keeps nothing past the process, and each instance
+  runs only its own jobs.
+- **A cancel that stops a handler at once.** A handler stops at its next
+  point of cancellation; one that never reaches any holds its slot until
+  it ends.
+
+### Safe to run twice
+
+A job keeps the systems it writes to safe from a run that comes twice in
+one of two ways, and the shop's `Invoices.zig` shows both.
+
+**By the run key.** `ctx.info().run_key` is `"<job>/<key>/<scheduled_at
+in ms>"`, the same for every attempt of a run. A system that remembers
+the keys it served does nothing the second time; a payment gateway that
+takes an idempotency key takes this one. The billing service of the shop:
+
+```zig
+/// Sends the invoice of `order_id`, unless the invoice of `run_key`
+/// went out before.
+pub fn send(b: *Billing, io: std.Io, run_key: []const u8, order_id: u64) !void {
+    if (std.mem.findScalar(u64, b.gone, order_id) != null) return error.OrderGone;
+    try b.mutex.lock(io);
+    defer b.mutex.unlock(io);
+    if (b.sent.contains(run_key)) return;
+    try b.sent.insert(run_key);
+}
+```
+
+**By the life and the fence.** A system that refuses a late owner keeps,
+for each life of a record, the highest fence that wrote to it, and refuses
+a smaller one. The fence alone would not do: a job cancelled and
+scheduled again with the same key is a new life, whose claims count from
+1 again, and its first claim must not look late. The ledger of the shop:
+
+```zig
+/// Closes `days` days for the claim `fence` of the record of `life`.
+pub fn closeDays(l: *Ledger, io: std.Io, life: scheduler.Life, fence: u64, days: u32) !void {
+    try l.mutex.lock(io);
+    defer l.mutex.unlock(io);
+    const newest = try l.fences.getOrPut(l.gpa, life);
+    if (newest.found_existing and fence < newest.value_ptr.*) return error.StaleClaim;
+    newest.value_ptr.* = fence;
+    l.days_closed += days;
+}
+```
+
+The history marks the attempts whose effects nobody knows: a row
+`abandoned` is an attempt whose instance died before it reported, see
+[History and retention](#history-and-retention).
+
+### Rollouts and declared jobs
+
+A repeating job of the whole service, such as closing the day every
+night, is declared in its type, with `.repeat`:
+
+```zig
+pub const scheduler_job: scheduler.Job = .{
+    .name = "close-day",
+    .repeat = .dailyAt(11, 0, 0, .pm),
+};
+```
+
+Its record has the key `""`. `Worker.start` makes the record if it is not
+there, and writes the code's schedule into it if the code changed it;
+from then on the record decides, and each run counts the next one from
+the schedule in the record. A worker without declared jobs does not touch
+the store at its start.
+
+The record of a declaration goes only to the instances that declare it
+with `.repeat`: a worker that knows the type without `.repeat` takes its
+jobs with keys, never the record of the declaration. So a rollout, the
+time when the old version and the new one run side by side, is safe both
+ways:
+
+- **A new job type.** The old instances do not know it and never claim
+  its jobs: they wait for the new ones.
+- **A new declaration.** Only the new instances run it.
+- **A schedule that changed.** During the rollout each version writes its
+  own schedule at its start; once it is over, the last version to start,
+  the new one, has the last word.
+- **A payload or a schedule that an instance cannot read**, since a newer
+  version wrote it: the instance gives the job back for 60 s, without
+  spending an attempt and without touching its history, and an instance
+  that can read it runs it. A job that no instance that claimed it could
+  read for `unreadable_limit` in a row, an hour by default, ends `failed`
+  with `UnreadablePayload` or `UnreadableSchedule`.
+- **A declaration that left the code.** Its record is *parked*, below.
+
+The record of a declaration that left the code stays `pending`: no
+instance runs it, none removes it, and it shows in `list` with the key
+`""`. The scheduler never deletes what the code declared, since an
+instance of the old version may still run it. A worker that knows the
+type without `.repeat`, and declares jobs of its own, finds the record at
+its start, warns, and counts it in `stats().undeclared`:
+
+```text
+WARN  [scheduler] close-day: the record of a declaration this code does not have is parked, and no instance of it runs it; remove it with client.cancel(io, ctx, .declared(CloseTenantDay), .{})
+```
+
+Remove it once, by hand, when the rollout is over; an instance of the old
+version that still ran would make it again. The test of the rollout in
+[Tests of your jobs](#tests-of-your-jobs) does:
+
+```zig
+try v2.start(io);
+try testing.expectEqual(1, v2.stats().undeclared);
+
+// Removed once, by hand, with the key "" that Ref.declared names.
+try testing.expect(try client.cancel(io, .root, .declared(CloseTenantDay), .{}));
+```
+
+One pair of collections, or one store, serves one service: two services
+with a job of the same name would run each other's jobs.
+
+## Missed runs
+
+A run of a repeating job comes late when the service was down, when
+every slot was busy, or when the run before it lasted longer than the
+period. A one-shot job that comes late runs once, however late; a
+repeating job does what its `misfire` says:
+
+| `misfire` | A late run |
+|---|---|
+| `.coalesce`, the default | runs once for all the times it missed; `ctx.info().missed` says how many more times of the schedule it stands for |
+| `.{ .skip = threshold }` | does not run when it is later than `threshold`: the history gets a row `skipped`, and the record shows it in `last` |
+
+Either way, the next run is the first time of the schedule after the
+claim: the missed times are not run one by one, so a long outage leaves no
+tail of runs behind it. Take a job every 15 minutes in a service that was
+down from 10:07 to 10:52: the run of 10:15 is claimed at 10:52. With
+`.coalesce` it runs, with `missed` 2, for 10:30 and 10:45, and the next run
+is at 11:00. With `.{ .skip = .fromSeconds(5 * 60) }` it is 37 minutes
+late, so it does not run, and the next run is at 11:00 too.
+
+A job runs once at a time: a run that outlasts its period is followed by
+the next one at once, which is late, and goes by the same rule. No two
+runs of one job ever overlap.
+
+Coalesce suits work that catches up by itself. The shop closes the days
+of its ledger every night, and a run after an outage closes the nights it
+missed too:
+
+```zig
+pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {
+    const info = ctx.info();
+    // One run for the nights it missed too: misfire is .coalesce.
+    try self.ledger.closeDays(ctx.io(), info.life, info.fence, 1 + info.missed);
+}
+```
+
+Skip suits work whose time is its point. A reminder to pay belongs to the
+morning, so one later than an hour waits for the next morning:
+
+```zig
+pub const scheduler_job: scheduler.Job = .{
+    .name = "remind-unpaid",
+    .repeat = .dailyAt(9, 0, 0, .am),
+    .misfire = .{ .skip = .fromSeconds(60 * 60) },
+};
+```
+
+The worker logs both at the level info: `one run stood for the runs it
+missed`, and `a run later than its misfire threshold was skipped`; its
+counters `coalesced` and `skipped` count them.
+
+## History and retention
+
+A job that asks for it, with `history`, gets a row in the history of the
+store for each claim:
+
+| `history` | Rows |
+|---|---|
+| `.none`, the default | none |
+| `.{ .keep_for = duration }` | kept that long, by the store's clock |
+| `.forever` | kept until you remove them |
+
+A row is a `scheduler.Run`: the job, its key and tenant, the `life` and
+the `fence` of the claim, which make the row the only one of its claim,
+the `attempt`, `scheduled_at`, `started_at` and `finished_at`, the
+`outcome`, `error_name`, and the `instance` that ran it. The worker writes
+the row before the outcome of the claim, so a row exists for every run
+that ran, even one whose outcome the store refused:
+
+| `outcome` | The claim | `error_name` |
+|---|---|---|
+| `succeeded` | `run` returned | null |
+| `failed` | `run` returned an error | its name, `"CardExpired"` |
+| `timed_out` | the run passed its `timeout` | `"Timeout"` |
+| `interrupted` | the worker stopped the run itself | `"Shutdown"`: at the end of the grace of a stop; `"LeaseUnconfirmed"`: the lease could not be renewed in time; `"LeaseLost"`: another instance took the job over; `"Cancelled"`: the client cancelled the job |
+| `skipped` | no run: a repeating job later than its `.skip` | null |
+| `abandoned` | an instance claimed it and was lost before it reported | null |
+
+**An abandoned attempt.** When a worker claims a job whose lease ran out,
+it writes, with the row of its own run, a row `abandoned` for the claim it
+took over: the attempt of an instance that vanished, whose effects nobody
+knows. If that instance comes back after all and reports, its own row
+replaces the row `abandoned`: one row for each claim, and the owner's
+word wins. For financial control, the attempts to check are those:
+`client.history(io, ctx, .{ .outcome = .abandoned }, page, arena, .{})`
+lists them, and the receiver of each says by its run key whether the
+effect happened.
+
+`history` takes a filter of `job`, `key`, `tenant` and `outcome`, any of
+them null, and gives the newest rows first, a page at a time, as `list`
+does. `failures.zig` reads the rows of a job and key:
+
+```zig
+const history = try client.history(io, .root, .{ .job = "charge-card", .key = key }, .{}, arena_state.allocator(), .{});
+for (history.runs) |run| app.info("Run", .{ .key = key, .fence = run.fence, .attempt = run.attempt, .outcome = run.outcome, .error_name = run.error_name });
+```
+
+**The record of the job** shows its last run in `last`: its outcome,
+error, attempt and times; a job that keeps no history shows its last
+failure there.
+
+**Jobs that no instance can read.** A worker that cannot read the payload
+or the schedule of a job it claimed, since another version of the service
+wrote it, gives it back for 60 s, without spending an attempt and without
+a row; the record notes since when, in `unreadable_since`. An instance
+that can read it runs it. A job that every instance that claimed it found
+unreadable for `unreadable_limit` in a row, an hour by default, ends
+`failed`, with `UnreadablePayload` or `UnreadableSchedule` in `last`.
+
+**Retention.** Every time to keep something is a duration of the store's
+clock, after which the store may drop it at any moment:
+
+| What | Kept |
+|---|---|
+| a one-shot job that succeeded | `when_done.succeeded`: not at all by default; its record goes with its run |
+| a one-shot job that failed | `when_done.failed`: 30 days by default, to see it in `list` and `retry` it |
+| the rows of the history | `history` of the job |
+
+`MemoryStore` drops what expired at its next call, and keeps at most
+1000 finished jobs and 1000 rows, by `MemoryStore.Options`: past that the
+oldest go, with one warning. `mongo.SchedulerStore` leaves it to the TTL
+monitor of MongoDB, which may keep a job or a row a minute past its time.
 
 ## MongoDB
 
@@ -1570,12 +2240,12 @@ of the umbrella module:
   stops after its worker and before that client.
 - **A client** is the bean of a factory, a value without a lifecycle.
 - **A worker** is the bean of a factory that takes the struct of its
-  jobs, `jobs: SharedJobs`: App fills its pointers by type. A worker has `start`, `wait`,
-  `requestStop`, `shutdown`, `isReady` and `deinit`: App starts it once
-  its store started, and at the stop treats it as a server, stopping it
-  first, together with the servers of http and rpc, so that the store and
-  the client of MongoDB outlive it. App's budget for the stop, 25 s by
-  default, holds the `shutdown_grace` of a worker, 10 s.
+  jobs, `jobs: SharedJobs`: App fills its pointers by type. A worker has
+  `start`, `wait`, `requestStop`, `shutdown`, `isReady` and `deinit`: App
+  starts it once its store started, and at the stop treats it as a
+  server, stopping it first, together with the servers of http and rpc,
+  so that the store and the client of MongoDB outlive it. App's budget for
+  the stop, 25 s by default, holds the `shutdown_grace` of a worker, 10 s.
 
 App gives a bean by its type, so a type is one bean in the whole
 application. A service with two schedulers, here one whose jobs all its
@@ -1801,6 +2471,157 @@ round.
 of MongoDB connects, the store makes its indexes, the worker starts last
 and `shutdown` stops it first, before the `deinit` of the store and the
 close of the client, which `defer` runs in the reverse order.
+
+## Shutdown and failures of the store
+
+### The settings of a worker
+
+`Worker(Jobs).init(gpa, io, store, jobs, options)` checks its settings,
+without I/O and without tasks; a setting out of its bounds is
+`error.InvalidArgument`, and `options.diagnostics` says which. `gpa` must
+be thread-safe: the tasks of the worker allocate from it.
+
+| Option | Default | What it is |
+|---|---|---|
+| `workers` | 10 | how many jobs this instance runs at once: its slots |
+| `lease` | 60 s | how long a claim lives without a renewal, by the store's clock |
+| `renew_every` | 20 s | how often a running job renews its lease; `lease` must be more than twice this |
+| `poll_every` | 1 s | how often to ask the store when it did not say when the next job is due |
+| `store_timeout` | 5 s | the deadline of each call of the store |
+| `shutdown_grace` | 10 s | how long the running jobs go on after a stop is asked for |
+| `start_timeout` | 10 s | how long `start` waits for the records of the declared jobs |
+| `max_backoff` | 30 s | the longest pause of the poll while the store fails |
+| `unreadable_limit` | 1 h | how long a job may stay unreadable for every instance before it ends `failed` |
+| `instance` | `"worker"` | the name of the instance, 1–64 bytes; the worker adds 32 random hex digits |
+| `diagnostics` | null | why `init` refused the settings |
+
+The life of a worker: `init`; `start`, which writes the records of the
+declared jobs and starts the poll and the slots; `wait`, which returns
+once it stopped; `requestStop`, from any task, which begins the stop and
+does not wait; `shutdown(io, deadline)`, which begins it and waits; and
+`deinit`, which frees it. `run` is `start` and `wait`, for a program whose
+main work the worker is. `isReady` is true while the worker runs: a store
+that fails does not make the service unready, since the worker waits for
+it. `state()` is one of `configured`, `starting`, `running`, `draining`
+and `stopped`. Keep the worker where it is after `start`; in safe builds a
+worker moved after it, a call on another `std.Io` than that of `init`,
+and a `deinit` while another task is in `wait`, `run` or `shutdown`
+panic.
+
+### The stop
+
+```zig
+// Wait for the run, then stop: the worker takes no more jobs and
+// waits for the runs to end, here for 5 s at most.
+while (invoices.sent.load(.acquire) == 0) try io.sleep(.fromMilliseconds(50), .awake);
+try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }));
+```
+
+1. `requestStop`, which `shutdown` calls first, makes the worker
+   `draining`: the poll claims no more, and the jobs claimed but not
+   started go back to the store at once, due now, with the attempt they
+   had.
+2. The running jobs go on for `shutdown_grace`, but no longer than 2 s and
+   250 ms before the deadline of `shutdown`: 2 s for the cancels and the
+   outcomes, 250 ms for the caller.
+3. When the grace ends, each slot cancels its run, waits for its end, and
+   gives the job back with the attempt it had, so the stop costs no
+   attempt; the history gets a row `interrupted`, `Shutdown`.
+4. `shutdown` returns once the worker stopped, and no later than 250 ms
+   before its deadline. A deadline already past cancels the runs at once,
+   and `shutdown` returns at once; the jobs whose return the store did not
+   take in time come back when their leases end, with an attempt counted.
+
+`error.ShutdownTimeout` means that the worker had not stopped 250 ms
+before the deadline: a handler did not end after its cancel, since it
+never reached a point of cancellation, or the deadline was already past.
+The worker stays `draining`, and `deinit` would wait without a limit for
+a handler that does not end: end the process, as for a server of http
+that does not stop. The worker logs a warning for a handler that ends more
+than a second after its cancel, and for a stop that missed its deadline.
+
+The worker does not close its store or the client of MongoDB: they
+outlive it, and under zefir.App they stop after it, see
+[Under zefir.App](#under-zefirapp).
+
+### When the store fails
+
+| When | What the worker does |
+|---|---|
+| at `start` | with declared jobs, `start` returns the store's error and nothing runs; without them, `start` does not touch the store |
+| at a poll | waits `poll_every × 2^k`, at most `max_backoff`, give or take 10 %, and asks again; no job runs without a claim, `stats().store_down` is true, and `wait` never returns the store's errors |
+| at a renewal | tries again every quarter of `renew_every` until its own deadline of the lease; then it cancels the run, `interrupted`, `LeaseUnconfirmed`, and gives the job back once the store answers, unless another instance took it |
+| at an outcome | tries again every quarter of `renew_every`, while the claim may still be its own and a stop leaves time, so that a short outage does not run again a job that succeeded |
+| at a lost reply | the store reads the job again to learn what happened; when it cannot, the call is `OutcomeUnknown`, a claim counts as not made and its lease runs out, and a renewal or an outcome is sent again |
+| a long outage | the due jobs wait; when the store is back, each one-shot job runs once, each repeating job by its misfire policy, and no instance claims more than its free slots |
+| the store's clock jumps | ahead: leases end sooner, and a run may come twice; back: jobs and takeovers come later |
+
+The worker warns at the first failure of each kind of call, then once a
+minute while it lasts, and once more when the store answers again; see
+[Logs and statistics](#logs-and-statistics). The errors of a store are
+those of `scheduler.StoreError`, and `scheduler.outcome(err)` says whether
+a failed call may have changed the store: `.not_applied` or `.unknown`.
+
+| Error | What it means | `outcome` |
+|---|---|---|
+| `InvalidArgument` | the request breaks a rule of the store | `.not_applied` |
+| `Unavailable` | the store cannot be reached, or its pool is busy | `.not_applied` |
+| `DeadlineExceeded` | less than 1 ms of the deadline was left before sending | `.not_applied` |
+| `Cancelled` | the token or the task was cancelled before sending | `.not_applied` |
+| `Refused` | the store refused, and the change is known not to be applied | `.not_applied` |
+| `OutcomeUnknown` | the request may have arrived, and its outcome is unknown | `.unknown` |
+| `Corrupt` | a record of the store does not read | `.not_applied` |
+| `OutOfMemory` | | `.unknown` |
+| `Contended` | the client lost 8 races of changes in a row | `.not_applied` |
+
+## Logs and statistics
+
+The worker and `MemoryStore` write to `std.log.scoped(.scheduler)`, and
+`mongo.SchedulerStore` to `.mongo`, as the rest of zefir-mongo does. To
+send them to zefir-log, the root file of the program names the bridge,
+
+```zig
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+```
+
+and the logger installs itself as the target of std.log:
+
+```zig
+logger.installStdLog();
+```
+
+The records then have the scope `scheduler`, as in the runs of this
+guide, and a logger may keep it at another level, as `app.zig` does with
+`.scopes = &.{.{ .prefix = "scheduler", .level = .warn }}`. Without the
+bridge they go where std.log writes by default, to stderr.
+
+No line holds a payload or a connection string; the keys of the jobs
+show, so keep personal data out of them. What a worker writes:
+
+| Level | Lines |
+|---|---|
+| info | its start, `1 job type, 10 workers, instance shop/7f3a…`; a declared job written, `close-day: declared, daily 23:00:00`, or its schedule changed by the code; `stopping` and `stopped`; a failed attempt with a retry ahead, `charge-card/order-1: attempt 1 failed (GatewayDown); it runs again after a pause`; a late run that stood for the runs it missed, or was skipped; a run cancelled at the end of the grace of a stop |
+| warn | a failure of the store, its first and then once a minute, `the store fails: claim: error.Unavailable: …`, `the store still fails, 12 tries: …`, and its end, `the store answers claim again after 1.451s`; a job that ended `failed`; a run past its timeout; a lease that could not be confirmed, or was taken over, and a run whose job was cancelled; a claim of another instance's job whose lease ran out; a job this instance cannot read; a parked declaration at the start; a handler that ended more than a second after its cancel; a stop that missed its deadline; `MemoryStore` dropping its oldest finished jobs or rows |
+| debug | each claim and each outcome |
+
+`worker.stats()` takes a snapshot of the counters of the worker, from its
+start, from any task:
+
+| Field | What it counts |
+|---|---|
+| `workers`, `running` | the slots, and the runs in flight now |
+| `claimed` | claims |
+| `succeeded`, `failed`, `timed_out` | runs that succeeded; failed attempts, timeouts among them; timeouts |
+| `gave_up` | jobs that ended `failed`: their attempts spent, an error of `give_up_on`, unreadable too long, a schedule without a next run |
+| `lost`, `removed` | runs stopped because their lease was taken over or could not be confirmed; because their job was cancelled |
+| `taken_over` | claims of a job whose lease ran out in another claim |
+| `coalesced`, `skipped` | late runs that stood for those they missed; late runs skipped |
+| `unreadable` | jobs given back since this instance could not read them |
+| `undeclared` | parked declarations found at the last start |
+| `store_errors`, `store_down` | failed calls of the store; whether the last one failed |
+
+`worker.isReady()` is true while the worker runs, for a probe of
+readiness; under zefir.App the status of App asks it.
 
 ## Tests of your jobs
 
@@ -2223,3 +3044,155 @@ test "a declaration that left the code is parked until it is removed" {
   old declaration, warns, and counts it in `stats().undeclared`; no
   instance of version 2 runs it, and the test removes it by hand,
   [as a service does](#rollouts-and-declared-jobs).
+
+## A store of your own
+
+The scheduler reaches its jobs only through the store contract,
+`scheduler.Store`: a pointer to your store and a table of its functions,
+as `std.mem.Allocator` is. `MemoryStore` and `mongo.SchedulerStore` are
+two stores behind it; a store on another database, such as Redis or
+Postgres, is a type of yours that keeps the same rules, and the client
+and the worker run on it unchanged. The store only keeps records and
+changes them on condition; what comes next, the next run, a retry, a
+skip, a pause, how long to keep, the scheduler decides, the same for every
+store.
+
+### The type
+
+A store is a type with `pub const name: []const u8`, which the logs and
+the report of the suite show, and ten methods. `Store.init(&my_store)`
+builds the table when the program compiles, and a method that is missing
+or has another signature stops the build with the one to write:
+
+```text
+error: scheduler: Store.init: BadStore has no method claim; expected pub fn claim(self: *BadStore, io: std.Io, ctx: core.Context, request: *const scheduler.Store.ClaimRequest, options: scheduler.Store.CallOptions) scheduler.StoreError!scheduler.Store.ClaimResult
+```
+
+| Method | What it does | Answers |
+|---|---|---|
+| `now` | the store's clock as the process knows it, without I/O | an `Instant` |
+| `create` | a record of a new life, pending; a finished record of the same `(job, key)` is replaced, a live one stays | `created`, `replaced`, `existing` |
+| `get` | the record of `(job, key)` | the record, or null |
+| `update` | if `revision` and `state` are those expected: the fields of `set`, `revision` one more | `updated`, `conflict` with the record as it is, `not_found` |
+| `remove` | removes the record, in any state | whether it was there |
+| `list` | the records of a filter, a page at a time: a job's records together, their keys in order | a page, and where the next one starts |
+| `claim` | atomically, record by record: due records of the jobs asked, at most `max`, the oldest first, made running with an owner, a lease, `attempt` and `fence` one more | the records, the claim each took over, and how soon the next one is due |
+| `renew` | if `life`, `owner` and `fence` are those of the claim: a new lease | `renewed`; `lost`, another claim took it; `removed`, no record or another life |
+| `finish` | first the rows of the history, then, if the claim still holds and `revision` is the same, the transition | `done`; `lost`; `changed` with the record as it is |
+| `history` | the rows of a filter, the newest first, a page at a time | a page, and where the next one starts |
+
+A record may be claimed when it is `pending` and its `run_at` has come, or
+`running` and its `lease_until` has passed, by the store's clock; a store
+keeps that moment for each record and sets it with every change of its
+state, as MongoDB's field `wake_at` does. A record whose key is `""`, the
+record of a declaration, goes only to a claim that names its job in
+`any_key`; one that names it in `keyed_only` takes its records with keys
+only.
+
+### The rules
+
+The header of [Store.zig](../Store.zig) has them in full:
+
+1. Any task may call the store at once: it guards what tasks share with
+   the primitives of `std.Io`, never a lock of the OS.
+2. Every call comes on the `io` the store was made with.
+3. Less than 1 ms left of the deadline of `ctx` before sending is
+   `DeadlineExceeded`, and nothing was done.
+4. A cancelled token is `Cancelled` before sending.
+5. The request is borrowed for the call; the result lives in
+   `options.allocator`, and the store keeps no reference to the caller's
+   memory.
+6. Each operation on one record is atomic, and a claim gives a record to
+   one claimer.
+7. An outcome the store is not sure of is `OutcomeUnknown`, never a
+   definite answer: it reads the record again by the mark the write left,
+   where it can.
+8. A definite success survives a restart of the store; `MemoryStore` is
+   the exception, and says so.
+9. The store never retries but to resolve an unknown outcome: retries are
+   the scheduler's.
+10. Its errors are those of `StoreError`, and no text of its diagnostics
+    holds a payload or a password.
+
+### The conformance suite
+
+`scheduler.testing.conformance.run(io, gpa, &harness, options)` checks a
+store against the contract: 22 checks, S1 to S22, of records and their
+changes, claims and leases, outcomes and the history, retention,
+deadlines, lost replies, memory, and 16 tasks that mix every operation
+for 3 s, after which the invariants still hold. Each check runs on a
+fresh store, in a task of its own, within 60 s; the suite returns a
+report rather than failing through `std.testing`, so any test runner can
+call it.
+
+The harness is a type with two methods and an optional third:
+
+- `setUp(h, io, gpa) !Setup` gives an empty store, and how long after its
+  `expires_at` a record or a row may still be there: 0 for `MemoryStore`,
+  10 s for MongoDB with its TTL monitor woken every second in the tests.
+- `tearDown(h, io, setup)` frees what `setUp` made and empties the store;
+  memory of `gpa` left after it fails the check as a leak.
+- `loseNextReply(h, io, op)`, if the store can lose a reply: the next
+  call of `op` reaches the store and is applied, and its reply is lost, as
+  when a connection breaks; a proxy in front of the server does it for
+  MongoDB. Without it, S17 is skipped, with the reason in the report.
+
+`Options.time_scale` stretches the leases, waits and tolerances of the
+checks, for a slow machine or a remote store, and `Options.only` runs
+some of them. Here is the suite on `MemoryStore`, as the tests of a store
+of your own run it on that store, against its server:
+
+```zig
+//! The conformance suite of the stores of the scheduler, run as the tests
+//! of a store of your own run it: a harness gives each check a new, empty
+//! store and takes it back. Here the store is `scheduler.MemoryStore`; a
+//! store of your own runs the suite in the tests of its package, against
+//! its server. `zig build test-scheduler` runs it.
+
+const std = @import("std");
+const scheduler = @import("scheduler");
+const conformance = scheduler.testing.conformance;
+
+/// What the suite calls for each check.
+const Harness = struct {
+    memory: scheduler.MemoryStore = undefined,
+
+    /// A new, empty store, and how long after its `expires_at` a record or
+    /// a row may still be there: none for MemoryStore, which drops them at
+    /// its next call; MongoDB's TTL monitor wakes once a minute.
+    pub fn setUp(h: *Harness, io: std.Io, gpa: std.mem.Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        return .{ .store = h.memory.store(), .expiry_lag = .zero };
+    }
+
+    /// Frees what `setUp` made: memory the store keeps after this fails the
+    /// check as a leak.
+    pub fn tearDown(h: *Harness, io: std.Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+};
+
+test "MemoryStore keeps the contract of the scheduler" {
+    var harness: Harness = .{};
+    var report = try conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    defer report.deinit();
+    if (report.failedCount() > 0) {
+        std.debug.print("{f}", .{&report});
+        return error.TestUnexpectedResult;
+    }
+    // S17 needs `loseNextReply`, a hook to lose a reply: MemoryStore never
+    // loses one, so its harness has none, and the check is skipped.
+    try std.testing.expectEqual(1, report.skippedCount());
+    try std.testing.expect(report.outcome(.s17) == .skipped);
+}
+```
+
+`MemoryStore`, in [MemoryStore.zig](../MemoryStore.zig) and
+[memory/Table.zig](../memory/Table.zig), is the shortest store that
+passes: one `Io.Mutex` over a table of records, an index of when each may
+be claimed, and its history. `mongo.SchedulerStore`, in
+[SchedulerStore.zig](../../mongo/SchedulerStore.zig) and
+[scheduler/](../../mongo/scheduler) of zefir-mongo, passes against mongod,
+S17 too, and shows how a store of a server resolves its lost replies.

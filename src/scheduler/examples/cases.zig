@@ -16,7 +16,7 @@ pub const server_programs = [_][]const u8{ "mongo_quick_start", "instances" };
 
 /// The tests of the guide, on `scheduler.MemoryStore`: `zig build
 /// test-scheduler` runs them.
-pub const tests = [_][]const u8{"jobs_test"};
+pub const tests = [_][]const u8{ "jobs_test", "conformance_test" };
 
 /// The other files that README.md shows as they are: the code of the
 /// application that the tests of the guide test.
