@@ -36,7 +36,9 @@
 //!    claim.
 //! 4. A lost instance: nobody renews its leases, so 60 s later by the
 //!    store's clock another instance claims its jobs; the attempt counts,
-//!    and the history shows it as abandoned.
+//!    the history shows it as abandoned, and the job runs again there
+//!    while it has attempts left. A repeating job has one unless
+//!    `.retry.attempts` says more, so by default it skips that run.
 //! 5. Shutdown: the worker stops claiming, gives the running jobs
 //!    `shutdown_grace`, cancels the rest and gives them back to the store.
 //!

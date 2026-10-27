@@ -133,6 +133,10 @@ pub const CloseDay = struct {
     pub const scheduler_job: scheduler.Job = .{
         .name = "close-day",
         .repeat = .dailyAt(11, 0, 0, .pm),
+        // Three attempts for each night: a run that fails, or whose
+        // instance is lost, runs again within the night. The ledger closes
+        // the days of a run once, however often it runs.
+        .retry = .{ .attempts = 3 },
     };
 
     pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {

@@ -210,11 +210,14 @@ several instances, in a database that outlives them all, see
 
 **The promise is "at least once".** A job that is due runs, as long as a
 worker that knows its type runs and the store answers; one instance at a
-time runs it; and a job whose instance died runs again elsewhere. So a
-run may come twice after a failure: by the key of the run, the systems a
-job writes to do its work once, and by the number of the claim they may
-refuse an owner whose claim was taken over; see
-[Several instances](#several-instances).
+time runs it; and the run of an instance that died runs again elsewhere,
+while the job has attempts left. The attempt that died counts: a one-shot
+job has five by default and a repeating job one, so by default a
+repeating job skips the run its instance lost and goes on at its next
+time; `.retry.attempts` gives it more. So a run may come twice after a
+failure: by the key of the run, the systems a job writes to do its work
+once, and by the number of the claim they may refuse an owner whose claim
+was taken over; see [Several instances](#several-instances).
 
 ## Installation
 
@@ -451,7 +454,7 @@ how its jobs run. Every field but the name has a default:
 |---|---|---|
 | `name` | — | the name the store keeps the jobs by: 1–64 bytes of `a-z`, `0-9`, `-`, `_` and `.`, starting with a letter or a digit |
 | `timeout` | `null`, no limit | how long one run may take; past it, the run is cancelled and counts as a failed attempt |
-| `retry` | 5 attempts of a one-shot job, pauses from 1 s to 2 min | what follows a failed attempt, see [Failures and retries](#failures-and-retries) |
+| `retry` | 5 attempts of a one-shot job and 1 of a repeating one, pauses from 1 s to 2 min | what follows a failed attempt, see [Failures and retries](#failures-and-retries) |
 | `repeat` | `null` | a repeating job that the code declares, see [Rollouts and declared jobs](#rollouts-and-declared-jobs) |
 | `misfire` | `.coalesce` | what a late run of a repeating job does, see [Missed runs](#missed-runs) |
 | `history` | `.none` | whether to keep a row of history for each claim, and how long, see [History and retention](#history-and-retention) |
@@ -1164,7 +1167,9 @@ is the same for a job that succeeded, none by default: its record goes
 with its last run. **A repeating job** never ends that way: a failed run
 leaves its outcome in `last`, and the job waits for its next time, which
 plays the retry. More `attempts` give a run more tries before that: a
-nightly job with `.attempts = 3` tries again within the night.
+nightly job with `.attempts = 3`, as the shop's `CloseDay` has, tries
+again within the night, after a failure and after an instance lost with
+its run, see [Claims and leases](#claims-and-leases).
 
 `failures.zig` charges cards through a payment gateway that fails in
 three ways: down twice, an expired card, a hang. The pauses are short,
@@ -1383,8 +1388,15 @@ both, and the late owner changes nothing.
 A worker that dies renews nothing. Its lease runs out, and the next claim
 of another worker takes the job: its attempt counts, the fence grows, and
 the history, if the job keeps one, gets a row `abandoned` for the attempt
-that was lost. A worker that lives but cannot reach the store stops its
-run first:
+that was lost. The worker that took the job over runs it again while it
+has attempts left. When the lost attempt was the last, it runs nothing: a
+one-shot job ends `failed`, and a repeating job, which has one attempt
+unless `.retry.attempts` says more, goes on at its next time, so the run
+that was lost is skipped. A reschedule or a pause that came during the
+lost run wins over it, as over the outcome of a run: the job waits for
+its new time, or pauses, without a run. A worker that lives but cannot
+reach the store stops its run first, and a claim that takes the job over
+counts its attempt all the same:
 
 ```mermaid
 sequenceDiagram
@@ -1428,9 +1440,12 @@ wakes.
    that its misfire policy keeps, runs at least once, while a worker that
    knows its type runs, the store answers, and its attempts last.
 3. **No job lost with an instance.** The lease of an instance that died
-   runs out, 60 s by default, and another instance takes its jobs; the
-   attempt counts, and a job that kills every instance that runs it ends
-   `failed` once its attempts are spent.
+   runs out, 60 s by default, and another instance takes its jobs. The
+   attempt that died counts, and the job runs again there while it has
+   attempts left: a one-shot job that kills every instance that runs it
+   ends `failed` once they are spent, and a repeating job, with one
+   attempt unless `.retry.attempts` says more, skips the run that died
+   with the instance and goes on at its next time.
 4. **A late owner writes nothing.** The store refuses the outcome of an
    owner whose job was taken over.
 5. **Without the store, nothing runs.** No job runs without a claim:
@@ -1534,8 +1549,17 @@ night, is declared in its type, with `.repeat`:
 pub const scheduler_job: scheduler.Job = .{
     .name = "close-day",
     .repeat = .dailyAt(11, 0, 0, .pm),
+    // Three attempts for each night: a run that fails, or whose
+    // instance is lost, runs again within the night. The ledger closes
+    // the days of a run once, however often it runs.
+    .retry = .{ .attempts = 3 },
 };
 ```
+
+A repeating job has one attempt by default, so `.retry` here gives each
+night two more: after a failure, and after an instance lost with its run,
+see [Claims and leases](#claims-and-leases). The ledger takes each run
+once, by its run key, as [Safe to run twice](#safe-to-run-twice) shows.
 
 Its record has the key `""`. `Worker.start` makes the record if it is not
 there, and writes the code's schedule into it if the code changed it;
@@ -1668,9 +1692,9 @@ that ran, even one whose outcome the store refused:
 | `abandoned` | an instance claimed it and was lost before it reported | null |
 
 **An abandoned attempt.** When a worker claims a job whose lease ran out,
-it writes, with the row of its own run, a row `abandoned` for the claim it
-took over: the attempt of an instance that vanished, whose effects nobody
-knows. The row has the attempt and the moment that claim gave its run,
+it writes a row `abandoned` for the claim it took over, before the row of
+its own run when it runs the job: the attempt of an instance that
+vanished, whose effects nobody knows. The row has the attempt and the moment that claim gave its run,
 even when the client moved the job since, so its run key is the one that
 run had. If that instance comes back after all and reports, its own row
 replaces the row `abandoned`: one row for each claim, and the owner's
@@ -2588,7 +2612,7 @@ outlive it, and under zefir.App they stop after it, see
 |---|---|
 | at `start` | with declared jobs, `start` returns the store's error and nothing runs; without them, `start` does not touch the store |
 | at a poll | waits `poll_every × 2^k`, at most `max_backoff`, give or take 10 %, and asks again; no job runs without a claim, `stats().store_down` is true, and `wait` never returns the store's errors |
-| at a renewal | tries again every quarter of `renew_every` until its own deadline of the lease; then it cancels the run, `interrupted`, `LeaseUnconfirmed`, and gives the job back once the store answers, unless another instance took it |
+| at a renewal | tries again every quarter of `renew_every` until its own deadline of the lease; then it cancels the run, `interrupted`, `LeaseUnconfirmed`, and gives the job back once the store answers, the attempt not counted, unless another instance took it over first, which counts it |
 | at an outcome | tries again every quarter of `renew_every`, while the claim may still be its own and a stop leaves time, so that a short outage does not run again a job that succeeded; an error that the same outcome meets again, `InvalidArgument`, `Corrupt` or `Cancelled`, ends the tries at once, and the job comes back when its lease ends |
 | at a lost reply | the store reads the job again to learn what happened; when it cannot, the call is `OutcomeUnknown`, a claim counts as not made and its lease runs out, and a renewal or an outcome is sent again |
 | a long outage | the due jobs wait; when the store is back, each one-shot job runs once, each repeating job by its misfire policy, and no instance claims more than its free slots |
@@ -2821,6 +2845,10 @@ pub const CloseDay = struct {
     pub const scheduler_job: scheduler.Job = .{
         .name = "close-day",
         .repeat = .dailyAt(11, 0, 0, .pm),
+        // Three attempts for each night: a run that fails, or whose
+        // instance is lost, runs again within the night. The ledger closes
+        // the days of a run once, however often it runs.
+        .retry = .{ .attempts = 3 },
     };
 
     pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {

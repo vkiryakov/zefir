@@ -72,7 +72,8 @@ pub const Job = struct {
 pub const Retry = struct {
     /// Attempts in all, the first one included; 1 is no retry. null: 5 for
     /// a one-shot job, 1 for a repeating one (its next run plays the
-    /// retry).
+    /// retry). An attempt whose instance was lost counts too: with 1, the
+    /// instance that takes a repeating job over skips that run.
     attempts: ?u32 = null,
     /// The pause after the first failed attempt.
     delay: Duration = .fromSeconds(1),
