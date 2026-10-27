@@ -23,9 +23,7 @@ it reads straight into Zig types. It is written against `std.Io` only,
 and runs on [zio](https://github.com/lalinsky/zio) in production.
 
 > [!IMPORTANT]
-> **Not in v0.1 (TODO).** v0.1 is the first version of zefir-redis,
-> released with zefir v0.10.0, and the client's own texts name it, such as
-> "TLS is not supported in v0.1".
+> **Not implemented yet (TODO):**
 >
 > - **One standalone server only.** Sentinel and Cluster come later, and
 >   with them replicas to read from and sharded pub/sub. A client refuses a
@@ -132,16 +130,15 @@ const profile = (try client.run(io, op, cmd.hgetall(Profile, "user:42"), .{ .all
 - [Logs](#logs)
 - [Tests without Redis](#tests-without-redis)
 
-Every program of this guide is shown whole, with what it printed against
-Redis: [quick start](#quick-start) ·
+Every example of this guide is shown whole, and every program with what
+it printed against Redis: [quick start](#quick-start) ·
 [connecting](#what-can-go-wrong-at-the-start) ·
 [the best customers](#the-best-customers-and-the-sessions-of-one) ·
 [checkout](#transactions-and-watch) · [a limit on requests](#scripts) ·
 [shipping](#streams-and-consumer-groups) · [notifications](#pubsub) ·
-[errors](#errors-and-what-is-safe-to-retry). So is every test, and the
-tests need no server: [pipelines](#pipelines) ·
-[deadlines](#deadlines-and-cancellation) · [tests of an
-application](#tests-without-redis).
+[errors](#errors-and-what-is-safe-to-retry). The tests need no Redis
+server: [pipelines](#pipelines) · [deadlines](#deadlines-and-cancellation) ·
+[tests of an application](#tests-without-redis).
 
 ## How Redis keeps data
 
@@ -282,6 +279,9 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 }
 ```
+
+Each program of this guide is a whole `src/main.zig`, and `zig build run`
+runs it.
 
 > [!TIP]
 > zefir-redis is also part of the umbrella module: with
@@ -525,8 +525,8 @@ password `p@ss`, and `redis://:secret@cache` the password of the user
 `default`. Better still, keep the password out of the URL and give it in
 `Options.password`, from a `confy.Secret`.
 
-`init` refuses what v0.1 cannot do, with a text that says what to do
-instead: `rediss://`, which wants TLS, and options after `?`, which live
+`init` refuses what the client cannot do yet, with a text that says what to
+do instead: `rediss://`, which wants TLS, and options after `?`, which live
 in `redis.Client.Options`, are `Unsupported`, and so are UNIX sockets and
 other schemes; a password both in the URL and in the options, and a user
 without a password, are `InvalidArgument`.
@@ -710,8 +710,9 @@ $ APP_REDIS_URL=redis://127.0.0.1:6380 APP_REDIS_PASSWORD=change-me zig build ru
   here too: a cluster node, a Sentinel, Redis before 7.2 or Valkey before
   8 is `Unsupported`, with what it is, such as "the server at db:6379 is
   Redis 6.2.24; v0.1 needs Redis 7.2 or later".
-- **URLs** that ask for what v0.1 cannot do stop at `init`, with what to
-  do instead.
+- **URLs** that ask for what the client cannot do yet stop at `init`,
+  with what to do instead. The client's texts say v0.1: the first version
+  of zefir-redis, which came with zefir v0.10.0.
 - `connect` may be called again after a failure; until it succeeds, a call
   is `Unavailable`: "connect() has not succeeded". Once the client is
   connected, `connect` does nothing.
@@ -2843,5 +2844,6 @@ test "a profile is saved as a field of the hash for each field of the struct but
   and stop the server last.
 - These tests need no Redis, and neither do those of
   [pipelines](#pipelines) and of [deadlines](#deadlines-and-cancellation):
-  they run wherever the other tests of your project run, with nothing to
-  start first.
+  they are ordinary Zig tests, which a test step of your `build.zig` runs
+  with nothing to start first. Their module imports `redis`, and `core`
+  for the deadlines, declared as in [Installation](#installation).
