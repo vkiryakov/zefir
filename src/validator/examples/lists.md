@@ -3,7 +3,7 @@
 Rules for slices and arrays: `v.minItems` and `v.maxItems` bound the number of
 items, `v.uniqueItems` and `v.uniqueBy` reject repeated items or keys,
 `v.containsAll` and `v.containsNone` require or forbid listed values among the
-items, and `v.each` declares the rules of the items.
+items, and `v.each` declares the transforms and the rules of the items.
 
 ```zig
 const v = @import("validator");
@@ -365,13 +365,19 @@ Examples:
 
 ## v.each(rules)
 
-Applies rules to every item of a slice or an array. Written `v.each(rule)` or
-`v.each(.{ rules })`.
+Applies transforms and rules to every item of a slice or an array. Written
+`v.each(rule)`, `v.each(.{ rules })`, or with transforms first,
+`v.each(.{ v.trim, v.toLower, v.notEmpty })`; transforms alone make an entry
+too, `v.each(v.trim)`.
 
 - **Field types:** a slice or an array `[N]T` of any item type, `[N]u8`
   included; `?T` and `??T` of these. A string is not a list.
-- **Parameters:** `rules`: one rule or a tuple of at least one rule, any rule
-  including `v.each` (for lists of lists) and `v.custom`.
+- **Parameters:** `rules`: one transform or rule, or a tuple of them, at
+  least one: the transforms first, then the rules, any rule including
+  `v.each` (for lists of lists) and `v.custom`. The transforms run in
+  `v.transform`, before any rule
+  ([Names and transforms](README.md#lists-optionals-and-nested-structs)).
+  `v.rename` does not go inside: list items have no name.
 - **Passes when:** `v.each` is not a check of the list: it declares the rules of
   the items. It is the last rule of its tuple, at most one per tuple. Only when
   all rules of the list passed, the walk visits the items by index, skipping
@@ -404,6 +410,8 @@ validator: <Type>.field_rules.<field>: each expects a slice or an array, field i
 validator: <Type>.field_rules.<field>: each must be called, e.g. v.each(v.notEmpty)
 validator: <Type>.field_rules.<field>: each must be the last rule
 validator: <Type>.field_rules.<field>: each appears twice; put all item rules into one v.each(.{ ... })
+validator: <Type>.field_rules.<field>: rename inside each: list items have no name
+validator: <Type>.field_rules.<field>[]: not_blank is a rule; transforms (trim) must come before the rules
 ```
 
 Examples (the path follows the field's name):

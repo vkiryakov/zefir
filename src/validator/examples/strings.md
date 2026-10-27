@@ -669,7 +669,7 @@ A string contains `seed`.
   allocates nothing.
 - **Deviations:** [D29](class_validator.md#deviations-from-validatorjs).
 
-Searching without case and counting occurrences are not in v1.
+Searching without case and counting occurrences are not supported yet (TODO).
 
 Compile errors:
 

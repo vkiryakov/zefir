@@ -507,8 +507,8 @@ Both describe a field, like its rules, so they go into the same entry of
 
 1. **The outside name**, `v.rename("userName")`: what the field is called
    outside the program. Violations use it in their paths by themselves; JSON
-   keys use it only when your codec asks `v.fieldNamed` and `v.nameOf`
-   (`std.json` does not). At most one, and always first.
+   keys use it when a codec asks `v.fieldNamed` and `v.nameOf`, as the one of
+   zefir-http does (`std.json` does not). At most one, and always first.
 2. **Transforms**, such as `v.trim` and `v.toLower`: they bring the value to
    its normal form. They never reject it.
 3. **Rules**, as in [Declaring rules](#declaring-rules): they check the value
@@ -522,17 +522,23 @@ entries.
 > A JSON key takes it only when a codec asks for it with `v.fieldNamed` and
 > `v.nameOf`: `std.json` does not know it, so `std.json.parseFromSlice` still
 > looks for `user_name`. Transforms run only where `v.transform` is called.
-> No zefir module does either yet: your own codec and handler do, or
-> zefir-http's when it comes.
+> [zefir-http](../../http/examples/README.md#input) does both for every
+> request: `ctx.json(T)`, `ctx.query(T)` and its other input calls read the
+> fields by their outside names (`ctx.headers(T)` by the names of the
+> headers), run `v.transform`, then the rules, and its JSON responses go out
+> by the outside names too, after `v.transform`.
 
 What this means for your code:
 
-- **Transforms and rules** work on any struct, however it was filled: decode
-  with `std.json` as usual, then call `v.transform` and `v.checkAll`.
+- **In a zefir-http handler**, `ctx.json(T)` gives you the value already read
+  by the outside names, transformed and checked.
+- **Elsewhere**, transforms and rules work on any struct, however it was
+  filled: decode with `std.json` as usual, then call `v.transform` and
+  `v.checkAll`.
 - **Outside names** reach JSON only through a codec that asks the validator
-  for them:
+  for them, as the one of zefir-http does:
   [Reading and writing JSON by outside names](#reading-and-writing-json-by-outside-names)
-  shows one in 20 lines.
+  shows one of your own in 20 lines.
 
 With such a codec, a request goes through these steps, and only then does your
 code get the value:
@@ -710,6 +716,9 @@ this order:
 3. `v.check` or `v.checkAll`: the rules, on the normalized value;
 4. your code.
 
+In a handler of zefir-http, `ctx.json(T)` does steps 1 to 3; other code, such
+as a consumer of a queue, calls them itself.
+
 They are two calls because they need different things: `v.check` allocates
 nothing and reads a `*const` value; `v.transform` changes the value and may
 allocate. Nothing reminds you of step 2: without it the program compiles, and
@@ -735,8 +744,8 @@ already transformed, wherever it is written.
 
 - **Where it is used.** The paths of violations use it by themselves:
   `displayName`, `speakers[1].displayName`. A codec that asks `v.fieldNamed`
-  and `v.nameOf` reads and writes JSON keys by it
-  ([below](#reading-and-writing-json-by-outside-names)); `std.json` alone
+  and `v.nameOf`, such as the one of zefir-http, reads and writes JSON keys by
+  it ([below](#reading-and-writing-json-by-outside-names)); `std.json` alone
   keeps the Zig names. A field without `v.rename` is called outside as it is
   in Zig.
 - **The name** is 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`,
@@ -764,8 +773,10 @@ panic in Debug, `validation.invalid` in the other modes.
 ### Reading and writing JSON by outside names
 
 `v.rename` reaches JSON only through a codec: the code that reads a struct
-from JSON, a query string or a form and writes it back. The codec takes the
-outside names from the validator with two functions:
+from JSON, a query string or a form and writes it back.
+[zefir-http](../../http/examples/README.md#input) has one for its requests
+and responses. For JSON that comes from elsewhere, a codec of your own takes
+the outside names from the validator with two functions:
 
 - `v.nameOf(T, field)` takes a struct type and a tag of
   `std.meta.FieldEnum(T)`, both known at compile time, and returns the
@@ -2054,7 +2065,7 @@ page. [all_rules.zig](all_rules.zig) declares every example, so
 | [`v.uniqueBy(.key)`](lists.md#vuniquebykey) | `.lines = .{ v.maxItems(50), v.uniqueBy(.sku) }` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` |
 | [`v.containsAll(.{ ... })`](lists.md#vcontainsallvalues) | `.scopes = v.containsAll(.{"openid"})` | every listed value is an item of a slice or an array | `validation.contains_all` |
 | [`v.containsNone(.{ ... })`](lists.md#vcontainsnonevalues) | `.roles = v.containsNone(.{.owner})` | no item of a slice or an array is a listed value | `validation.contains_none` |
-| [`v.each(rules)`](lists.md#veachrules) | `.emails = v.each(v.email)` | the rules of every item of a slice or an array | the inner rule's code |
+| [`v.each(rules)`](lists.md#veachrules) | `.emails = v.each(v.email)` | the transforms and the rules of every item of a slice or an array | the inner rule's code |
 
 ### [Custom](#vcustom)
 
