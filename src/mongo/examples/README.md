@@ -1,4 +1,4 @@
-# mongo
+# zefir-mongo: an async MongoDB driver for Zig
 
 > [!WARNING]
 > **No TLS yet: use it only in a network you trust.** zefir-mongo speaks
@@ -23,7 +23,7 @@ collections with the operations of MongoDB's CRUD specification:
 production.
 
 > [!IMPORTANT]
-> **Not in v0.1 (TODO):**
+> **Not implemented yet (TODO):**
 >
 > - **One standalone mongod only.** Replica sets and sharded clusters come
 >   later. A client refuses any other server when it connects, with
@@ -43,7 +43,7 @@ production.
 > - **Sessions, transactions and change streams**, and compression of
 >   messages.
 > - **A strict connection string.** An option that would change what the
->   client does, and that v0.1 cannot do, is refused rather than skipped:
+>   client does, and that it cannot do yet, is refused rather than skipped:
 >   `retryWrites=true`, `w=majority`, `readPreference`, `replicaSet`,
 >   `tls=true` and others. A string copied from elsewhere may need
 >   trimming, see [The connection string](#the-connection-string).
@@ -98,8 +98,11 @@ while (try adults.next(io, op)) |doc| {
 - **Errors that say whether to retry.** Every error is one of 16 names,
   and each tells whether the server may have run the call; the details,
   the server's code and message among them, are in `mongo.Diagnostics`.
-- **Deadlines of zefir-core.** A call takes a `core.Context`: its deadline
-  becomes the server's `maxTimeMS`, and its token cancels the call.
+- **Deadlines of zefir-core.** A call takes a `mongo.OperationContext`,
+  which `.of(ctx)` makes of a `core.Context`: its deadline becomes the
+  server's `maxTimeMS`, and its token is checked before sending and after
+  the reply. The token is no alarm: to cut a call that waits, cancel its
+  task.
 - **Tests without MongoDB.** `mongo.testing.FakeServer` plays a script on
   loopback, and your code talks to it through a real client.
 - **No dependencies.** Only the standard library; zio comes from your
@@ -122,14 +125,14 @@ while (try adults.next(io, op)) |doc| {
 - [Tests without MongoDB](#tests-without-mongodb)
 - [Under zefir-odm](#under-zefir-odm)
 
-Programs that `zig build e2e` in `tests/mongo` builds and runs against
-mongod, checking what they print against this guide:
-[quick start](quick_start.zig) · [connecting](connect.zig) ·
-[orders](orders.zig) · [reports](reports.zig) · [errors](errors.zig) ·
-[under zefir.App](app.zig).
-Examples that `zig build test-mongo` runs without a server:
-[documents](documents.zig) · [a write cut short](import_test.zig) ·
-[deadlines](deadlines_test.zig) · [tests of an application](users_test.zig).
+Every example of this guide is shown whole, and every program with what it
+printed. The programs that talk to a mongod:
+[quick start](#quick-start) · [connecting](#what-can-go-wrong-at-the-start) ·
+[orders](#writing-and-reading-documents) · [reports](#reports-indexes-and-collections) · [errors](#errors-and-what-is-safe-to-retry) ·
+[under zefir.App](#under-zefirapp).
+The examples that need no server:
+[documents](#documents-zefir-mongo-bson) · [a write cut short](#a-write-cut-short) ·
+[deadlines](#deadlines-and-cancellation) · [tests of an application](#tests-without-mongodb).
 
 ## How MongoDB keeps data
 
@@ -208,7 +211,9 @@ the client, which build the commands; copy them and keep them anywhere.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`; mongo ships since v0.9.0:
+Add Zefir to your `build.zig.zon`. mongo ships since v0.9.0, and
+mongo-bson, which the build below imports for documents, since v0.11.0:
+v0.9.0 and v0.10.0 had BSON inside mongo, as `mongo.bson`.
 
 ```sh
 zig fetch --save git+https://github.com/vkiryakov/zefir#dev
@@ -229,27 +234,33 @@ settings, log for records and core for deadlines:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
-            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -507,7 +518,7 @@ tags; `retryWrites=true` and `retryReads=true`; `w`, `journal`,
 `wTimeoutMS` and `readConcernLevel`; `socketTimeoutMS` and
 `waitQueueTimeoutMS`; other mechanisms and `authMechanismProperties`;
 `mongodb+srv://`, several hosts, UNIX sockets and proxies. Skipped with a
-warning in the log, as they change nothing that v0.1 does:
+warning in the log, as they change nothing that the client does:
 `compressors`, `zlibCompressionLevel`, `heartbeatFrequencyMS`,
 `serverMonitoringMode`, `localThresholdMS`, `serverSelectionTryOnce`,
 `uuidRepresentation`, and the options that the client does not know.
@@ -535,7 +546,7 @@ asks the server in hello which mechanisms the user has, and takes
 SCRAM-SHA-256 when the list names it, SCRAM-SHA-1 when it does not. SCRAM
 derives keys from the password with thousands of rounds of hashing; the
 client keeps them, so only its first connection pays for that.
-SCRAM-SHA-256 takes a password of printable ASCII only in v0.1: another
+SCRAM-SHA-256 takes a password of printable ASCII only, for now: another
 one is `Unsupported` before anything is sent, and such a user needs
 SCRAM-SHA-1 credentials and `authMechanism=SCRAM-SHA-1`.
 
@@ -675,8 +686,9 @@ $ APP_MONGO_URI=mongodb://admin@127.0.0.1:27018 APP_MONGO_PASSWORD=change-me zig
   gives a connection that could not open: the server may be overloaded or
   restarting, and the call may go again later. A host name that does not
   resolve gets no labels: it is the name that is wrong.
-- **Connection strings** that ask for what v0.1 cannot do stop at `init`,
-  with what to do instead.
+- **Connection strings** that ask for what the client cannot do yet stop
+  at `init`, with what to do instead. The client's messages say v0.1: the
+  first version of zefir-mongo, which came with zefir v0.9.0.
 - `connect` may be called again after a failure; until it succeeds, a call
   is `Unavailable`: "connect() has not succeeded". A server of another
   kind is refused here too: a member of a replica set, a mongos or a
@@ -1394,7 +1406,7 @@ is `.not_sent` goes through only once what stopped it has changed:
 | Error | Outcome | When |
 |---|---|---|
 | `InvalidArgument` | not sent | the call breaks a rule of the client: a bad name, an update without an operator, an empty `insertMany`, a document no message can hold, a bad connection string |
-| `Unsupported` | not sent | what v0.1 does not do: an option of the connection string, a server other than a standalone mongod of 7.0 or later, a password that SCRAM-SHA-256 cannot take |
+| `Unsupported` | not sent | what the client does not do yet: an option of the connection string, a server other than a standalone mongod of 7.0 or later, a password that SCRAM-SHA-256 cannot take |
 | `Closed` | not sent | the client or the cursor was closed |
 | `Unavailable` | not sent | no connection: the server is not there, or closed the connection while it opened; the pool is paused after a clear; `connect` has not succeeded |
 | `AuthenticationFailed` | not sent | the server refused the user |
@@ -2344,9 +2356,10 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
   production.
 - The script comes before the server, and the server before the client,
   so that their `defer`s end the client first and the script last.
-- The build of zefir runs these tests, and those of
+- They need no MongoDB: they run with the other tests of your project,
+  with no server to start, as do the tests of
   [deadlines](#deadlines-and-cancellation) and of
-  [a write cut short](#a-write-cut-short), in `zig build test-mongo`.
+  [a write cut short](#a-write-cut-short).
 
 ## Under zefir-odm
 
@@ -2375,8 +2388,11 @@ to `odm.Registry.init`; the driver lives longer than the registry.
   codes; a write that a unique index refused, codes 11000, 11001 and
   12582, is odm's `DuplicateKey`, with the index of the document.
 - **It is zefir compatible**: it passes both groups of odm's conformance
-  suite against mongod, and group C, the rules of the contract, against
-  `mongo.testing.FakeServer`.
+  suite against mongod: group C, the rules of the contract, such as
+  deadlines, cancellation, closing, memory and secrets, and group D, the
+  data, from inserts and indexes to queries, updates, deletes, counts,
+  aggregations and commands. Against `mongo.testing.FakeServer`, which
+  keeps no data, it passes group C.
 
 The guide of odm, [src/odm/examples/README.md](../../odm/examples/README.md),
 starts from its quick start.
