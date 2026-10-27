@@ -75,8 +75,11 @@ const SignUp = struct {
   [Preconditions](README.md#preconditions)). To word that case, put
   `v.utf8.withMessage("...")` first in the tuple. The other rules read bytes,
   never decode, and have no precondition: a byte of invalid UTF-8 is a byte.
-- **No transformations.** The rules only read the value: no trimming, no case
-  folding and no Unicode normalization.
+- **The rules only read the value**: no trimming, no case folding and no
+  Unicode normalization. To trim or change the case first, put `v.trim`,
+  `v.toLower` or `v.toUpper` before the rules of the entry, and call
+  `v.transform` before the check: `v.check` and `v.checkAll` never run
+  transforms ([Names and transforms](README.md#names-and-transforms)).
 - **Contradictions are compile errors.** Bounds of one measure in one tuple
   that let no value pass do not compile
   ([D60](class_validator.md#deviations-from-validatorjs)).
@@ -735,6 +738,9 @@ Examples:
 
 A password is long enough and mixes the classes of characters that `options`
 asks for.
+
+The options of `v.strongPassword`, `v.StrongPasswordOptions`, as the validator
+declares them:
 
 ```zig
 pub const StrongPasswordOptions = struct {

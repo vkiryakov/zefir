@@ -209,6 +209,10 @@ const identifiers = struct {
             .isbns = v.each(v.isbn),
         };
     };
+};
+
+const withdrawals = struct {
+    const v = @import("validator");
 
     const Withdrawal = struct {
         network: v.BtcNetwork, // chosen by the user
@@ -224,7 +228,7 @@ const identifiers = struct {
 
 test "the examples of the identifiers page check a payout and a withdrawal" {
     const Payout = identifiers.Payout;
-    const Withdrawal = identifiers.Withdrawal;
+    const Withdrawal = withdrawals.Withdrawal;
     comptime validator.assertRules(Payout);
     comptime validator.assertRules(Withdrawal);
     const good: Payout = .{

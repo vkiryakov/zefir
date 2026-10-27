@@ -66,9 +66,12 @@ const Payout = struct {
   field optional.
 - **Canonical form only.** Nothing is trimmed, case-folded or normalized:
   `978-0-306-40615-7`, `DE89 3704 0044 0532 0130 00`, `deutdeff`, `03178471` and
-  `2434-561x` fail. Remove spaces and hyphens and fix the case before the check
-  if your input allows them
-  ([D47](class_validator.md#deviations-from-validatorjs)).
+  `2434-561x` fail. If your input allows them, remove spaces and hyphens and fix
+  the case before the check
+  ([D47](class_validator.md#deviations-from-validatorjs)): put transforms before
+  the rule in the entry, such as `v.toUpper` and a `v.transformWith` function of
+  your own that drops spaces and hyphens, and call `v.transform` before the
+  check ([Names and transforms](README.md#names-and-transforms)).
 - **No reference tables.** No rule looks a country, an issuer or a bank up: a
   value of the right shape with a valid checksum passes even with a country that
   does not exist (`XX46370400440532013000` for `v.iban`, `DEUTXXFF` for
@@ -106,7 +109,12 @@ time only. A predicate takes any input, invalid UTF-8 included, never panics and
 allocates nothing. In `field_rules` use the rule: a predicate there is a compile
 error that names the rule.
 
+A withdrawal whose network the user chooses checks its address in
+`validateSelf`, with the predicate:
+
 ```zig
+const v = @import("validator");
+
 const Withdrawal = struct {
     network: v.BtcNetwork, // chosen by the user
     address: []const u8,

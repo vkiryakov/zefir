@@ -5,6 +5,34 @@ next to the struct, check a value with one call, and get the first violation —
 its code, message and path — without allocating. A rule that does not fit its
 field is a compile error, not a surprise at run time.
 
+> [!IMPORTANT]
+> **Not implemented yet (TODO):**
+>
+> - **Recursive DTOs.** A struct that reaches itself through a slice, such as
+>   a comment with `replies: []const Comment`, cannot be checked when it or a
+>   type below it declares `field_rules` or `validateSelf`: the build stops
+>   with `recursive types are not supported`.
+> - **Unions, pointers, tuples and vectors** are not walked: rules,
+>   `validateSelf` or transforms below one are a compile error
+>   ([Nested structs and lists](#nested-structs-and-lists)).
+> - **Hash maps and other containers that hide their item type**, such as
+>   `std.HashMapUnmanaged` and `std.MultiArrayList`, are not walked, and
+>   nothing reports it: use slices in DTOs.
+> - **Unicode case.** `v.toLower` and `v.toUpper` change ASCII letters only,
+>   and `v.contains` has no search that ignores case.
+> - **Translations.** Default messages are English, with no catalogs: give
+>   the rules messages with `.withMessage`, or translate by `code`.
+> - **Conditional rules and groups.** A rule cannot depend on another field:
+>   write such a check in `validateSelf`. Rules have no groups either: every
+>   check uses all the rules of a type.
+> - **Regular expressions.** There is no pattern rule, since the Zig standard
+>   library has no regex engine: write `v.custom` with a matcher of your own.
+
+A whole program: it checks a sign-up against the rules of its struct and logs
+the first violation:
+
+**`src/main.zig`**
+
 ```zig
 const std = @import("std");
 const log = @import("log");
@@ -169,7 +197,8 @@ Then import the `zefir-validator` module in `build.zig`. The example programs
 of this guide also log what they find with
 [zefir-log](../../log/examples/README.md), as text, one line per record, so
 this `build.zig` imports `zefir-log` too, and its `zig build test` runs the
-tests of the program, such as those of
+tests of `src/main.zig` and of the files it pulls in with
+`test { _ = @import("users.zig"); }`, such as those of
 [Testing a DTO package](#testing-a-dto-package):
 
 ```zig
@@ -427,6 +456,10 @@ below that of their items. When one of them contains a type with rules or
 transforms, that is a compile error naming the field: nothing is skipped
 silently. `field_rules` and `validateSelf` belong on structs: on an enum, a
 union or an opaque type that the walk reaches, they are a compile error too.
+A struct that reaches itself through a slice, such as a comment with
+`replies: []const Comment`, stops the build as well when it or a type below
+it declares `field_rules` or `validateSelf`:
+`recursive types are not supported`.
 
 > [!NOTE]
 > Containers that hide their item type — `std.HashMapUnmanaged`,
@@ -798,6 +831,8 @@ This test shows a small codec of your own:
   `v.fieldNamed`, and lets std.json fill the struct.
 - **`encode`** writes the outside names, from `v.nameOf`.
 - In between, the event goes through `v.transform` and `v.check`.
+
+**`src/parcel_events.zig`**
 
 ```zig
 const std = @import("std");
@@ -1187,7 +1222,10 @@ How to read them:
 
 ## validateSelf and v.fail
 
-A check across fields goes into `pub fn validateSelf(self: *const T) ?v.Violation`:
+A check across fields goes into `pub fn validateSelf(self: *const T) ?v.Violation`.
+This program checks the bookings of a trip and logs every violation:
+
+**`src/main.zig`**
 
 ```zig
 const std = @import("std");
@@ -1411,6 +1449,11 @@ chooses the singular or the plural (`must have at least 1 item`,
 with another message; the code stays. The template is a `[]const u8` that must
 be known at compile time (a literal, a `const`, or `++` of them): the compiler
 fills in the placeholders, and the rule keeps the result as a static string.
+
+This program gives the rules of a profile messages of their own and logs
+every violation:
+
+**`src/main.zig`**
 
 ```zig
 const std = @import("std");
@@ -1697,6 +1740,11 @@ A violation is a `v.Violation`, a struct of three fields:
   field of that struct instead (`display_name`), which the walk turns into
   the field's path.
 
+A violation from a built-in rule, `v.custom` or `v.fail` never contains the
+checked value, so it is safe to log and to send to a client as it is. A
+hand-built `validateSelf` result is safe only when its `code` and `message` are
+static strings (see the warning in [validateSelf and v.fail](#validateself-and-vfail)).
+
 ### v.check
 
 `v.check(value, path_buf)` takes a pointer to the value (`anytype`) and the
@@ -1743,9 +1791,10 @@ for (report.violations) |violation| {
 
 - `violations` are in walk order, at most one per value and at most 100
   (`v.max_report_violations`) in all; `truncated` is `true` exactly when there
-  was a 101st, so a program that logs the violations or sends them to a
-  client says then that there were more. The first violation equals the
-  result of `check` (its `field` too, when the path fits `path_buf`).
+  was a 101st: a program that logs the violations or sends them to a client
+  should then say that there were more, for example with one more record
+  when `report.truncated` is true. The first violation equals the result of
+  `check` (its `field` too, when the path fits `path_buf`).
 - The report owns its memory, like `std.json.Parsed`: one arena from `gpa`
   holds the list and every path, and paths have no length limit. Call `deinit`
   exactly once after every successful call, even for a valid value. After it
@@ -1762,19 +1811,6 @@ values at once, the same value included, when:
 - no thread changes the value during a call;
 - a `gpa` shared by `checkAll` calls on several threads is thread-safe;
 - `v.custom` functions and `validateSelf` are pure, as they must be anyway.
-
-### Violation
-
-| Field | Content |
-| --- | --- |
-| `code` | `validation.<rule>` for a built-in rule (`validation.not_empty`); your code for `v.custom` and `v.fail`; `validation.finite` for NaN or an infinity in a float field; `validation.invalid` for a malformed `validateSelf` result outside Debug |
-| `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, never containing the value (a default message has no field name either) |
-| `field` | the path of the value from the root, by the outside names of the fields (`email`, `address.city`, `items[2].name`, `[1].email`, `speakers[1].displayName`); `null` for the root itself |
-
-A violation from a built-in rule, `v.custom` or `v.fail` never contains the
-checked value, so it is safe to log and to send to a client as it is. A
-hand-built `validateSelf` result is safe only when its `code` and `message` are
-static strings (see the warning in [validateSelf and v.fail](#validateself-and-vfail)).
 
 ### Paths
 
@@ -1822,6 +1858,10 @@ of `v.check` and `v.transform` for `T` and every type below it, outside names,
 transforms and the bodies of `validateSelf` included, and does nothing at run
 time.
 
+A file of DTOs with both tests, `v.assertRules` and a value that must fail:
+
+**`src/users.zig`**
+
 ```zig
 const std = @import("std");
 const v = @import("validator");
@@ -1857,7 +1897,7 @@ test "CreateUserRequest rejects an invalid email" {
     const bad: CreateUserRequest = .{ .email = "ada.example.com", .name = "Ada", .birthday = "1990-12-10", .roles = &.{.admin} };
     const violation = v.check(&bad, &path_buf) orelse return error.NoViolation;
     try std.testing.expectEqualStrings("validation.email", violation.code);
-    try std.testing.expectEqualStrings("email", violation.field.?);
+    try std.testing.expectEqualStrings("email", violation.field orelse return error.NoField);
 }
 ```
 
