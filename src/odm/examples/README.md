@@ -2020,7 +2020,7 @@ $ APP_MONGO_SERVER=127.0.0.1:27018 APP_ADMIN_URI=mongodb://admin@127.0.0.1:27018
 2026-10-22T14:53:12.823Z INFO  [app] Rotated user=shop_a generation=3
 2026-10-22T14:53:13.421Z INFO  [app] Requests during the rotations made=200 failed=0
 2026-10-22T14:53:13.421Z INFO  [app] The same rotation again generation=3
-2026-10-22T14:53:13.453Z WARN  [mongo] 127.0.0.1:27118 refused a connection: AuthenticationFailed: Authentication failed.
+2026-10-22T14:53:13.453Z WARN  [mongo] 127.0.0.1:27018 refused a connection: AuthenticationFailed: Authentication failed.
 2026-10-22T14:53:13.453Z WARN  [odm] connection main: connect failed: AuthenticationFailed: Authentication failed.
 2026-10-22T14:53:13.453Z WARN  [app] Not rotated reason=AuthenticationFailed details="Authentication failed." generation=3
 2026-10-22T14:53:13.454Z INFO  [app] Done leases=0 forced=0
