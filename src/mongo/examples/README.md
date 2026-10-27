@@ -113,7 +113,7 @@ while (try adults.next(io, op)) |doc| {
 - [Quick start](#quick-start)
 - [Connecting](#connecting)
 - [Databases and collections](#databases-and-collections)
-- [Documents](#documents)
+- [Documents: zefir-mongo-bson](#documents-zefir-mongo-bson)
 - [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
 - [Deadlines and cancellation](#deadlines-and-cancellation)
 - [The pool, closing and statistics](#the-pool-closing-and-statistics)
@@ -150,7 +150,7 @@ flowchart LR
   with more types than JSON has: 32- and 64-bit integers, dates,
   ObjectIds, binary data, decimals. On the wire and on disk it is BSON, a
   binary form of it, which zefir-mongo reads and writes itself, see
-  [Documents](#documents).
+  [Documents: zefir-mongo-bson](#documents-zefir-mongo-bson).
 - **`_id`.** Every document has an `_id`, unique in its collection. An
   insert gives a document without one an *ObjectId*: 12 bytes made of the
   time, a random part and a counter, so that services make unique ids
@@ -1144,7 +1144,16 @@ context. A collection name is checked before every operation: an empty
 one, one with `$` or NUL, or one that is not UTF-8, is `InvalidArgument`,
 and nothing is sent.
 
-## Documents
+## Documents: zefir-mongo-bson
+
+MongoDB's documents, and the commands that carry them, are BSON.
+zefir-mongo reads and writes them with zefir-mongo-bson, the module of
+Zefir for BSON. The build of [Installation](#installation) imports it as
+`mongo-bson`, and the programs of this guide name it `bson`:
+`const bson = @import("mongo-bson");`. Through the umbrella module it is
+`@import("zefir").mongo_bson`. It imports nothing but the standard
+library, so a program that only makes or reads documents needs neither
+zefir-mongo nor a server; zefir-odm writes its documents with it too.
 
 `documents.zig` writes a customer of the shop in each of the forms that
 the operations take, and prints the documents as Extended JSON, the text
@@ -1157,10 +1166,9 @@ MongoDB's tools show them in. It needs no server:
 //! field by field with `bson.Builder`; or a `bson.RawDocument`, bytes that
 //! are a document already. This program writes a customer of the shop in
 //! each form and prints the documents as Extended JSON, the text MongoDB's
-//! tools show them in. It needs no server: `zig build test-mongo` runs it.
+//! tools show them in. It needs zefir-mongo-bson only, and no server.
 
 const std = @import("std");
-const mongo = @import("mongo");
 const bson = @import("mongo-bson");
 
 const Status = enum { active, suspended };
@@ -1292,20 +1300,31 @@ cut short:     error.InvalidBson
    | Zig | BSON |
    |---|---|
    | `bool` | boolean |
-   | `i8`–`i32`, `u8`–`u16` | int32 |
-   | `i33`–`i64`, `u32` | int64 |
+   | `i8`–`i32`, `u8`–`u31`: the integers whose values all fit int32 | int32 |
+   | `i33`–`i64`, `u32`–`u63` | int64 |
    | `f32`, `f64` | double |
    | `[]const u8` | string, UTF-8 checked both ways |
    | an exhaustive `enum` | string, the name of its tag |
    | `?T` | null, or the value |
    | a struct | document |
    | `[]const T`, `[N]T`, a tuple | array |
-   | `bson.ObjectId`, `bson.DateTime`, `bson.Binary`, `bson.Decimal128`, `bson.Timestamp`, `bson.Regex`, `bson.Value`, `bson.RawDocument` | as they are |
+   | `bson.ObjectId`, `bson.DateTime`, `bson.Binary`, `bson.Decimal128`, `bson.Timestamp`, `bson.Regex`, `bson.Null`, `bson.MinKey`, `bson.MaxKey`, `bson.Value`, `bson.RawDocument` | as they are |
+   | `bson.OwnedDocument` | document, written only: `decode` reads a document into a `bson.RawDocument` |
+   | `bson.DbPointer`, `bson.JavaScriptWithScope` | as they are, read only: deprecated types, never written |
 
    `u64`, `usize`, `isize` and `c_int` stop the build, as BSON's integers
-   are signed and of fixed sizes; so do unions, pointers other than
-   slices, and a type that holds itself. The message names the field and
-   says what to use instead.
+   are signed and of fixed sizes; so do integers of more than 64 bits,
+   floats other than `f32` and `f64`, non-exhaustive enums, `??T`, unions,
+   pointers other than slices, and a type that holds itself. The message
+   names the field and says what to use instead.
+
+   This table holds wherever zefir-mongo-bson writes or reads a struct,
+   so for every operation of zefir-mongo. zefir-odm narrows it for its
+   models: for one, it refuses `f32`, which a double would round, and it
+   never writes a null, as an optional that is null stays out of the
+   document. Its own table is in
+   [Types of fields](../../odm/examples/README.md#types-of-fields) of the
+   guide of odm.
 2. **Null.** A null optional goes as BSON null, and `.skip_nulls = true`
    leaves such fields out. In a filter the null stays: `.{ .email =
    maybe_email }` with a null matches the documents whose `email` is null
@@ -1338,6 +1357,11 @@ cut short:     error.InvalidBson
    without copying. No bytes make a reader panic or read out of bounds:
    broken ones are `error.InvalidBson`. `dupe` copies a document into a
    `bson.OwnedDocument`, which frees its bytes with `deinit`.
+8. **Extended JSON** is what `{f}` prints of a `bson.RawDocument`, as in
+   the run above: Relaxed Extended JSON, the text of MongoDB's tools, for
+   logs and test messages. It goes one way only: zefir-mongo-bson
+   writes Extended JSON and reads none, so a document comes from the
+   codec, `bson.literal`, a `bson.Builder` or BSON bytes.
 
 Every operation takes its documents in any of these forms: a
 `bson.RawDocument`, a `bson.OwnedDocument`, or a struct or a literal that
