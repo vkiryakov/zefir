@@ -1,4 +1,4 @@
-# http
+# zefir-http: an HTTP server for Zig services
 
 **Web services and APIs in Zig, with routes the compiler checks.** A web
 service answers HTTP requests: a browser asks for a page, an app sends JSON
@@ -253,6 +253,7 @@ explained:
 | `errors.zig` | the error handler |
 | `public/index.html` | the web page |
 | `todos_test.zig` | tests without a network |
+| `middleware_test.zig` | tests of its authentication and CORS on their own |
 | `openapi.json` | the OpenAPI document of the API, which the tests keep up to date |
 
 In a project of your own they live in `src/`, and `public/` and
@@ -342,54 +343,73 @@ module, as `zefir.openapi`. Its tests need no zio:
 
 ```zig
 // build.zig of the todo service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
-const imports: []const std.Build.Module.Import = &.{
-    .{ .name = "http", .module = zefir.module("zefir-http") },
-    .{ .name = "core", .module = zefir.module("zefir-core") },
-    .{ .name = "validator", .module = zefir.module("zefir-validator") },
-    .{ .name = "confy", .module = zefir.module("zefir-confy") },
-    .{ .name = "log", .module = zefir.module("zefir-log") },
-    .{ .name = "zefir", .module = zefir.module("zefir") },
-};
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "todo-service",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = imports,
-    }),
-});
-exe.root_module.addImport("zio", zio.module("zio"));
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "http", .module = zefir.module("zefir-http") },
+        .{ .name = "core", .module = zefir.module("zefir-core") },
+        .{ .name = "validator", .module = zefir.module("zefir-validator") },
+        .{ .name = "confy", .module = zefir.module("zefir-confy") },
+        .{ .name = "log", .module = zefir.module("zefir-log") },
+        .{ .name = "zefir", .module = zefir.module("zefir") },
+    };
 
-const tests = b.addTest(.{
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/todos_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = imports,
-    }),
-});
-// The tests find the page and openapi.json by the paths the build gives.
-const paths = b.addOptions();
-paths.addOptionPathUntracked("public_dir", b.path("public"));
-paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
-tests.root_module.addOptions("paths", paths);
-const run_tests = b.addRunArtifact(tests);
-// openapi.json is an input of the run: Zig runs the tests again when the
-// file changes, not only when the code does.
-run_tests.addFileInput(b.path("openapi.json"));
-b.step("test", "Run the tests").dependOn(&run_tests.step);
-// zig build openapi: the same tests, which then write openapi.json. It has
-// side effects, so it runs every time, never from the cache.
-const update = b.addRunArtifact(tests);
-update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
-update.has_side_effects = true;
-b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
+    const exe = b.addExecutable(.{
+        .name = "todo-service",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    exe.root_module.addImport("zio", zio.module("zio"));
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/todos_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    // The tests find the page and openapi.json by the paths the build
+    // gives.
+    const paths = b.addOptions();
+    paths.addOptionPathUntracked("public_dir", b.path("public"));
+    paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
+    tests.root_module.addOptions("paths", paths);
+    const run_tests = b.addRunArtifact(tests);
+    // openapi.json is an input of the run: Zig runs the tests again when
+    // the file changes, not only when the code does.
+    run_tests.addFileInput(b.path("openapi.json"));
+    // The tests of the middleware on their own, which need no paths.
+    const middleware_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/middleware_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    const test_step = b.step("test", "Run the tests");
+    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&b.addRunArtifact(middleware_tests).step);
+
+    // zig build openapi: the same tests, which then write openapi.json. It
+    // has side effects, so it runs every time, never from the cache.
+    const update = b.addRunArtifact(tests);
+    update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
+    b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
+}
 ```
 
 > [!TIP]
@@ -1268,10 +1288,12 @@ Content-Length: 15
 ```
 
 An OPTIONS request gets 204 with the methods of its path in `Allow`, unless
-the path has a route of `http.options` of its own. Before a path is matched it is taken apart in segments, and then each is decoded: a
-`%2F` inside `{id}` stays a `/` of the value. `.` and `..` resolve as RFC
-3986 says, an empty segment (`//`) matches no route, a slash at the end does
-not matter, the case of letters does.
+the path has a route of `http.options` of its own.
+
+Before a path is matched it is taken apart in segments, and then each is
+decoded: a `%2F` inside `{id}` stays a `/` of the value. `.` and `..`
+resolve as RFC 3986 says, an empty segment (`//`) matches no route, a slash
+at the end does not matter, the case of letters does.
 
 The health check of the load balancer is a controller without a version,
 open to everybody, since it lists no `requireUser`:
@@ -2760,8 +2782,8 @@ streams of that user:
   names of its type, as `http.Json(T)` writes a response; a variant of
   `void` has the data `{}`.
 - **`.on_close`** names the method that runs once, when the stream has
-  ended: the client left, `close(key)`, the queue overflowed, or the server
-  stopped.
+  ended: the client left, `close(io, key)`, the queue overflowed, or the
+  server stopped.
 - **`close(io, key)`** ends the streams of a key, here when the user signs
   out: what was published before goes out first, then the end.
 
@@ -2821,10 +2843,12 @@ Content-Length: 104
   route has none unless it sets one.
 - **A client that falls behind** fills its queue, 64 events or 256 KiB by
   default, and its stream is closed: memory does not grow. The client
-  reconnects and reads the list anew. An event longer than the queue's
-  `.max_bytes` alone fits no queue: `publish` returns `error.EventTooLarge`,
-  a 500, and logs it; the event goes to nobody, and the streams stay open.
-- **A stream that ends whole**, by `close(key)` or by a stop, ends its
+  reconnects and reads the list anew. An event longer than
+  `.queue.max_bytes` of `http.sse.ManagerOptions`, the options of the
+  manager's `init`, fits no queue even on its own: `publish` returns
+  `error.EventTooLarge`, a 500, and logs it; the event goes to nobody, and
+  the streams stay open.
+- **A stream that ends whole**, by `close(io, key)` or by a stop, ends its
   response with the last chunk, as any chunked response ends. On HTTP/1.1
   its connection then serves the next request, as keep-alive does, unless
   the server is stopping, which closes it. To an HTTP/1.0 client a stream
@@ -3483,8 +3507,266 @@ test "the OpenAPI document is openapi.json, which the service serves with a page
   the directory of the page, which `.static` needs, and `openapi.json`,
   which the last test compares with the document.
 
-The tests of `TokenAuth` and `Cors` on their own are in
-[middleware_test.zig](middleware_test.zig).
+`TokenAuth` and `Cors` have tests of their own, in `middleware_test.zig`.
+It builds a smaller server on the backend in memory: the two middleware in
+the order the service gives them, `Cors` first, since a preflight needs no
+user; an error handler that adds `WWW-Authenticate` to a 401, as the
+service's does; and two controllers of its own, the todos behind the same
+`requireUser` and `requirePermission` as the service's, and an open health
+check. Their handlers only answer:
+
+```zig
+// Application code (src/middleware_test.zig of the example app): zefir-http ships none of these.
+//! Tests of the example app's authentication and CORS without a network:
+//! `http.testing.Backend` serves the same server and the same controllers
+//! from memory. The settings come through confy, as in `main`, here from
+//! an environment of the test's own.
+
+const std = @import("std");
+const confy = @import("confy");
+const http = @import("http");
+const auth = @import("auth.zig");
+const Cors = @import("cors.zig").Cors;
+
+const testing = std.testing;
+
+/// The settings of the example app: the tokens of its two users and the
+/// origin of its web page.
+const Config = struct {
+    auth: struct {
+        /// APP_AUTH_ANN_TOKEN: Ann may read and delete todos.
+        ann_token: confy.Secret,
+        /// APP_AUTH_BOB_TOKEN: Bob may only read them.
+        bob_token: confy.Secret,
+    },
+    cors_origin: []const u8 = "https://app.example",
+};
+
+/// The todos: every method needs a user with the permission "todos", and
+/// deleting one needs "todos:delete" too.
+const TodosV1Controller = struct {
+    pub const http_routes = http.routes(.{
+        .prefix = "/v1/todos",
+        .middleware = .{ auth.requireUser, auth.requirePermission("todos") },
+        .methods = .{
+            .list = http.get("", .{}),
+            .delete = http.delete("/{id}", .{ .middleware = .{auth.requirePermission("todos:delete")} }),
+        },
+    });
+
+    pub fn list(_: *TodosV1Controller, ctx: *http.Context) !void {
+        const user = try ctx.local(auth.CurrentUser);
+        try ctx.response.text(user.id);
+    }
+    pub fn delete(_: *TodosV1Controller, _: *http.Context) !void {}
+};
+
+/// Open to anybody: no `requireUser` here.
+const HealthController = struct {
+    pub const http_routes = http.routes(.{ .methods = .{ .check = http.get("/health", .{}) } });
+
+    pub fn check(_: *HealthController, _: *http.Context) !void {}
+};
+
+const ApiError = struct { code: []const u8, message: []const u8 };
+
+/// The app's error handler: its own format, and `WWW-Authenticate` on every
+/// 401, which RFC 9110 asks for.
+const AppErrors = struct {
+    pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
+        return .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) });
+    }
+
+    pub fn handle(_: *AppErrors, ctx: *http.Context, err: anyerror, _: *http.ErrorResponse(ApiError)) !http.ErrorAction {
+        if (err == error.Unauthenticated) try ctx.response.setHeader("www-authenticate", "Bearer");
+        return .respond;
+    }
+};
+
+/// The app as `main` builds it, on the backend in memory.
+const App = struct {
+    arena: std.heap.ArenaAllocator,
+    config: Config = undefined,
+    users: [2]auth.TokenAuth.User = undefined,
+    origins: [1][]const u8 = undefined,
+    token_auth: auth.TokenAuth = undefined,
+    cors: Cors = undefined,
+    todos_v1: TodosV1Controller = .{},
+    health: HealthController = .{},
+    app_errors: AppErrors = .{},
+    backend: http.testing.Backend,
+    server: http.Server = undefined,
+
+    /// Starts the app with the settings of `environ`; `app` stays where it
+    /// is until `stop`.
+    fn start(app: *App, environ: *const std.process.Environ.Map) !void {
+        app.* = .{ .arena = .init(testing.allocator), .backend = .init(testing.allocator) };
+        errdefer app.arena.deinit();
+        try confy.load(app.arena.allocator(), &app.config, .{
+            .io = testing.io,
+            .environ = environ,
+            .env_prefix = "APP_",
+            .sources = &.{.osEnv()},
+        });
+        app.users = .{
+            .{ .token = app.config.auth.ann_token, .id = "ann", .permissions = &.{ "todos", "todos:delete" } },
+            .{ .token = app.config.auth.bob_token, .id = "bob", .permissions = &.{"todos"} },
+        };
+        app.token_auth = .{ .users = &app.users };
+        app.origins = .{app.config.cors_origin};
+        app.cors = .{ .origins = &app.origins };
+        app.server = try .init(testing.allocator, .{
+            .controllers = .{ &app.todos_v1, &app.health },
+            // CORS first: a preflight needs no user.
+            .middleware = .{ &app.cors, &app.token_auth },
+            .error_handler = &app.app_errors,
+        }, .{
+            .listen = .{ .backend = app.backend.backend() },
+            .prefix = "/api",
+        });
+        app.server.start(testing.io) catch |err| {
+            app.server.deinit(testing.io);
+            return err;
+        };
+    }
+
+    fn stop(app: *App) void {
+        app.server.deinit(testing.io);
+        app.backend.deinit();
+        app.arena.deinit();
+    }
+
+    fn request(app: *App, method: std.http.Method, target: []const u8, headers: []const [2][]const u8) !http.testing.Response {
+        return app.backend.request(testing.io, .{ .method = method, .target = target, .headers = headers });
+    }
+};
+
+/// The environment of the tests: the two tokens.
+fn testEnviron() !std.process.Environ.Map {
+    var environ: std.process.Environ.Map = .init(testing.allocator);
+    errdefer environ.deinit();
+    try environ.put("APP_AUTH_ANN_TOKEN", "ann-secret");
+    try environ.put("APP_AUTH_BOB_TOKEN", "bob-secret");
+    return environ;
+}
+
+fn codeOf(res: *http.testing.Response) ![]const u8 {
+    return (try std.json.parseFromSliceLeaky(ApiError, res.arena.allocator(), res.body, .{})).code;
+}
+
+test "TokenAuth: no token is anonymous; requireUser is 401 and the app's handle adds WWW-Authenticate; requirePermission is 403" {
+    var environ = try testEnviron();
+    defer environ.deinit();
+    var app: App = undefined;
+    try app.start(&environ);
+    defer app.stop();
+
+    // No token: anonymous, and a route without requireUser serves it.
+    var health = try app.request(.GET, "/api/health", &.{});
+    defer health.deinit();
+    try testing.expectEqual(204, health.status);
+
+    // A route behind requireUser: 401 with WWW-Authenticate, without a
+    // token and with one nobody has.
+    for ([_][]const [2][]const u8{ &.{}, &.{.{ "authorization", "Bearer guess" }} }) |headers| {
+        var refused = try app.request(.GET, "/api/v1/todos", headers);
+        defer refused.deinit();
+        try testing.expectEqual(401, refused.status);
+        try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+        try testing.expectEqualStrings("unauthenticated", try codeOf(&refused));
+    }
+
+    // A known token, as a bearer token or as the session cookie.
+    var bob = try app.request(.GET, "/api/v1/todos", &.{.{ "authorization", "Bearer bob-secret" }});
+    defer bob.deinit();
+    try testing.expectEqual(200, bob.status);
+    try testing.expectEqualStrings("bob", bob.body);
+    var cookie = try app.request(.GET, "/api/v1/todos", &.{.{ "cookie", "theme=dark; session=ann-secret" }});
+    defer cookie.deinit();
+    try testing.expectEqualStrings("ann", cookie.body);
+
+    // Bob may not delete: 403, without WWW-Authenticate; Ann may.
+    var denied = try app.request(.DELETE, "/api/v1/todos/1", &.{.{ "authorization", "Bearer bob-secret" }});
+    defer denied.deinit();
+    try testing.expectEqual(403, denied.status);
+    try testing.expectEqualStrings("permission_denied", try codeOf(&denied));
+    try testing.expectEqual(null, denied.header("www-authenticate"));
+    var deleted = try app.request(.DELETE, "/api/v1/todos/1", &.{.{ "authorization", "Bearer ann-secret" }});
+    defer deleted.deinit();
+    try testing.expectEqual(204, deleted.status);
+}
+
+test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin; Vary: Origin on every response but with *; no * with credentials" {
+    var environ = try testEnviron();
+    defer environ.deinit();
+    var app: App = undefined;
+    try app.start(&environ);
+    defer app.stop();
+    const origin = "https://app.example";
+
+    // The preflight of a page of its origin: 204, no body, no user needed.
+    var preflight = try app.request(.OPTIONS, "/api/v1/todos/1", &.{
+        .{ "origin", origin },
+        .{ "access-control-request-method", "DELETE" },
+        .{ "access-control-request-headers", "authorization" },
+    });
+    defer preflight.deinit();
+    try testing.expectEqual(204, preflight.status);
+    try testing.expectEqualStrings("", preflight.body);
+    try testing.expectEqualStrings(origin, preflight.header("access-control-allow-origin").?);
+    try testing.expectEqualStrings("GET, HEAD, POST, PUT, PATCH, DELETE", preflight.header("access-control-allow-methods").?);
+    try testing.expectEqualStrings("authorization, content-type, idempotency-key", preflight.header("access-control-allow-headers").?);
+    try testing.expectEqualStrings("true", preflight.header("access-control-allow-credentials").?);
+    try testing.expectEqualStrings("Origin", preflight.header("vary").?);
+
+    // The preflight of an origin it does not list gets none of it: the
+    // server answers OPTIONS itself, and the browser refuses the call.
+    var stranger = try app.request(.OPTIONS, "/api/v1/todos/1", &.{
+        .{ "origin", "https://evil.example" },
+        .{ "access-control-request-method", "DELETE" },
+    });
+    defer stranger.deinit();
+    try testing.expectEqual(204, stranger.status);
+    try testing.expectEqual(null, stranger.header("access-control-allow-origin"));
+    try testing.expectEqualStrings("DELETE, OPTIONS", stranger.header("allow").?);
+    // The answer depends on Origin all the same, and so does that of a
+    // request without one: a cache must keep them apart.
+    try testing.expectEqualStrings("Origin", stranger.header("vary").?);
+    var plain = try app.request(.GET, "/api/health", &.{});
+    defer plain.deinit();
+    try testing.expectEqual(null, plain.header("access-control-allow-origin"));
+    try testing.expectEqualStrings("Origin", plain.header("vary").?);
+
+    // The answer to an error carries the headers too, so that the page can
+    // read the 401.
+    var refused = try app.request(.GET, "/api/v1/todos", &.{.{ "origin", origin }});
+    defer refused.deinit();
+    try testing.expectEqual(401, refused.status);
+    try testing.expectEqualStrings(origin, refused.header("access-control-allow-origin").?);
+    try testing.expectEqualStrings("Origin", refused.header("vary").?);
+    try testing.expectEqualStrings("x-request-id", refused.header("access-control-expose-headers").?);
+
+    // Any origin: "*", and then never with credentials; the answer is the
+    // same for every origin, without Vary.
+    const any = [_][]const u8{"*"};
+    app.cors = .{ .origins = &any };
+    var open = try app.request(.GET, "/api/health", &.{.{ "origin", "https://other.example" }});
+    defer open.deinit();
+    try testing.expectEqualStrings("*", open.header("access-control-allow-origin").?);
+    try testing.expectEqual(null, open.header("access-control-allow-credentials"));
+    try testing.expectEqual(null, open.header("vary"));
+}
+```
+
+- **What a test sees is what the middleware decided.** `list` answers with
+  the id of the user that `TokenAuth` put into `ctx.locals`: `bob` for the
+  token of Bob, `ann` for the cookie `session` of Ann.
+- **The settings come through confy**, as in `main`, from an environment
+  of the test's own, `testEnviron`: the tokens are `confy.Secret`.
+- **The server borrows its middleware**:
+  `.middleware = .{ &app.cors, &app.token_auth }` gives it pointers. So
+  the last test gives `app.cors` the list `"*"`, any origin, and the next
+  request sees it.
 
 ## Limits and timeouts
 

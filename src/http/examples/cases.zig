@@ -25,6 +25,7 @@ pub const files = [_][]const u8{
     "cors",
     "errors",
     "todos_test",
+    "middleware_test",
 };
 
 /// The files of the app that README.md shows as they are, in other
