@@ -29,6 +29,7 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "cron_february_30.zig", .expect = "scheduler: cron \"0 0 30 2 *\": day 30 never comes in February, and the day of the week is *" },
     .{ .file = dir ++ "cron_reboot.zig", .expect = "scheduler: cron \"@reboot\": @reboot is not in v1" },
     .{ .file = dir ++ "cron_last.zig", .expect = "scheduler: cron \"0 0 L * *\": field 3, the day of the month, \"L\": L is not in v1" },
+    .{ .file = dir ++ "cron_backwards.zig", .expect = "scheduler: cron \"0 0 * * SAT-SUN\": field 5, the day of the week, \"SAT-SUN\": a range goes up, and Sunday is 7 too: write SAT-7" },
     // Decl literals through an optional field of a declaration and through
     // a union built at run time.
     .{ .file = dir ++ "declared_cron.zig", .expect = "scheduler: cron \"0 0 31 4,6,9,11 *\": day 31 never comes in April, June, September or November, " ++

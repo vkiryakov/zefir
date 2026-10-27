@@ -123,7 +123,6 @@ test "cron refuses what is not in v1, by field and position" {
     try expectRefused("cron \"1-60 * * * *\": field 1, the minute, \"1-60\": a minute is 0–59", "1-60 * * * *");
     try expectRefused("cron \"*/0 * * * *\": field 1, the minute, \"*/0\": a step is 1 or more", "*/0 * * * *");
     try expectRefused("cron \"*/x * * * *\": field 1, the minute, \"*/x\": a step is 1 or more", "*/x * * * *");
-    try expectRefused("cron \"0 0 * * FRI-MON\": field 5, the day of the week, \"FRI-MON\": a range goes up: write its lower end first", "0 0 * * FRI-MON");
     try expectRefused("cron \"1,,2 * * * *\": field 1, the minute, \"1,,2\": a list has no empty item", "1,,2 * * * *");
     try expectRefused("cron \"0 0 31 4,6,9,11 *\": day 31 never comes in April, June, September or November, and the day of the week is *", "0 0 31 4,6,9,11 *");
     try expectRefused("cron \"0 0 30 2 *\": day 30 never comes in February, and the day of the week is *", "0 0 30 2 *");
@@ -131,6 +130,77 @@ test "cron refuses what is not in v1, by field and position" {
     try expectRefused("cron \"0 0 31 2,4 *\": day 31 never comes in February or April, and the day of the week is *", "0 0 31 2,4 *");
     // A byte that is not text shows as an escape.
     try expectRefused("cron \"0 0 \\xff * *\": field 3, the day of the month, \"\\xff\": a day of the month is 1–31", "0 0 \xff * *");
+}
+
+/// `e` with its first `item` in place of `with`, in `buffer`.
+fn replaced(buffer: []u8, e: []const u8, item: []const u8, with: []const u8) ![]const u8 {
+    const at = std.mem.find(u8, e, item) orelse return error.TestUnexpectedResult;
+    return std.fmt.bufPrint(buffer, "{s}{s}{s}", .{ e[0..at], with, e[at + item.len ..] });
+}
+
+/// Fails unless `e` is taken, and says so.
+fn expectTaken(e: []const u8) !Schedule {
+    const s: Schedule = .cron(e);
+    var d: Diagnostics = .{};
+    s.check(&d) catch {
+        std.debug.print("cron \"{s}\": {s}\n", .{ e, d.message() });
+        return error.TestUnexpectedResult;
+    };
+    return s;
+}
+
+test "a range that goes down is refused with the line that wraps it round the end of its field" {
+    const Case = struct {
+        /// The expression, the field at fault, and its item that goes down.
+        e: []const u8,
+        field: []const u8,
+        item: []const u8,
+        /// The refusal after the item, but for the line it says to write.
+        rule: []const u8,
+        line: []const u8,
+        /// The values of the field that the item means wrapped round its
+        /// end.
+        values: []const u8,
+    };
+    const wraps = "a range goes up and does not wrap: write ";
+    const seven = "a range goes up, and Sunday is 7 too: write ";
+    const zero = "a range goes up, and Sunday is 0 too: write ";
+    const weekday = "field 5, the day of the week";
+    const hour = "field 2, the hour";
+    const cases = [_]Case{
+        .{ .e = "0 0 * * FRI-MON", .field = weekday, .item = "FRI-MON", .rule = wraps, .line = "FRI-SAT,SUN-MON", .values = "5,6,0,1" },
+        .{ .e = "0 0 * * fri-mon", .field = weekday, .item = "fri-mon", .rule = wraps, .line = "fri-sat,sun-mon", .values = "5,6,0,1" },
+        .{ .e = "0 0 * * SAT-SUN", .field = weekday, .item = "SAT-SUN", .rule = seven, .line = "SAT-7", .values = "6,0" },
+        .{ .e = "0 0 * * MON-SUN", .field = weekday, .item = "MON-SUN", .rule = seven, .line = "MON-7", .values = "1,2,3,4,5,6,0" },
+        .{ .e = "0 0 * * MON-SUN/2", .field = weekday, .item = "MON-SUN/2", .rule = seven, .line = "MON-7/2", .values = "1,3,5,0" },
+        .{ .e = "0 0 * * 7-MON", .field = weekday, .item = "7-MON", .rule = zero, .line = "0-MON", .values = "0,1" },
+        .{ .e = "0 22-2 * * *", .field = hour, .item = "22-2", .rule = wraps, .line = "22-23,0-2", .values = "22,23,0,1,2" },
+        .{ .e = "0 0 22-2 * * *", .field = "field 3, the hour", .item = "22-2", .rule = wraps, .line = "22-23,0-2", .values = "22,23,0,1,2" },
+        .{ .e = "0 23-1 * * *", .field = hour, .item = "23-1", .rule = wraps, .line = "23,0-1", .values = "23,0,1" },
+        .{ .e = "0 22-2/2 * * *", .field = hour, .item = "22-2/2", .rule = wraps, .line = "22,0-2/2", .values = "22,0,2" },
+        .{ .e = "0 21-1/2 * * *", .field = hour, .item = "21-1/2", .rule = wraps, .line = "21-23/2,1", .values = "21,23,1" },
+        .{ .e = "0 22-0/4 * * *", .field = hour, .item = "22-0/4", .rule = wraps, .line = "22", .values = "22" },
+        .{ .e = "0 22-2/99999999999999999999 * * *", .field = hour, .item = "22-2/99999999999999999999", .rule = wraps, .line = "22", .values = "22" },
+        .{ .e = "50-10/5 * * * *", .field = "field 1, the minute", .item = "50-10/5", .rule = wraps, .line = "50-59/5,0-10/5", .values = "50,55,0,5,10" },
+        .{ .e = "0 0 25-5 * *", .field = "field 3, the day of the month", .item = "25-5", .rule = wraps, .line = "25-31,1-5", .values = "25,26,27,28,29,30,31,1,2,3,4,5" },
+        .{ .e = "0 0 1 NOV-FEB *", .field = "field 4, the month", .item = "NOV-FEB", .rule = wraps, .line = "NOV-DEC,JAN-FEB", .values = "11,12,1,2" },
+        .{ .e = "0 0 1 11-2 *", .field = "field 4, the month", .item = "11-2", .rule = wraps, .line = "11-12,1-2", .values = "11,12,1,2" },
+    };
+    for (cases) |c| {
+        var message: [192]u8 = undefined;
+        try expectRefused(try std.fmt.bufPrint(&message, "cron \"{s}\": {s}, \"{s}\": {s}{s}", .{ c.e, c.field, c.item, c.rule, c.line }), c.e);
+        // The line to write is taken, and comes when the values come.
+        var line_buffer: [64]u8 = undefined;
+        var values_buffer: [64]u8 = undefined;
+        const line = try expectTaken(try replaced(&line_buffer, c.e, c.item, c.line));
+        const values = try expectTaken(try replaced(&values_buffer, c.e, c.item, c.values));
+        var after = t0;
+        for (0..40) |_| {
+            const moment = values.next(after) orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(@as(?Instant, moment), line.next(after));
+            after = moment;
+        }
+    }
 }
 
 test "next follows the rules of the dialect" {

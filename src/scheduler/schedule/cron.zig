@@ -161,7 +161,7 @@ pub const Problem = struct {
                         const step: args.Quoted = .{ .text = p.item[@min(slash + 1, p.item.len)..] };
                         try w.print("a step goes after * or a range, as */{f} or {f}-{d}/{f}", .{ step, args.Quoted{ .text = p.item[0..slash] }, field.star_max, step });
                     },
-                    .backwards => try w.writeAll("a range goes up: write its lower end first"),
+                    .backwards => try writeBackwards(w, field, p.item),
                     .empty_item => try w.writeAll("a list has no empty item"),
                     else => unreachable,
                 }
@@ -203,6 +203,54 @@ fn writeList(w: *Io.Writer, items: []const []const u8, last: []const u8) Io.Writ
         if (i != 0 and i == items.len - 1) try w.print("{s} ", .{last});
         try w.writeAll(item);
     }
+}
+
+/// The rule a range breaks whose lower end comes last, `item` of `field`,
+/// and the line that means what it most likely meant: the range wrapped
+/// round the end of its field, "22-2" as "22-23,0-2", by the same step. A
+/// range of the days of the week that ends on Sunday ends on 7 instead,
+/// and one that starts on 7 starts on 0.
+fn writeBackwards(w: *Io.Writer, field: Field, item: []const u8) Io.Writer.Error!void {
+    const slash = std.mem.indexOfScalar(u8, item, '/') orelse item.len;
+    const base = item[0..slash];
+    // "/n", or "" without a step.
+    const step_text = item[slash..];
+    const step: u64 = @max(1, if (step_text.len == 0) 1 else number(step_text[1..]) orelse 1);
+    const dash = std.mem.indexOfScalar(u8, base, '-') orelse base.len;
+    const low_text = base[0..dash];
+    const high_text = base[@min(dash + 1, base.len)..];
+    const low = value(low_text, field) orelse return w.writeAll("a range goes up and does not wrap");
+    const high = value(high_text, field) orelse return w.writeAll("a range goes up and does not wrap");
+    // The day of the week, whose 7 is Sunday again.
+    if (field.max > field.star_max) {
+        if (high == 0) return w.print("a range goes up, and Sunday is 7 too: write {s}-7{s}", .{ low_text, step_text });
+        if (low == field.max) return w.print("a range goes up, and Sunday is 0 too: write 0-{s}{s}", .{ high_text, step_text });
+    }
+    try w.writeAll("a range goes up and does not wrap: write ");
+    // From the lower end to the end of the field, then on from its start.
+    const last = low + (field.star_max - low) / step * step;
+    try w.writeAll(low_text);
+    if (last != low) {
+        try w.writeByte('-');
+        try writeValue(w, field, field.star_max, low_text);
+        if (step > 1) try w.writeAll(step_text);
+    }
+    // A step past the end saturates, and leaves nothing after it.
+    const first = (last +| step) - (field.star_max - field.min + 1);
+    if (first > high) return;
+    try w.writeByte(',');
+    if (first == high) return w.writeAll(high_text);
+    try writeValue(w, field, first, high_text);
+    if (first +| step > high) return;
+    try w.print("-{s}{s}", .{ high_text, if (step > 1) step_text else "" });
+}
+
+/// `v` of `field` as `like` writes its end of a range: a name, in its case,
+/// or a number.
+fn writeValue(w: *Io.Writer, field: Field, v: u64, like: []const u8) Io.Writer.Error!void {
+    if (number(like) != null or field.names.len == 0) return w.print("{d}", .{v});
+    const lower = std.ascii.isLower(like[0]);
+    for (field.names[@intCast(v - field.first_name)]) |c| try w.writeByte(if (lower) c else std.ascii.toUpper(c));
 }
 
 const month_titles = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
