@@ -6,10 +6,13 @@
 //!
 //! No two runs of a job overlap, whichever instances run them: the handler
 //! notes, in memory, that a run of its job goes on, and counts a run that
-//! begins while another one goes. And no job is left behind: each runs at
-//! least 3 of the 60 times of its schedule. A long job runs about 40 times
-//! here and another about 60; a busy machine slows them all alike, while a
-//! job that no instance takes stays at 0.
+//! begins while another one goes. And no job is left behind: a claim takes
+//! the oldest due job first, so a slow machine delays every job of a kind
+//! about alike, and each job runs at least a quarter as many times as the
+//! median job of its kind, long or short. A long job runs about 40 times
+//! here and a short one about 60; one that no instance takes, or that
+//! something holds for much of the minute, falls below. The test prints
+//! the slowest jobs, and the record of the slowest as it is at the end.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,7 +26,9 @@ const job_count = 200;
 const load_time: Io.Duration = .fromSeconds(60);
 const short_run: Io.Duration = .fromMilliseconds(100);
 const long_run: Io.Duration = .fromMilliseconds(1500);
-const min_runs = 3;
+/// A job runs at least 1 / `least_share` as many times as the median job
+/// of its kind.
+const least_share = 4;
 
 const Every = struct {
     jobs: []Runs,
@@ -96,19 +101,53 @@ fn recurring(io: Io) !void {
     for (&workers) |*w| try fixture.stop(io, w);
 
     var total: u64 = 0;
-    var fewest: u32 = std.math.maxInt(u32);
-    for (jobs) |*j| {
-        const n = j.runs.load(.acquire);
-        total += n;
-        fewest = @min(fewest, n);
+    var counts: [job_count]u32 = undefined;
+    for (jobs, &counts) |*j, *n| {
+        n.* = j.runs.load(.acquire);
+        total += n.*;
     }
     const sum = stress.statsOf(&workers);
-    std.debug.print("    {d} runs in {d} s, {d} at least of each job, {d} late; {d} overlapped; {d} rounds of cuts, {d} connections cut; coalesced {d}, taken over {d}, lost {d}, store errors {d}\n", .{
-        total, load_time.toSeconds(), fewest, job.late.load(.acquire), job.overlaps.load(.acquire), cutter.rounds.load(.acquire), cutter.cut.load(.acquire), sum.coalesced, sum.taken_over, sum.lost, sum.store_errors,
+    std.debug.print("    {d} runs in {d} s, {d} late; {d} overlapped; {d} rounds of cuts, {d} connections cut; coalesced {d}, taken over {d}, lost {d}, unreadable {d}, gave up {d}, store errors {d}\n", .{
+        total, load_time.toSeconds(), job.late.load(.acquire), job.overlaps.load(.acquire), cutter.rounds.load(.acquire), cutter.cut.load(.acquire), sum.coalesced, sum.taken_over, sum.lost, sum.unreadable, sum.gave_up, sum.store_errors,
     });
+
+    // The slowest jobs, and how far the slowest of each kind is from the
+    // median of its kind.
+    var order: [job_count]u8 = undefined;
+    for (&order, 0..) |*i, n| i.* = @intCast(n);
+    std.mem.sort(u8, &order, &counts, struct {
+        fn less(c: *const [job_count]u32, a: u8, b: u8) bool {
+            return c[a] < c[b] or (c[a] == c[b] and a < b);
+        }
+    }.less);
+    std.debug.print("    the slowest:", .{});
+    for (order[0..5]) |n| std.debug.print(" e{d:0>3} {d} times;", .{ n, counts[n] });
+    std.debug.print("\n", .{});
+    var behind: ?u8 = null;
+    for ([_]bool{ true, false }) |long| {
+        var kind: [job_count]u32 = undefined;
+        var len: usize = 0;
+        for (counts, 0..) |n, i| if ((i % 10 == 0) == long) {
+            kind[len] = n;
+            len += 1;
+        };
+        std.mem.sort(u32, kind[0..len], {}, std.sort.asc(u32));
+        const median = kind[len / 2];
+        std.debug.print("    {s} jobs: {d} to {d} times, the median {d}\n", .{ if (long) "long" else "short", kind[0], kind[len - 1], median });
+        for (order) |n| if ((n % 10 == 0) == long) {
+            if (counts[n] == 0 or counts[n] * least_share < median) behind = n;
+            break;
+        };
+    }
     try testing.expectEqual(@as(u32, 0), job.overlaps.load(.acquire));
-    if (fewest < min_runs) {
-        std.debug.print("    a job ran {d} times; at least {d} expected\n", .{ fewest, min_runs });
+    if (behind) |n| {
+        var key: [8]u8 = undefined;
+        var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena_state.deinit();
+        const r = (try client.get(io, e2e.within(io, .fromSeconds(10)), .of(Every, try std.fmt.bufPrint(&key, "e{d:0>3}", .{n})), arena_state.allocator(), .{})) orelse return error.TestUnexpectedResult;
+        std.debug.print("    e{d:0>3} ran {d} times, less than a {d}th of the median of its kind: left behind; its record is {t}, attempt {d}, fence {d}, run_at {?f}, last {?t}, unreadable since {?f}\n", .{
+            n, counts[n], least_share, r.state, r.attempt, r.fence, r.run_at, if (r.last) |last| last.outcome else null, r.unreadable_since,
+        });
         return error.TestUnexpectedResult;
     }
 }
