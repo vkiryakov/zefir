@@ -2,13 +2,13 @@
 
 **Jobs that a Zig service puts on a time, and that any of its instances
 runs.** A shop sends the invoice of an order a minute after the order,
-reminds a customer of an unpaid order three days later, and cleans up
-every night at 3:30. zefir-scheduler keeps such *jobs* in a *store*, and
-every instance of the service runs a *worker* that takes the jobs that are
-due, one instance a job, and runs them. A job is a plain Zig type with a
-method `run`; its data, the *payload*, is a struct that the compiler
+reminds a customer of an unpaid order three days later, and closes the
+day every night at 11 PM. zefir-scheduler keeps such *jobs* in a *store*,
+and every instance of the service runs a *worker* that takes the jobs that
+are due, one instance a job, and runs them. A job is a plain Zig type with
+a method `run`; its data, the *payload*, is a struct that the compiler
 checks when you put the job on its time, and a schedule such as
-`.dailyAt(3, 30, 0, .am)` or a cron expression is checked when the
+`.dailyAt(11, 0, 0, .pm)` or a cron expression is checked when the
 program compiles. The store keeps everything: the jobs outlive a restart
 of the service, an instance that crashes leaves its jobs to the others,
 and a job that fails tries again. It is written against `std.Io` only,
@@ -66,10 +66,951 @@ its jobs in memory or in MongoDB.
 15. [Tests of your jobs](#tests-of-your-jobs)
 16. [A store of your own](#a-store-of-your-own)
 
+Programs that `zig build test-scheduler` runs without a server, checking
+what they print against this guide: [quick start](quick_start.zig) ·
+[schedules](schedules.zig) · [orders](orders.zig) ·
+[failures](failures.zig) · [under App](app.zig). Tests that it runs:
+[the jobs of the invoices](jobs_test.zig), which test
+[Invoices.zig](Invoices.zig).
 Programs that `zig build e2e` in `tests/scheduler` builds and runs against
 mongod, checking what they print against this guide:
 [quick start on MongoDB](mongo_quick_start.zig) ·
 [instances](instances.zig).
+
+## Quick start
+
+The invoice of an order, sent a second after the order: a job, a store, a
+client that puts the job on its time, and a worker that runs it. The jobs
+live in memory, in `scheduler.MemoryStore`, so the program needs no
+server:
+
+```zig
+//! The quick start of the guide: a shop sends the invoice of an order a
+//! second after the order. The jobs live in `scheduler.MemoryStore`, so
+//! the program needs no server: it starts a worker, puts the invoice of
+//! order 42 on its time, waits for the run, and stops the worker. `zig
+//! build test-scheduler` runs it.
+
+const std = @import("std");
+const log = @import("log");
+const scheduler = @import("scheduler");
+
+/// The worker logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// The job: the invoice of an order. Its fields are what it needs, the
+/// data of one run is its Payload, and `run` does the work.
+const SendInvoice = struct {
+    app: log.Logger,
+    sent: std.atomic.Value(u32) = .init(0),
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
+
+    pub const Payload = struct { order_id: u64, amount_cents: u64 };
+
+    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+        self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
+        _ = self.sent.fetchAdd(1, .release);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+
+    // The store keeps the jobs: the client puts them on their time, the
+    // worker runs them.
+    var memory: scheduler.MemoryStore = .init(gpa, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(gpa, io, memory.store(), .{});
+    var invoices: SendInvoice = .{ .app = app };
+    var worker: scheduler.Worker(struct { invoices: *SendInvoice }) = try .init(gpa, io, memory.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
+    defer worker.deinit(io);
+    try worker.start(io);
+
+    // The invoice of order 42, a second from now. The key names the job,
+    // so the same request again changes nothing.
+    const request: scheduler.Client.Request(SendInvoice) = .{
+        .key = "order-42",
+        .when = .{ .after = .fromSeconds(1) },
+        .payload = .{ .order_id = 42, .amount_cents = 1999 },
+    };
+    app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+    app.info("Scheduled again", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+
+    // Wait for the run, then stop: the worker takes no more jobs and
+    // waits for the runs to end, here for 5 s at most.
+    while (invoices.sent.load(.acquire) == 0) try io.sleep(.fromMilliseconds(50), .awake);
+    try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }));
+}
+```
+
+```text
+$ zig build run
+2026-10-27T14:23:35.038Z INFO  [scheduler] 1 job type, 10 workers, instance shop/064b88f629b1fe986fb32016b4e1c67e
+2026-10-27T14:23:35.038Z INFO  [app] Scheduled result=created
+2026-10-27T14:23:35.039Z INFO  [app] Scheduled again result=existing
+2026-10-27T14:23:36.046Z INFO  [app] Invoice sent order=42 amount_cents=1999 attempt=1
+2026-10-27T14:23:36.082Z INFO  [scheduler] stopping
+2026-10-27T14:23:36.082Z INFO  [scheduler] stopped
+```
+
+What happens, from the top:
+
+- **The job.** `SendInvoice` is a plain struct. `scheduler_job` declares
+  it a job, under the name `send-invoice` that the store keeps its records
+  by, with the default policy: no time limit, five attempts, and nothing
+  kept once it succeeded. `Payload` is the data of one run, which the
+  store keeps as JSON; `run` does the work, with the context of the run.
+  Its fields are what the job needs: here the logger and a counter that
+  `main` waits on, in a shop the client of its billing service.
+- **The store.** `MemoryStore` keeps the jobs in the memory of the
+  process. `store()` gives `scheduler.Store`, the interface that the
+  client and the worker take: on MongoDB, `mongo.SchedulerStore` takes
+  its place, and the rest stays as it is.
+- **The client.** `scheduler.Client.init` makes a value without
+  resources: copy it and share it between tasks. `schedule` puts a job of
+  `SendInvoice` on its time; its request is `Client.Request(SendInvoice)`,
+  which the compiler checks against `SendInvoice.Payload`, so a missing
+  field or a string where a number goes stops the build. `.after =
+  .fromSeconds(1)` is a second after the store took the job, by the
+  store's clock.
+- **The key.** One job of a type for each key: here the order. The same
+  request again answers `.existing` and changes nothing, so a handler
+  that retries its request, or an event that comes twice, makes one job.
+- **The worker.** `scheduler.Worker` takes a struct of pointers to the
+  jobs it runs; `init` checks the settings, and `start` starts its tasks:
+  a poll that asks the store for due jobs every second, and ten slots that
+  run them. Its instance is "shop" and 32 random hex digits, new at each
+  start, which tell the instances apart in the logs and the history.
+- **The run.** A second on, the poll *claims* the job: the store gives it
+  to this worker alone, marks it running and starts a *lease* on it. A
+  slot calls `run` in a task of its own; `ctx.info()` says this is the
+  first attempt. The job succeeded, so its record is gone.
+- **The stop.** `shutdown` stops the claims, lets the runs end, and
+  returns once the worker stopped, here within 5 s; `deinit` frees it.
+  The worker writes its lines to `std.log`, and `std_options` with
+  `log.stdLogFn` and `logger.installStdLog()` send them to zefir-log, see
+  [Logs and statistics](#logs-and-statistics).
+
+On MongoDB the same program needs a client of MongoDB and the store's
+indexes, and nothing else changes: see
+[the quick start on MongoDB](#the-quick-start-on-mongodb).
+
+## When jobs run
+
+The `when` of a request is a `scheduler.When`, one of three:
+
+| `when` | Runs | Example |
+|---|---|---|
+| `.at` | once, at a moment of UTC; a moment already past runs at once | `.{ .at = .fromUtc(2026, 12, 1, 9, 0, 0, .am) }` |
+| `.after` | once, this long after the store took the job, by its clock | `.{ .after = .fromSeconds(3 * days) }` |
+| `.repeat` | again and again, by a schedule | `.{ .repeat = .weeklyOn(.monday, 9, 0, 0, .am) }` |
+
+A moment is a `scheduler.Instant`, a time of UTC to the millisecond:
+`Instant.fromUtc(year, month, day, hour, minute, second, clock)` makes
+one, `Instant.fromTimestamp(std.Io.Clock.real.now(io))` takes the clock
+of the process, and `{f}` writes one as RFC 3339,
+`2026-12-01T09:00:00.000Z`. `.at` takes the years 1970 to 9999, and
+`.after` 0 to 100 years; anything else is `error.InvalidArgument` before
+the store hears of it. `fromUtc` with values that only the run knows, and
+that make no moment, such as the 29th of February 2026, gives
+`Instant.invalid`, which a call refuses the same way. Every time is UTC: a shop in Berlin that wants
+9 AM in Berlin writes 8 AM, and 7 AM in summer, see the TODO list above.
+
+### Ready-made schedules
+
+A repeating job runs by a `scheduler.Schedule`, a value without memory of
+its own. The ready-made ones are functions, which the code writes as
+decl literals, `.dailyAt(…)`:
+
+| Schedule | Runs |
+|---|---|
+| `.everySeconds(n)`, `.everyMinutes(n)`, `.everyHours(n)` | every n units, counted from the Unix epoch |
+| `.dailyAt(hour, minute, second, clock)` | every day at that time |
+| `.weeklyOn(day, hour, minute, second, clock)` | every week, on `.monday` … `.sunday` |
+| `.monthlyOn(day, hour, minute, second, clock)` | every month, on a day from 1 to 28 |
+| `.fixedDelay(duration)` | that long after the end of each run |
+| `.cron(expression)` | by a cron expression |
+
+The first run of a new repeating job is the first moment of its schedule
+after the store took it, and each next one the first moment after its run
+began; a `fixedDelay` counts from the end of each run instead, the first
+run `duration` after the store took the job.
+
+**Every n units from the epoch.** `.everyMinutes(7)` runs at the moments
+that are multiples of 420 s from 1970-01-01T00:00:00Z. Every instance
+counts the same moments, and n need not divide an hour, so the steps do
+not start again at each hour or each midnight: on Saturday 24 October
+2026 they come at 00:04, 00:11, …, 00:53, 01:00, 01:07. When n divides
+60, as 15 does for minutes, or 24, as 6 does for hours, the moments fall
+on the clock as you expect: :00, :15, :30, :45 of every hour. A run every
+seven minutes that starts again at each hour, :00, :07, …, :56, is the
+cron `*/7 * * * *`.
+
+**Times of day.** `dailyAt`, `weeklyOn`, `monthlyOn` and `Instant.fromUtc`
+take the time of day with its clock as the last argument, a
+`scheduler.HourFormat`: `.h24` reads the hour as 0–23, `.am` and `.pm` as
+1–12. **12 AM is midnight (00:xx), and 12 PM is noon (12:xx).** The
+minutes and the seconds are always there:
+
+| Code | UTC |
+|---|---|
+| `.dailyAt(12, 0, 0, .am)` | 00:00:00, midnight |
+| `.dailyAt(12, 30, 0, .am)` | 00:30:00 |
+| `.dailyAt(1, 0, 0, .am)` | 01:00:00 |
+| `.dailyAt(11, 59, 59, .am)` | 11:59:59 |
+| `.dailyAt(12, 0, 0, .pm)` | 12:00:00, noon |
+| `.dailyAt(3, 30, 0, .pm)` | 15:30:00 |
+| `.dailyAt(11, 0, 0, .pm)` | 23:00:00 |
+| `.dailyAt(0, 0, 0, .h24)` | 00:00:00 |
+| `.dailyAt(15, 30, 0, .h24)` | 15:30:00 |
+
+The compiler checks the arguments it knows, and its error says what to
+write instead:
+
+```text
+error: scheduler: dailyAt(13, 0, 0, .pm): an hour of the 12-hour clock is 1–12; 1 PM is .dailyAt(1, 0, 0, .pm), or .dailyAt(13, 0, 0, .h24)
+error: scheduler: dailyAt(0, 0, 0, .am): an hour of the 12-hour clock is 1–12; midnight is .dailyAt(12, 0, 0, .am), or .dailyAt(0, 0, 0, .h24)
+error: scheduler: dailyAt(24, 0, 0, .h24): an hour of the 24-hour clock is 0–23
+```
+
+`monthlyOn` takes the days that every month has, 1 to 28: a job on the
+31st would skip five months a year without a word. Such a job is a cron
+expression, where that is plain to see:
+
+```text
+error: scheduler: monthlyOn(31, 0, 0, 0, .h24): a day of monthlyOn is 1–28, which every month has; the 31st of the months that have one is .cron("0 0 0 31 * *"); the last day of a month is not in v1
+```
+
+### Cron
+
+`.cron(expression)` takes 5 fields, minute, hour, day of the month, month
+and day of the week, or 6 with the seconds first; the time is UTC.
+
+- A field is `*`, a value `a`, a range `a-b`, a list `a,b,c`, or a step
+  `*/n` or `a-b/n`. The months and the days of the week take their names
+  in any case, `JAN`–`DEC` and `SUN`–`SAT`; Sunday is 0 and 7.
+- The macros are `@yearly` (or `@annually`), `@monthly`, `@weekly`,
+  `@daily` (or `@midnight`) and `@hourly`.
+- **The two day fields.** When neither the day of the month nor the day
+  of the week is exactly `*`, a day that matches either one comes: `0 0
+  13 * FRI` runs on the 13th of each month and on every Friday. When one
+  is `*`, the other decides.
+- **`*/2` is no `*`.** `0 0 */2 * MON` runs on the odd days of the month
+  and on Mondays. Vixie cron, the classic crontab of Unix, counts a field
+  that starts with `*` as `*` for this rule, and runs the same line only
+  on the Mondays that fall on odd days.
+- A day that never comes is an error, and the compiler says why:
+
+  ```text
+  error: scheduler: cron "0 0 30 2 *": day 30 never comes in February, and the day of the week is *
+  ```
+
+  A day that comes rarely is fine: the search for the next run looks up
+  to 9 years ahead, and `0 0 29 2 *` waits for the 29th of February.
+- Not in v1: `?`, `L`, `W`, `#`, `H`, a field of the year, `a/n`,
+  `@reboot` and `@every`; each is an error that names it.
+
+### What the store keeps, and values known only at run time
+
+The record of a repeating job keeps its schedule as text, which the
+store never reads: `every 420s`, `delay 30s`, `daily 23:00:00`, `weekly
+mon 09:00:00`, `monthly 1 00:00:00`, `cron 0 30 2 * * *`. The time of day
+in it is on the 24-hour clock, however the code wrote it. `{f}` writes
+that text of a schedule, and `Schedule.parse` reads it back.
+
+The compiler checks the values it knows; values that only the run knows,
+such as an hour from the settings, make a schedule that carries the
+problem. `schedule.check(&diagnostics)` refuses it with the same text as
+the compiler's, and so do the client's `schedule` and `reschedule`,
+before the store hears of it.
+
+`schedules.zig` prints the next runs of schedules after a fixed moment,
+Saturday 24 October 2026 at midnight UTC, so every run prints the same:
+
+```zig
+//! When jobs run: the next moments of schedules after a fixed moment,
+//! Saturday 2026-10-24 at midnight UTC, so that every run prints the same.
+//! A schedule is a value without memory of its own: the code builds it
+//! with a ready-made function or a cron expression, the compiler checks
+//! the arguments it knows, `next` gives the first moment after a moment,
+//! and `format` writes the text that the record of a job keeps. Values
+//! known only at run time, such as settings, are checked by `check`, as
+//! the client checks a schedule it is given. No store, no worker: `zig
+//! build test-scheduler` runs it.
+
+const std = @import("std");
+const scheduler = @import("scheduler");
+const Schedule = scheduler.Schedule;
+
+/// The moment the next runs count from: Saturday 24 October 2026, 00:00
+/// UTC.
+const start: scheduler.Instant = .fromUtc(2026, 10, 24, 0, 0, 0, .h24);
+
+pub fn main(init: std.process.Init) !void {
+    var buffer: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &buffer);
+    const out = &stdout.interface;
+    try out.writeAll("The next runs after Sat 2026-10-24 00:00:00 UTC\n");
+
+    try out.writeAll("\nEvery n seconds, minutes or hours, counted from the Unix epoch:\n");
+    try show(out, ".everySeconds(45)", .everySeconds(45), 3);
+    try show(out, ".everyMinutes(15)", .everyMinutes(15), 4);
+    try show(out, ".everyMinutes(7)", .everyMinutes(7), 10);
+    try show(out, ".everyHours(6)", .everyHours(6), 4);
+    try show(out, ".everyHours(5)", .everyHours(5), 5);
+    // A cron step starts again at each hour, a step from the epoch does not.
+    try show(out, ".cron(\"*/7 * * * *\")", .cron("*/7 * * * *"), 10);
+
+    try out.writeAll("\nTimes of day, by the clock the last argument names; 12 AM is midnight, 12 PM is noon:\n");
+    try show(out, ".dailyAt(12, 0, 0, .am)", .dailyAt(12, 0, 0, .am), 1);
+    try show(out, ".dailyAt(12, 30, 0, .am)", .dailyAt(12, 30, 0, .am), 1);
+    try show(out, ".dailyAt(1, 0, 0, .am)", .dailyAt(1, 0, 0, .am), 1);
+    try show(out, ".dailyAt(11, 59, 59, .am)", .dailyAt(11, 59, 59, .am), 1);
+    try show(out, ".dailyAt(12, 0, 0, .pm)", .dailyAt(12, 0, 0, .pm), 1);
+    try show(out, ".dailyAt(3, 30, 0, .pm)", .dailyAt(3, 30, 0, .pm), 1);
+    try show(out, ".dailyAt(11, 0, 0, .pm)", .dailyAt(11, 0, 0, .pm), 1);
+    try show(out, ".dailyAt(0, 0, 0, .h24)", .dailyAt(0, 0, 0, .h24), 1);
+    try show(out, ".dailyAt(15, 30, 0, .h24)", .dailyAt(15, 30, 0, .h24), 1);
+    try show(out, ".weeklyOn(.monday, 9, 0, 0, .am)", .weeklyOn(.monday, 9, 0, 0, .am), 2);
+    try show(out, ".monthlyOn(1, 0, 0, 0, .h24)", .monthlyOn(1, 0, 0, 0, .h24), 2);
+
+    try out.writeAll("\nCron, in UTC:\n");
+    try show(out, ".cron(\"0 30 2 * * *\")", .cron("0 30 2 * * *"), 2);
+    try show(out, ".cron(\"0 9 * * MON-FRI\")", .cron("0 9 * * MON-FRI"), 3);
+    try show(out, ".cron(\"@weekly\")", .cron("@weekly"), 2);
+    // Neither day field is *: a day that matches either one comes.
+    try show(out, ".cron(\"0 0 13 * FRI\")", .cron("0 0 13 * FRI"), 4);
+    // */2 is no *: the odd days of the month, or a Monday.
+    try show(out, ".cron(\"0 0 */2 * MON\")", .cron("0 0 */2 * MON"), 5);
+    // The months without the day are skipped.
+    try show(out, ".cron(\"0 0 0 31 * *\")", .cron("0 0 0 31 * *"), 4);
+    try show(out, ".cron(\"0 0 29 2 *\")", .cron("0 0 29 2 *"), 2);
+
+    try out.writeAll("\nAfter each run, counted by the store:\n");
+    try show(out, ".fixedDelay(.fromSeconds(30))", .fixedDelay(.fromSeconds(30)), 1);
+
+    try out.writeAll("\nValues the program reads when it runs, which the compiler cannot check:\n");
+    try fromSettings(out, 1, .pm, "0 0 30 * *");
+    try fromSettings(out, 13, .pm, "0 0 30 2 *");
+    try out.flush();
+}
+
+/// How the code writes the schedule and the text that the record of a job
+/// keeps, then its first `count` moments after `start`, each with its date
+/// when that is not the date of the moment before: one moment on the same
+/// line, more on a line of their own.
+fn show(out: *std.Io.Writer, code: []const u8, schedule: Schedule, count: usize) !void {
+    var text: [64]u8 = undefined;
+    const canonical = try std.fmt.bufPrint(&text, "{f}", .{schedule});
+    if (count == 1) {
+        try out.print("  {s: <34} {s: <20}", .{ code, canonical });
+    } else {
+        try out.print("  {s: <34} {s}\n     ", .{ code, canonical });
+    }
+    var after = start;
+    var day: ?i64 = null;
+    for (0..count) |i| {
+        const moment = schedule.next(after) orelse {
+            try out.writeAll(" none: the store counts it after each run");
+            break;
+        };
+        const moment_day = @divFloor(moment.unix_ms, std.time.ms_per_day);
+        try out.writeAll(if (i == 0) " " else ", ");
+        try printMoment(out, moment, moment_day != day);
+        day = moment_day;
+        after = moment;
+    }
+    try out.writeByte('\n');
+}
+
+/// A moment as "Sat 2026-10-24 00:04:00", the RFC 3339 text of
+/// `Instant.format` without its milliseconds; only its time, "00:04:00",
+/// when `with_date` is false.
+fn printMoment(out: *std.Io.Writer, moment: scheduler.Instant, with_date: bool) !void {
+    var text: [32]u8 = undefined;
+    const rfc3339 = try std.fmt.bufPrint(&text, "{f}", .{moment});
+    if (with_date) {
+        // 1970-01-01, the day 0, was a Thursday.
+        const weekdays = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
+        const days = @divFloor(moment.unix_ms, std.time.ms_per_day);
+        try out.print("{s} {s} ", .{ weekdays[@intCast(@mod(days, 7))], rfc3339[0..10] });
+    }
+    try out.writeAll(rfc3339[11..19]);
+}
+
+/// Schedules from the settings of a service, known only when it runs: the
+/// hour of a nightly report and a cron expression. A wrong value makes no
+/// compile error; the schedule carries the problem, and `check`, as the
+/// `schedule` and `reschedule` of the client, answers
+/// `error.InvalidArgument` with the same text as the compiler's.
+fn fromSettings(out: *std.Io.Writer, hour: u8, clock: scheduler.HourFormat, expression: []const u8) !void {
+    for ([_]Schedule{ .dailyAt(hour, 0, 0, clock), .cron(expression) }) |schedule| {
+        var d: scheduler.Diagnostics = .{};
+        if (schedule.check(&d)) |_| {
+            try out.print("  ok: {f}\n", .{schedule});
+        } else |err| {
+            try out.print("  error.{t}: {s}\n", .{ err, d.message() });
+        }
+    }
+}
+```
+
+```text
+$ zig build run
+The next runs after Sat 2026-10-24 00:00:00 UTC
+
+Every n seconds, minutes or hours, counted from the Unix epoch:
+  .everySeconds(45)                  every 45s
+      Sat 2026-10-24 00:00:45, 00:01:30, 00:02:15
+  .everyMinutes(15)                  every 900s
+      Sat 2026-10-24 00:15:00, 00:30:00, 00:45:00, 01:00:00
+  .everyMinutes(7)                   every 420s
+      Sat 2026-10-24 00:04:00, 00:11:00, 00:18:00, 00:25:00, 00:32:00, 00:39:00, 00:46:00, 00:53:00, 01:00:00, 01:07:00
+  .everyHours(6)                     every 21600s
+      Sat 2026-10-24 06:00:00, 12:00:00, 18:00:00, Sun 2026-10-25 00:00:00
+  .everyHours(5)                     every 18000s
+      Sat 2026-10-24 05:00:00, 10:00:00, 15:00:00, 20:00:00, Sun 2026-10-25 01:00:00
+  .cron("*/7 * * * *")               cron */7 * * * *
+      Sat 2026-10-24 00:07:00, 00:14:00, 00:21:00, 00:28:00, 00:35:00, 00:42:00, 00:49:00, 00:56:00, 01:00:00, 01:07:00
+
+Times of day, by the clock the last argument names; 12 AM is midnight, 12 PM is noon:
+  .dailyAt(12, 0, 0, .am)            daily 00:00:00       Sun 2026-10-25 00:00:00
+  .dailyAt(12, 30, 0, .am)           daily 00:30:00       Sat 2026-10-24 00:30:00
+  .dailyAt(1, 0, 0, .am)             daily 01:00:00       Sat 2026-10-24 01:00:00
+  .dailyAt(11, 59, 59, .am)          daily 11:59:59       Sat 2026-10-24 11:59:59
+  .dailyAt(12, 0, 0, .pm)            daily 12:00:00       Sat 2026-10-24 12:00:00
+  .dailyAt(3, 30, 0, .pm)            daily 15:30:00       Sat 2026-10-24 15:30:00
+  .dailyAt(11, 0, 0, .pm)            daily 23:00:00       Sat 2026-10-24 23:00:00
+  .dailyAt(0, 0, 0, .h24)            daily 00:00:00       Sun 2026-10-25 00:00:00
+  .dailyAt(15, 30, 0, .h24)          daily 15:30:00       Sat 2026-10-24 15:30:00
+  .weeklyOn(.monday, 9, 0, 0, .am)   weekly mon 09:00:00
+      Mon 2026-10-26 09:00:00, Mon 2026-11-02 09:00:00
+  .monthlyOn(1, 0, 0, 0, .h24)       monthly 1 00:00:00
+      Sun 2026-11-01 00:00:00, Tue 2026-12-01 00:00:00
+
+Cron, in UTC:
+  .cron("0 30 2 * * *")              cron 0 30 2 * * *
+      Sat 2026-10-24 02:30:00, Sun 2026-10-25 02:30:00
+  .cron("0 9 * * MON-FRI")           cron 0 9 * * MON-FRI
+      Mon 2026-10-26 09:00:00, Tue 2026-10-27 09:00:00, Wed 2026-10-28 09:00:00
+  .cron("@weekly")                   cron @weekly
+      Sun 2026-10-25 00:00:00, Sun 2026-11-01 00:00:00
+  .cron("0 0 13 * FRI")              cron 0 0 13 * FRI
+      Fri 2026-10-30 00:00:00, Fri 2026-11-06 00:00:00, Fri 2026-11-13 00:00:00, Fri 2026-11-20 00:00:00
+  .cron("0 0 */2 * MON")             cron 0 0 */2 * MON
+      Sun 2026-10-25 00:00:00, Mon 2026-10-26 00:00:00, Tue 2026-10-27 00:00:00, Thu 2026-10-29 00:00:00, Sat 2026-10-31 00:00:00
+  .cron("0 0 0 31 * *")              cron 0 0 0 31 * *
+      Sat 2026-10-31 00:00:00, Thu 2026-12-31 00:00:00, Sun 2027-01-31 00:00:00, Wed 2027-03-31 00:00:00
+  .cron("0 0 29 2 *")                cron 0 0 29 2 *
+      Tue 2028-02-29 00:00:00, Sun 2032-02-29 00:00:00
+
+After each run, counted by the store:
+  .fixedDelay(.fromSeconds(30))      delay 30s            none: the store counts it after each run
+
+Values the program reads when it runs, which the compiler cannot check:
+  ok: daily 13:00:00
+  ok: cron 0 0 30 * *
+  error.InvalidArgument: dailyAt(13, 0, 0, .pm): an hour of the 12-hour clock is 1–12; 1 PM is .dailyAt(1, 0, 0, .pm), or .dailyAt(13, 0, 0, .h24)
+  error.InvalidArgument: cron "0 0 30 2 *": day 30 never comes in February, and the day of the week is *
+```
+
+- **From the epoch.** `.everyMinutes(7)` goes on past 01:00 at 01:07,
+  while the cron `*/7` starts again at 01:00; `.everyHours(5)` crosses
+  midnight at 01:00 of Sunday.
+- **Midnight.** `.dailyAt(12, 0, 0, .am)` and `.dailyAt(0, 0, 0, .h24)`
+  are the same schedule, `daily 00:00:00`: after the midnight the program
+  counts from, the next comes on Sunday.
+- **The two day fields.** `0 0 13 * FRI` takes every Friday and the 13th
+  of each month, whatever its day of the week; `0 0 */2 * MON` takes
+  Sunday the 25th and Tuesday the 27th, odd days, and Monday the 26th, but
+  not Wednesday the 28th.
+- **Rare days.** `0 0 0 31 * *` skips November and February;
+  `0 0 29 2 *` waits for 2028.
+- **`fixedDelay`** has no moments of its own: the store counts each one
+  when a run ends.
+- **The settings.** `fromSettings` builds its schedules from values the
+  compiler does not know: 1 PM is fine, 13 PM is not, and neither is the
+  30th of February.
+
+## Jobs by key
+
+A service has many jobs of one type, one for each order, customer or
+tenant, and the key tells them apart: a job is its type and its key, and a
+store keeps one job of a type for each key. The client finds a job by its
+`scheduler.Ref`, `.of(RemindToPay, "order-42")` in code, or `.{ .job =
+"remind-to-pay", .key = "order-42" }` in a page for the admins, and the
+calls that change a job take one:
+
+| Call | What it does | Answers |
+|---|---|---|
+| `schedule(io, ctx, J, request, options)` | makes the job of the key, unless one is there | `.created`; `.existing`, which changed nothing |
+| `cancel(io, ctx, ref, options)` | removes the job, in any state | `true`, or `false` when there was none |
+| `pause(io, ctx, ref, options)` | a pending job waits until `unpause`; a running one pauses when its run ends | `Changed` |
+| `unpause(io, ctx, ref, options)` | the job waits again for its time; a time already past runs at once | `Changed` |
+| `reschedule(io, ctx, ref, when, options)` | moves the job, or changes its schedule | `Changed` |
+| `retry(io, ctx, ref, options)` | gives a failed job all its attempts again, see [Failures and retries](#failures-and-retries) | `Changed` |
+| `get(io, ctx, ref, arena, options)` | the record of the job, or null | `?Record` |
+| `list(io, ctx, filter, page, arena, options)` | the records, a page at a time | `RecordPage` |
+| `history(io, ctx, filter, page, arena, options)` | the rows of the history, see [History and retention](#history-and-retention) | `RunPage` |
+
+`Changed` is `.changed`; `.unchanged`, when it already was so, as a pause
+of a paused job; `.finished`, when the job ended and its record is kept
+for its history, so the change does not apply to it; or `.not_found`.
+
+`orders.zig` keeps reminders to pay, one for each order, and the weekly
+reports of tenants, one for each tenant. Only the client works here: no
+worker runs the jobs, so the program shows what the store keeps of them:
+
+```zig
+//! Jobs by key: one job for each order and for each tenant, which the shop
+//! finds, moves, pauses and cancels by its key. An order gets a reminder
+//! to pay three days later, and each tenant a report every Monday at 9 AM.
+//! Only the client works here, on `scheduler.MemoryStore`: no worker runs
+//! the jobs, so the program shows what the store keeps of them. `zig build
+//! test-scheduler` runs it.
+
+const std = @import("std");
+const log = @import("log");
+const scheduler = @import("scheduler");
+
+/// The store logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// A reminder to pay an order. No worker runs it in this program.
+const RemindToPay = struct {
+    pub const scheduler_job: scheduler.Job = .{ .name = "remind-to-pay" };
+
+    pub const Payload = struct { order_id: u64, amount_cents: u64 };
+
+    pub fn run(_: *RemindToPay, _: *scheduler.Context, _: Payload) !void {}
+};
+
+/// The weekly report of a tenant: a repeating job, one for each tenant,
+/// with the tenant as its key.
+const WeeklyReport = struct {
+    pub const scheduler_job: scheduler.Job = .{ .name = "weekly-report" };
+
+    pub fn run(_: *WeeklyReport, _: *scheduler.Context) !void {}
+};
+
+const days: i64 = 24 * 60 * 60;
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+
+    var memory: scheduler.MemoryStore = .init(gpa, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(gpa, io, memory.store(), .{});
+
+    // Three orders of two tenants: a reminder for each, three days on, by
+    // the key of the order.
+    for ([_]struct { []const u8, u64, []const u8 }{
+        .{ "order-41", 41, "acme" },
+        .{ "order-42", 42, "acme" },
+        .{ "order-43", 43, "globex" },
+    }) |order| {
+        const key, const id, const tenant = order;
+        const result = try client.schedule(io, .root, RemindToPay, .{
+            .key = key,
+            .when = .{ .after = .fromSeconds(3 * days) },
+            .payload = .{ .order_id = id, .amount_cents = 1000 + id },
+            .tenant = tenant,
+        }, .{});
+        app.info("Scheduled", .{ .key = key, .tenant = tenant, .result = result });
+    }
+    // The same request again, as a retry of the call that made it: the
+    // key is taken, so nothing changes.
+    const again = try client.schedule(io, .root, RemindToPay, .{
+        .key = "order-42",
+        .when = .{ .after = .fromSeconds(3 * days) },
+        .payload = .{ .order_id = 42, .amount_cents = 1042 },
+        .tenant = "acme",
+    }, .{});
+    app.info("Scheduled", .{ .key = "order-42", .result = again });
+
+    // Order 41 is paid: no reminder. A second cancel finds nothing.
+    for (0..2) |_| app.info("Cancelled", .{ .key = "order-41", .found = try client.cancel(io, .root, .of(RemindToPay, "order-41"), .{}) });
+    // The customer of order 43 pays on payday: the reminder moves to the
+    // 1st of December, 9 AM UTC.
+    const moved = try client.reschedule(io, .root, .of(RemindToPay, "order-43"), .{ .at = .fromUtc(2026, 12, 1, 9, 0, 0, .am) }, .{});
+    app.info("Moved", .{ .key = "order-43", .result = moved });
+
+    // The report of each tenant, every Monday at 9 AM. acme stops its
+    // reports for now: its job pauses, and a second pause changes nothing.
+    for ([_][]const u8{ "acme", "globex" }) |tenant| {
+        const result = try client.schedule(io, .root, WeeklyReport, .{ .key = tenant, .when = .{ .repeat = .weeklyOn(.monday, 9, 0, 0, .am) }, .tenant = tenant }, .{});
+        app.info("Scheduled", .{ .key = tenant, .result = result });
+    }
+    for (0..2) |_| app.info("Paused", .{ .key = "acme", .result = try client.pause(io, .root, .of(WeeklyReport, "acme"), .{}) });
+
+    // Every job, two to a page.
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var page: scheduler.Page = .{ .limit = 2 };
+    while (true) {
+        const jobs = try client.list(io, .root, .{}, page, arena, .{});
+        for (jobs.records) |r| app.info("Job", .{ .job = r.job, .key = r.key, .tenant = r.tenant, .state = r.state, .plan = r.plan, .run_at = r.run_at });
+        page.after = jobs.next orelse break;
+    }
+    // The jobs of one tenant, and the paused ones.
+    const of_acme = try client.list(io, .root, .{ .tenant = "acme" }, .{}, arena, .{});
+    const paused = try client.list(io, .root, .{ .state = .paused }, .{}, arena, .{});
+    app.info("Listed", .{ .tenant_acme = of_acme.records.len, .paused = paused.records.len });
+
+    // One job by its key, and its payload as the type of the job's.
+    const record = (try client.get(io, .root, .of(RemindToPay, "order-42"), arena, .{})) orelse return error.NoReminder;
+    const payload = try record.payloadAs(RemindToPay, arena);
+    app.info("Found", .{ .key = record.key, .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = record.attempt });
+
+    // A request that breaks a rule fails before it reaches the store, and
+    // the diagnostics say which rule.
+    var d: scheduler.Diagnostics = .{};
+    if (client.schedule(io, .root, RemindToPay, .{
+        .key = "",
+        .when = .{ .after = .fromSeconds(3 * days) },
+        .payload = .{ .order_id = 44, .amount_cents = 1044 },
+    }, .{ .diagnostics = &d })) |_| {
+        return error.EmptyKeyTaken;
+    } else |err| app.warn("Not scheduled", .{ .reason = err, .details = d.message() });
+}
+```
+
+```text
+$ zig build run
+2026-10-27T14:23:36.310Z INFO  [app] Scheduled key=order-41 tenant=acme result=created
+2026-10-27T14:23:36.310Z INFO  [app] Scheduled key=order-42 tenant=acme result=created
+2026-10-27T14:23:36.310Z INFO  [app] Scheduled key=order-43 tenant=globex result=created
+2026-10-27T14:23:36.311Z INFO  [app] Scheduled key=order-42 result=existing
+2026-10-27T14:23:36.311Z INFO  [app] Cancelled key=order-41 found=true
+2026-10-27T14:23:36.311Z INFO  [app] Cancelled key=order-41 found=false
+2026-10-27T14:23:36.311Z INFO  [app] Moved key=order-43 result=changed
+2026-10-27T14:23:36.311Z INFO  [app] Scheduled key=acme result=created
+2026-10-27T14:23:36.311Z INFO  [app] Scheduled key=globex result=created
+2026-10-27T14:23:36.311Z INFO  [app] Paused key=acme result=changed
+2026-10-27T14:23:36.311Z INFO  [app] Paused key=acme result=unchanged
+2026-10-27T14:23:36.311Z INFO  [app] Job job=remind-to-pay key=order-42 tenant=acme state=pending plan="" run_at=2026-10-30T14:23:36.310Z
+2026-10-27T14:23:36.311Z INFO  [app] Job job=remind-to-pay key=order-43 tenant=globex state=pending plan="" run_at=2026-12-01T09:00:00.000Z
+2026-10-27T14:23:36.311Z INFO  [app] Job job=weekly-report key=acme tenant=acme state=paused plan="weekly mon 09:00:00" run_at=2026-11-02T09:00:00.000Z
+2026-10-27T14:23:36.311Z INFO  [app] Job job=weekly-report key=globex tenant=globex state=pending plan="weekly mon 09:00:00" run_at=2026-11-02T09:00:00.000Z
+2026-10-27T14:23:36.311Z INFO  [app] Listed tenant_acme=2 paused=1
+2026-10-27T14:23:36.311Z INFO  [app] Found key=order-42 order=42 amount_cents=1042 attempt=0
+2026-10-27T14:23:36.311Z WARN  [app] Not scheduled reason=InvalidArgument details="key: empty; a key is 1–256 bytes of UTF-8 without NUL"
+```
+
+- **The key.** A key is 1 to 256 bytes of UTF-8 without NUL. The second
+  request for `order-42` answers `.existing` and leaves the job as it
+  was: a request may be repeated safely, and changing a live job is
+  `reschedule`'s work. A key that a finished job left, kept for its
+  history, is free again: `schedule` replaces that record with a new job.
+  Keys show in the logs, so make them of ids, never of names or e-mail
+  addresses.
+- **The tenant.** A job may have a tenant, 1 to 128 bytes of UTF-8 without
+  NUL, which `list` and `history` filter by. It is a field, not a wall:
+  every client of the store sees every tenant's jobs.
+- **`cancel`** removes the job in any state, and a second one finds
+  nothing. A job that runs right now in another instance goes on until
+  its worker renews the lease, within `renew_every`, 20 s by default; then
+  the worker cancels the run.
+- **`reschedule`** moves a one-shot job, here to a moment of `.at`. For a
+  repeating job, `.at` and `.after` move its next run only, `.repeat`
+  changes its schedule, and `.repeat` makes a one-shot job a repeating
+  one. A change during a run wins over the outcome of that run: the job
+  waits for its new time.
+- **`pause`** of the report of acme: a pending job waits, and keeps its
+  time for `unpause`; a second pause is `.unchanged`. A running job
+  pauses when its run ends. `unpause` lets it wait for its time again:
+  a time that passed meanwhile runs at once, and a repeating job's runs
+  that passed go by its misfire policy, see [Missed runs](#missed-runs).
+- **`list`** gives the records of a filter of job, tenant and state, any
+  of them null, two to a page here: `next` of a page is where the next one
+  starts, and null after the last. The records of a job come together,
+  their keys in order; which job comes first is the store's choice. The
+  strings of the records live in the arena, as those of `get` and
+  `history` do: free them all at once.
+- **What a record holds.** `state`, one of `pending`, `running`,
+  `paused`, `succeeded` and `failed`; `plan`, the text of the schedule,
+  `""` for a one-shot job; `run_at`, when a pending job may run, and when
+  a paused one may after `unpause`; the payload as JSON, which
+  `record.payloadAs(J, arena)` reads as `J.Payload`. `attempt` is 0 while
+  the job waits for its first claim.
+- **A broken rule** fails the call before it reaches the store, with
+  `error.InvalidArgument`, and `scheduler.Diagnostics` says which rule. No
+  text of the client ever holds a payload, or a key.
+
+| Rule | Limit |
+|---|---|
+| name of a job | 1–64 bytes of `a-z`, `0-9`, `-`, `_`, `.`, starting with a letter or a digit |
+| key | 1–256 bytes of UTF-8 without NUL |
+| tenant | 1–128 bytes of UTF-8 without NUL |
+| payload | its JSON valid UTF-8, at most `Client.Options.max_payload_bytes`, 64 KiB by default |
+| `.at` | 1970-01-01T00:00:00.000Z to 9999-12-31T23:59:59.999Z |
+| `.after` | 0 to 100 years |
+
+A change of the client reads the record, computes the change from its
+state, and writes it on condition that nothing else changed the record
+in between. When another change came first, the client reads again and
+computes again; after 8 such races lost in a row, it gives up with
+`error.Contended`, which nothing applied, so the call may be made again.
+
+<details>
+<summary><b>Changes while a job runs</b></summary>
+
+A job that runs in an instance has an owner, which renews its lease and
+writes its outcome. A change of the client meets that run so:
+
+| Change | What happens |
+|---|---|
+| `cancel` | the record goes at once; the owner learns it at its next renewal, within `renew_every`, cancels the run and writes a row `interrupted`, `Cancelled`, if the job keeps a history. A job scheduled again with the key meanwhile is another life, which the old run never touches |
+| `pause` | the run goes on to its end; then the job pauses instead of waiting for its next time |
+| `unpause` | a pause asked during the run is taken back |
+| `reschedule` | the run goes on; then the job waits for the new time, `attempt` 0, and the outcome of the run shows only in `last` |
+| `retry` | `.unchanged`: the job is not failed |
+
+</details>
+
+## Failures and retries
+
+An *attempt* is one claim of a job: the worker takes it from the store,
+runs `run`, and writes the outcome. An attempt fails when `run` returns
+an error, or when the run passes the job's `timeout`: then the worker
+cancels it, and it counts as failed with the error `Timeout`. What comes
+next is the job's `retry`:
+
+| Field | Default | What it says |
+|---|---|---|
+| `attempts` | `null`: 5 for a one-shot job, 1 for a repeating one | attempts in all, the first one included; 1 is no retry |
+| `delay` | 1 s | the pause after the first failed attempt |
+| `multiplier` | 5 | how much longer each next pause is; 1 keeps it constant |
+| `max_delay` | 120 s | the longest pause |
+| `give_up_on` | none | errors after which no attempt follows: `&.{error.OrderGone}` |
+
+The pause after the k-th failed attempt is `delay × multiplier^(k−1)`, at
+most `max_delay`, and shorter by a random 0–20 %, so that the jobs that
+failed together, when a service they all call went down, come back apart.
+By default a one-shot job tries five times:
+
+| After the attempt | Pause | With the random cut |
+|---|---|---|
+| 1 | 1 s | 0.8–1 s |
+| 2 | 5 s | 4–5 s |
+| 3 | 25 s | 20–25 s |
+| 4 | 120 s (125 s, cut to `max_delay`) | 96–120 s |
+| 5 | — | the job fails |
+
+A retry is the same run again: its `scheduled_at` and its run key stay,
+`ctx.info().attempt` grows. It may come in another instance, whichever
+claims it first.
+
+**A one-shot job that fails** for good, its attempts spent or an error of
+`give_up_on`, ends `failed`. Its `when_done.failed` says how long the
+store keeps it, 30 days by default: it shows in `list`, with the outcome
+of its last attempt in `last`, and `client.retry` gives it all its
+attempts again, due at once, with the same run key. `when_done.succeeded`
+is the same for a job that succeeded, none by default: its record goes
+with its last run. **A repeating job** never ends that way: a failed run
+leaves its outcome in `last`, and the job waits for its next time, which
+plays the retry. More `attempts` give a run more tries before that: a
+nightly job with `.attempts = 3` tries again within the night.
+
+`failures.zig` charges cards through a payment gateway that fails in
+three ways: down twice, an expired card, a hang. The pauses are short,
+and the worker has one slot, so that the jobs run one after another and
+the lines come in the order of the story:
+
+```zig
+//! Failures and retries: the shop charges the card of an order, and the
+//! payment gateway fails in three ways. It is down for the first two
+//! attempts of order 1, so the job tries again after a pause, and the
+//! third attempt goes through. The card of order 2 has expired, an error of
+//! `retry.give_up_on`, so the job ends failed at once; once the customer
+//! gives a new card, the shop gives the job back its attempts with
+//! `client.retry`. The gateway hangs on the first attempt of order 3, so
+//! the run passes its timeout and is cancelled, and the next attempt goes
+//! through. The jobs live in `scheduler.MemoryStore`, and the pauses are
+//! short, so that the program ends in seconds. `zig build test-scheduler`
+//! runs it.
+
+const std = @import("std");
+const log = @import("log");
+const scheduler = @import("scheduler");
+
+/// The worker logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// The job: charges the card of an order through the payment gateway,
+/// which here fails as the story above tells.
+const ChargeCard = struct {
+    app: log.Logger,
+    /// The customer of order 2 gave a new card.
+    card_renewed: std.atomic.Value(bool) = .init(false),
+
+    pub const scheduler_job: scheduler.Job = .{
+        .name = "charge-card",
+        // A charge takes less; a run past it is cancelled, and counts as a
+        // failed attempt.
+        .timeout = .fromMilliseconds(500),
+        .retry = .{
+            // Three attempts in all, 500 ms after the first failure and
+            // 1 s after the second, each up to 20 % shorter.
+            .attempts = 3,
+            .delay = .fromMilliseconds(500),
+            .multiplier = 2,
+            // An expired card does not get better by trying again.
+            .give_up_on = &.{error.CardExpired},
+        },
+        // A row of history for each attempt, kept for 30 days.
+        .history = .{ .keep_for = .fromSeconds(30 * 24 * 60 * 60) },
+    };
+
+    pub const Payload = struct { order_id: u64, amount_cents: u64 };
+
+    pub fn run(self: *ChargeCard, ctx: *scheduler.Context, payload: Payload) !void {
+        const attempt = ctx.info().attempt;
+        self.app.info("Charging", .{ .order = payload.order_id, .attempt = attempt });
+        switch (payload.order_id) {
+            1 => if (attempt < 3) return error.GatewayDown,
+            2 => if (!self.card_renewed.load(.acquire)) return error.CardExpired,
+            // A sleep is a point of cancellation: the timeout ends it.
+            3 => if (attempt == 1) try ctx.io().sleep(.fromSeconds(10), .awake),
+            else => {},
+        }
+        self.app.info("Charged", .{ .order = payload.order_id, .amount_cents = payload.amount_cents });
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+
+    var memory: scheduler.MemoryStore = .init(gpa, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(gpa, io, memory.store(), .{});
+    var charges: ChargeCard = .{ .app = app };
+    // One slot, so that one job runs at a time and the story keeps its
+    // order; a poll every 100 ms, so that it ends sooner.
+    var worker: scheduler.Worker(struct { charges: *ChargeCard }) = try .init(gpa, io, memory.store(), .{ .charges = &charges }, .{
+        .instance = "shop",
+        .workers = 1,
+        .poll_every = .fromMilliseconds(100),
+    });
+    defer worker.deinit(io);
+    try worker.start(io);
+
+    // The orders one after another, each until its job ends.
+    for ([_][]const u8{ "order-1", "order-2", "order-3" }, [_]u64{ 1, 2, 3 }) |key, id| {
+        _ = try client.schedule(io, .root, ChargeCard, .{
+            .key = key,
+            .when = .{ .after = .zero },
+            .payload = .{ .order_id = id, .amount_cents = 1000 * id },
+        }, .{});
+        try waitForEnd(io, gpa, client, key);
+    }
+    // The customer of order 2 gives a new card: the failed job waits
+    // again, due at once, with all its attempts and the same run key.
+    charges.card_renewed.store(true, .release);
+    app.info("New card", .{ .order = 2 });
+    const retried = try client.retry(io, .root, .of(ChargeCard, "order-2"), .{});
+    try waitForEnd(io, gpa, client, "order-2");
+    app.info("Retried", .{ .key = "order-2", .result = retried });
+    try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }));
+
+    // The history: a row for each attempt, the newest first.
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    for ([_][]const u8{ "order-1", "order-2", "order-3" }) |key| {
+        const history = try client.history(io, .root, .{ .job = "charge-card", .key = key }, .{}, arena_state.allocator(), .{});
+        for (history.runs) |run| app.info("Run", .{ .key = key, .fence = run.fence, .attempt = run.attempt, .outcome = run.outcome, .error_name = run.error_name });
+    }
+    const stats = worker.stats();
+    app.info("Worker", .{ .claimed = stats.claimed, .succeeded = stats.succeeded, .failed = stats.failed, .timed_out = stats.timed_out, .gave_up = stats.gave_up });
+}
+
+/// Waits until the job of `key` has ended: it succeeded, and its record
+/// went, or it failed, and its record stays; 10 s at most.
+fn waitForEnd(io: std.Io, gpa: std.mem.Allocator, client: scheduler.Client, key: []const u8) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    for (0..500) |_| {
+        _ = arena_state.reset(.retain_capacity);
+        const record = try client.get(io, .root, .of(ChargeCard, key), arena_state.allocator(), .{}) orelse return;
+        if (record.state == .failed) return;
+        try io.sleep(.fromMilliseconds(20), .awake);
+    }
+    return error.JobDidNotEnd;
+}
+```
+
+```text
+$ zig build run
+2026-10-27T14:23:36.425Z INFO  [scheduler] 1 job type, 1 worker, instance shop/c3a3295597aa3601848015e92f3aac68
+2026-10-27T14:23:36.517Z INFO  [app] Charging order=1 attempt=1
+2026-10-27T14:23:36.517Z INFO  [scheduler] charge-card/order-1: attempt 1 failed (GatewayDown); it runs again after a pause
+2026-10-27T14:23:36.951Z INFO  [app] Charging order=1 attempt=2
+2026-10-27T14:23:36.952Z INFO  [scheduler] charge-card/order-1: attempt 2 failed (GatewayDown); it runs again after a pause
+2026-10-27T14:23:37.910Z INFO  [app] Charging order=1 attempt=3
+2026-10-27T14:23:37.910Z INFO  [app] Charged order=1 amount_cents=1000
+2026-10-27T14:23:38.022Z INFO  [app] Charging order=2 attempt=1
+2026-10-27T14:23:38.023Z WARN  [scheduler] charge-card/order-2: the job ended failed (CardExpired)
+2026-10-27T14:23:38.129Z INFO  [app] Charging order=3 attempt=1
+2026-10-27T14:23:38.632Z WARN  [scheduler] charge-card/order-3: the run passed its timeout and was cancelled
+2026-10-27T14:23:38.633Z INFO  [scheduler] charge-card/order-3: attempt 1 failed (Timeout); it runs again after a pause
+2026-10-27T14:23:39.114Z INFO  [app] Charging order=3 attempt=2
+2026-10-27T14:23:39.114Z INFO  [app] Charged order=3 amount_cents=3000
+2026-10-27T14:23:39.135Z INFO  [app] New card order=2
+2026-10-27T14:23:39.223Z INFO  [app] Charging order=2 attempt=1
+2026-10-27T14:23:39.223Z INFO  [app] Charged order=2 amount_cents=2000
+2026-10-27T14:23:39.249Z INFO  [app] Retried key=order-2 result=changed
+2026-10-27T14:23:39.249Z INFO  [scheduler] stopping
+2026-10-27T14:23:39.249Z INFO  [scheduler] stopped
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-1 fence=3 attempt=3 outcome=succeeded error_name=null
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-1 fence=2 attempt=2 outcome=failed error_name=GatewayDown
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-1 fence=1 attempt=1 outcome=failed error_name=GatewayDown
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-2 fence=2 attempt=1 outcome=succeeded error_name=null
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-2 fence=1 attempt=1 outcome=failed error_name=CardExpired
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-3 fence=2 attempt=2 outcome=succeeded error_name=null
+2026-10-27T14:23:39.249Z INFO  [app] Run key=order-3 fence=1 attempt=1 outcome=timed_out error_name=Timeout
+2026-10-27T14:23:39.249Z INFO  [app] Worker claimed=7 succeeded=3 failed=4 timed_out=1 gave_up=1
+```
+
+- **Down twice.** Order 1 fails with `GatewayDown`; the worker logs the
+  failure and the pause, and claims the job again 400–500 ms later, then
+  0.8–1 s later. The third attempt, the last one allowed, goes through.
+- **An expired card** is an error of `give_up_on`: no attempt follows,
+  and the job ends `failed` at once, with a warning. A charge that cannot
+  succeed does not spend the two attempts left.
+- **A hang.** The first attempt of order 3 sleeps past the `timeout` of
+  500 ms: the worker cancels the token of its context and the task that
+  runs it, the sleep ends with `error.Canceled`, and the attempt counts as
+  `timed_out`. A handler sees the cancel only at a point of
+  cancellation, a wait on its `io`, or where it asks
+  `ctx.operation().isCancelled()`: one that never does holds its slot
+  until it ends.
+- **`retry`** gives order 2 back its attempts once the customer has a new
+  card: due at once, `attempt` from 1 again, the same run key, so a
+  billing service that saw the first attempt knows the run.
+- **The history** keeps a row for each claim, here because the job asks
+  for it: `fence` counts the claims of the record, and `attempt` the
+  attempts of its run. The rows of order 2 show its
+  failed claim and the claim after `retry`, each the first attempt of the
+  same run.
+- **The counters** of the worker: 7 claims, 3 succeeded, 4 failed
+  attempts, the timeout among them, and 1 job given up.
 
 ## MongoDB
 
@@ -608,3 +1549,677 @@ which invoice changes from run to run, and the history says it, in the
 `instance` of each row. How the claims, the leases and their renewals
 keep one owner for each job, and what happens when an instance dies, is
 in [Several instances](#several-instances).
+
+## Under zefir.App
+
+A service hands the lifecycle of its parts to `zefir.App` of zefir-core:
+App builds them out of modules, gives each what it takes by its type,
+starts them in order, and stops them all within one deadline. The parts
+of the scheduler are beans as they are, and App needs no change for
+them; the guides of the modules write App `core.App`, which is `zefir.App`
+of the umbrella module:
+
+- **A job** is a provider: App builds it by its `init`, whose params are
+  what it takes, or by its fields, each a bean or a value of the module.
+  So a job gets its dependencies, and the client of the scheduler too, to
+  schedule other jobs.
+- **A store** is the bean of a factory. `MemoryStore` has only `deinit`,
+  which App calls at the end; `mongo.SchedulerStore` has `start` too,
+  which makes the indexes and measures the server's clock under its
+  `start_timeout`, after the client of MongoDB connected, and so the store
+  stops after its worker and before that client.
+- **A client** is the bean of a factory, a value without a lifecycle.
+- **A worker** is the bean of a factory that takes the struct of its
+  jobs, `jobs: SharedJobs`: App fills its pointers by type. A worker has `start`, `wait`,
+  `requestStop`, `shutdown`, `isReady` and `deinit`: App starts it once
+  its store started, and at the stop treats it as a server, stopping it
+  first, together with the servers of http and rpc, so that the store and
+  the client of MongoDB outlive it. App's budget for the stop, 25 s by
+  default, holds the `shutdown_grace` of a worker, 10 s.
+
+App gives a bean by its type, so a type is one bean in the whole
+application. A service with two schedulers, here one whose jobs all its
+instances share and one whose jobs each instance runs on its own, gives
+each client a type of its own, a wrapper of one field:
+`pub const SharedClient = struct { client: scheduler.Client };`. Its
+workers are of two types already: `Worker(SharedJobs)` and
+`Worker(LocalJobs)`.
+
+`app.zig` declares that service in one module. In a service the shared
+store is `mongo.SchedulerStore`, a type of its own, which the factory
+makes on `*mongo.Client`; the program runs without a server, so a
+`MemoryStore` stands in for it, in a wrapper, since the local store is a
+`MemoryStore` too:
+
+```zig
+//! The scheduler under zefir.App, without a server. The shop has two
+//! schedulers: one for the jobs that all its instances share, such as the
+//! invoices of orders, and one for the jobs that each instance runs for
+//! itself, such as dropping the quotes it keeps in its memory. A module
+//! declares the jobs as providers, which App builds with what they take,
+//! and the stores, the clients and the workers as the beans of factories.
+//! App starts the workers after their stores and stops them first,
+//! together with the servers of a service. App gives every bean by its
+//! type, so the client of each scheduler is a type of its own. In a
+//! service the shared store is `mongo.SchedulerStore`; here a MemoryStore
+//! stands in for it. `zig build test-scheduler` runs it.
+
+const std = @import("std");
+const core = @import("core");
+const log = @import("log");
+const scheduler = @import("scheduler");
+
+/// App and the workers log through std.log; this sends their records to
+/// the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// The client of the jobs that every instance of the shop shares.
+pub const SharedClient = struct { client: scheduler.Client };
+/// The client of the jobs that each instance runs for itself.
+pub const LocalClient = struct { client: scheduler.Client };
+
+/// The store of the shared jobs. In a service, the factory returns
+/// mongo.SchedulerStore, on the client of MongoDB, a type of its own; here
+/// a MemoryStore stands in for it, in a type of its own too, since the
+/// local store is a MemoryStore as well.
+pub const SharedStore = struct {
+    memory: scheduler.MemoryStore,
+
+    pub fn deinit(s: *SharedStore) void {
+        s.memory.deinit();
+    }
+};
+
+/// The quotes of prices that this instance keeps in its memory, by the
+/// number of the customer; here only a count of them.
+pub const Quotes = struct {
+    held: std.atomic.Value(u32) = .init(0),
+};
+
+/// A shared job: the invoice of an order.
+pub const SendInvoice = struct {
+    logger: log.Logger,
+    sent: std.atomic.Value(u32) = .init(0),
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
+    pub const Payload = struct { order_id: u64 };
+
+    /// App builds it by its `init`, whose params are what it takes.
+    pub fn init(logger: *const log.Logger) SendInvoice {
+        return .{ .logger = logger.scoped("invoices") };
+    }
+
+    pub fn run(self: *SendInvoice, _: *scheduler.Context, payload: Payload) !void {
+        self.logger.info("Invoice sent", .{ .order = payload.order_id });
+        _ = self.sent.fetchAdd(1, .release);
+    }
+};
+
+/// A local job: drops a quote of this instance once it expires. Another
+/// instance could not: the quote is in this one's memory.
+pub const ExpireQuote = struct {
+    quotes: *Quotes,
+    logger: *const log.Logger,
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "expire-quote" };
+    pub const Payload = struct { customer: u64 };
+
+    pub fn run(self: *ExpireQuote, _: *scheduler.Context, payload: Payload) !void {
+        self.logger.scoped("quotes").info("Quote dropped", .{ .customer = payload.customer });
+        _ = self.quotes.held.fetchSub(1, .acq_rel);
+    }
+};
+
+/// The jobs of each worker: App fills these structs of pointers by type.
+pub const SharedJobs = struct { invoices: *SendInvoice };
+pub const LocalJobs = struct { quotes: *ExpireQuote };
+
+pub const ShopModule = struct {
+    pub const module: core.app.Module = .{
+        .providers = &.{ Quotes, SendInvoice, ExpireQuote },
+        .factories = &.{Scheduling},
+        // Ready objects from main: App hands them out, and never starts or
+        // frees them.
+        .values = &.{*const log.Logger},
+    };
+
+    /// Each pub fn is a bean: its params are what it takes, its return type
+    /// the type of the bean.
+    pub const Scheduling = struct {
+        pub fn sharedStore(gpa: std.mem.Allocator, io: std.Io) SharedStore {
+            return .{ .memory = .init(gpa, io, .{}) };
+        }
+        pub fn localStore(gpa: std.mem.Allocator, io: std.Io) scheduler.MemoryStore {
+            return .init(gpa, io, .{});
+        }
+        /// The clients: the jobs take them to schedule other jobs, and so do
+        /// the controllers of a service.
+        pub fn sharedClient(gpa: std.mem.Allocator, io: std.Io, store: *SharedStore) SharedClient {
+            return .{ .client = .init(gpa, io, store.memory.store(), .{}) };
+        }
+        pub fn localClient(gpa: std.mem.Allocator, io: std.Io, store: *scheduler.MemoryStore) LocalClient {
+            return .{ .client = .init(gpa, io, store.store(), .{}) };
+        }
+        /// A worker has requestStop: App stops it with the servers, before
+        /// the store it takes.
+        pub fn sharedWorker(gpa: std.mem.Allocator, io: std.Io, store: *SharedStore, jobs: SharedJobs) !scheduler.Worker(SharedJobs) {
+            return .init(gpa, io, store.memory.store(), jobs, .{ .instance = "shop" });
+        }
+        pub fn localWorker(gpa: std.mem.Allocator, io: std.Io, store: *scheduler.MemoryStore, jobs: LocalJobs) !scheduler.Worker(LocalJobs) {
+            return .init(gpa, io, store.store(), jobs, .{ .instance = "shop-local" });
+        }
+    };
+};
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    // Only the warnings of the workers: their start and stop are in the
+    // quick start.
+    const logger: log.Logger = try .init(init.gpa, io, .{ .format = .text, .scopes = &.{.{ .prefix = "scheduler", .level = .warn }} });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app_log = logger.scoped("app");
+
+    var app = try core.App(ShopModule).init(init.gpa, io, .{&logger}, .{});
+    defer app.deinit();
+    try app.start();
+    app_log.info("Started", .{});
+
+    // What a handler of an order does: the invoice is a shared job, by
+    // the key of the order.
+    const shared: *SharedClient = app.get(SharedClient);
+    _ = try shared.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42 } }, .{});
+    try waitFor(io, &app.get(SendInvoice).sent, 1);
+
+    // A quote for customer 7, held by this instance: a local job drops it,
+    // here at once, in a shop 15 minutes on.
+    const quotes: *Quotes = app.get(Quotes);
+    _ = quotes.held.fetchAdd(1, .acq_rel);
+    const local: *LocalClient = app.get(LocalClient);
+    _ = try local.client.schedule(io, .root, ExpireQuote, .{ .key = "customer-7", .when = .{ .after = .zero }, .payload = .{ .customer = 7 } }, .{});
+    try waitFor(io, &quotes.held, 0);
+
+    // What a signal does in a service: App stops the workers, then the
+    // rest, and wait returns.
+    app.requestStop();
+    try app.wait();
+    app_log.info("Stopped", .{ .state = app.state() });
+}
+
+/// Waits until `value` is `wanted`, 10 s at most.
+fn waitFor(io: std.Io, value: *const std.atomic.Value(u32), wanted: u32) !void {
+    for (0..500) |_| {
+        if (value.load(.acquire) == wanted) return;
+        try io.sleep(.fromMilliseconds(20), .awake);
+    }
+    return error.JobDidNotRun;
+}
+```
+
+```text
+$ zig build run
+2026-10-27T14:23:39.368Z INFO  [zefir_app] ShopModule.Scheduling.sharedWorker started
+2026-10-27T14:23:39.369Z INFO  [zefir_app] ShopModule.Scheduling.localWorker started
+2026-10-27T14:23:39.369Z INFO  [app] Started
+2026-10-27T14:23:40.351Z INFO  [invoices] Invoice sent order=42
+2026-10-27T14:23:41.426Z INFO  [quotes] Quote dropped customer=7
+2026-10-27T14:23:41.443Z INFO  [zefir_app] stopping
+2026-10-27T14:23:41.444Z INFO  [zefir_app] ShopModule.Scheduling.localWorker stopped
+2026-10-27T14:23:41.444Z INFO  [zefir_app] ShopModule.Scheduling.sharedWorker stopped
+2026-10-27T14:23:41.444Z INFO  [zefir_app] stopped
+2026-10-27T14:23:41.444Z INFO  [app] Stopped state=stopped
+```
+
+- **The beans.** App builds the providers and the factories in the order
+  of their dependencies: the jobs, the stores, the clients, then the
+  workers, which take the stores and the jobs. `start` starts what has a
+  `start`, here the two workers, and logs each.
+- **The logger** is a value of the module: `main` makes it before the
+  runtime and hands it to App, which gives `*const log.Logger` to the
+  beans that take it, `SendInvoice.init` and the field of `ExpireQuote`.
+  The lines of the workers go to the scope `scheduler`, which the logger
+  keeps at warnings here: the start and the stop of a worker are in
+  [the quick start](#quick-start).
+- **The two schedulers.** `SendInvoice` goes through the shared client by
+  the key of its order, and any instance runs it. `ExpireQuote` goes
+  through the local client, since the quote it drops is in the memory of
+  this instance: only this instance can run it.
+- **The stop.** `requestStop`, as a signal does in a service, begins it:
+  App asks every bean to stop taking work, stops the workers together and
+  logs them, the last built first, then frees the stores.
+
+A service with MongoDB declares the client of MongoDB in the module that
+it imports, and its shared store's factory takes it:
+`pub fn sharedStore(gpa: std.mem.Allocator, io: std.Io, mongo_client:
+*mongo.Client) !mongo.SchedulerStore { return .init(gpa, io, mongo_client,
+.{ .database = "shop" }); }`. App starts the client, then the store,
+which makes its indexes, then the worker; it stops them the other way
+round.
+
+**Without App** a program does the same by hand, as
+[the quick start on MongoDB](#the-quick-start-on-mongodb) does: the client
+of MongoDB connects, the store makes its indexes, the worker starts last
+and `shutdown` stops it first, before the `deinit` of the store and the
+close of the client, which `defer` runs in the reverse order.
+
+## Tests of your jobs
+
+A job is code of the application, and its tests need neither MongoDB nor
+a worker that waits for a time. `scheduler.testing` has the parts:
+
+- **`testing.call(io, gpa, &job, payload, info)`** calls `run` with a
+  context of a test: an arena of `gpa`, freed when `run` returns, an
+  operation without a deadline and with a token nobody cancels, and
+  `info` as `ctx.info()`. It returns what `run` returns. A job without
+  `Payload` takes `{}`.
+- **`scheduler.MemoryStore`** with a client and a worker runs the jobs as
+  a service does, in the memory of the test.
+- **`testing.FaultyStore`** wraps any store and fails it on demand:
+  `failNext(io, op, err, times)` fails the next calls of an operation
+  with a store's error, `stallNext(io, op, duration)` makes the next one
+  hang until its deadline, `loseNextReply(io, op)` lets the store make the
+  change and loses its reply, and `calls(io, op)` counts the calls that
+  reached the store. `now` never fails.
+
+The jobs under test are those of the shop's invoices. `Invoices.zig`
+holds them, and the two systems they write to, each safe from a run that
+comes twice, in one of the two ways there are, see
+[Several instances](#several-instances):
+
+```zig
+//! The jobs of the invoices of a shop, which jobs_test.zig tests, and the
+//! two systems they write to. A job runs at least once, so a run may come
+//! twice, and each system keeps itself safe from that in one of the two
+//! ways there are: the billing service remembers the run keys it served,
+//! and the ledger the newest claim of each record that posted to it.
+
+const std = @import("std");
+const scheduler = @import("scheduler");
+
+/// The billing service, in memory: it sends the invoice of a run key
+/// once, so a second run of the same run sends nothing.
+pub const Billing = struct {
+    mutex: std.Io.Mutex = .init,
+    /// The run keys of the invoices sent.
+    sent: std.BufSet,
+    /// The orders cancelled since their invoices were scheduled.
+    gone: []const u64 = &.{},
+    reminders: u32 = 0,
+
+    pub fn init(gpa: std.mem.Allocator) Billing {
+        return .{ .sent = .init(gpa) };
+    }
+
+    pub fn deinit(b: *Billing) void {
+        b.sent.deinit();
+    }
+
+    /// Sends the invoice of `order_id`, unless the invoice of `run_key`
+    /// went out before.
+    pub fn send(b: *Billing, io: std.Io, run_key: []const u8, order_id: u64) !void {
+        if (std.mem.findScalar(u64, b.gone, order_id) != null) return error.OrderGone;
+        try b.mutex.lock(io);
+        defer b.mutex.unlock(io);
+        if (b.sent.contains(run_key)) return;
+        try b.sent.insert(run_key);
+    }
+
+    /// Reminds the customers of their unpaid invoices.
+    pub fn remindUnpaid(b: *Billing, io: std.Io) !void {
+        try b.mutex.lock(io);
+        defer b.mutex.unlock(io);
+        b.reminders += 1;
+    }
+
+    /// How many invoices went out.
+    pub fn count(b: *Billing, io: std.Io) usize {
+        b.mutex.lockUncancelable(io);
+        defer b.mutex.unlock(io);
+        return b.sent.count();
+    }
+};
+
+/// The invoice of an order: a job for each order, by its key.
+pub const SendInvoice = struct {
+    billing: *Billing,
+
+    pub const scheduler_job: scheduler.Job = .{
+        .name = "send-invoice",
+        // A run past 30 s is cancelled, and counts as a failed attempt.
+        .timeout = .fromSeconds(30),
+        // An order that is gone gets no invoice, however often it tries.
+        .retry = .{ .give_up_on = &.{error.OrderGone} },
+        // A row of history for each attempt, kept for 90 days.
+        .history = .{ .keep_for = .fromSeconds(90 * 24 * 60 * 60) },
+    };
+
+    /// The data of one run: the store keeps it as JSON.
+    pub const Payload = struct {
+        order_id: u64,
+        amount_cents: u64,
+        /// A field that a later version added has a default, so the jobs
+        /// that an earlier version scheduled still read.
+        note: ?[]const u8 = null,
+    };
+
+    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+        // The run key is the same for every attempt of this run: the key
+        // of idempotency for the billing service.
+        try self.billing.send(ctx.io(), ctx.info().run_key, payload.order_id);
+    }
+};
+
+/// The ledger of the shop: it takes the post of a claim of a job only if
+/// no newer claim of the same record posted before. An owner whose claim
+/// was taken over, and who goes on anyway, is refused.
+pub const Ledger = struct {
+    gpa: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+    /// The newest claim that posted, for each life of a record: the fence
+    /// alone would not do, since a record made again with the same key
+    /// counts its claims from 1 again.
+    fences: std.AutoHashMapUnmanaged(scheduler.Life, u64) = .empty,
+    days_closed: u32 = 0,
+
+    pub fn deinit(l: *Ledger) void {
+        l.fences.deinit(l.gpa);
+    }
+
+    /// Closes `days` days for the claim `fence` of the record of `life`.
+    pub fn closeDays(l: *Ledger, io: std.Io, life: scheduler.Life, fence: u64, days: u32) !void {
+        try l.mutex.lock(io);
+        defer l.mutex.unlock(io);
+        const newest = try l.fences.getOrPut(l.gpa, life);
+        if (newest.found_existing and fence < newest.value_ptr.*) return error.StaleClaim;
+        newest.value_ptr.* = fence;
+        l.days_closed += days;
+    }
+};
+
+/// Closes the day in the ledger, every night at 11 PM. The code declares
+/// it, so the worker keeps its record. A run that stands for the nights
+/// the shop was down closes those days too.
+pub const CloseDay = struct {
+    ledger: *Ledger,
+
+    pub const scheduler_job: scheduler.Job = .{
+        .name = "close-day",
+        .repeat = .dailyAt(11, 0, 0, .pm),
+    };
+
+    pub fn run(self: *CloseDay, ctx: *scheduler.Context) !void {
+        const info = ctx.info();
+        // One run for the nights it missed too: misfire is .coalesce.
+        try self.ledger.closeDays(ctx.io(), info.life, info.fence, 1 + info.missed);
+    }
+};
+
+/// Reminds the customers of their unpaid invoices, every morning at 9 AM.
+/// A run later than 10 AM is skipped: a customer gets no reminder in the
+/// afternoon, and the next morning sends one.
+pub const RemindUnpaid = struct {
+    billing: *Billing,
+
+    pub const scheduler_job: scheduler.Job = .{
+        .name = "remind-unpaid",
+        .repeat = .dailyAt(9, 0, 0, .am),
+        .misfire = .{ .skip = .fromSeconds(60 * 60) },
+    };
+
+    pub fn run(self: *RemindUnpaid, ctx: *scheduler.Context) !void {
+        try self.billing.remindUnpaid(ctx.io());
+    }
+};
+```
+
+`jobs_test.zig` tests them, from the handler alone to a rollout of two
+versions of the shop:
+
+```zig
+//! The tests of the jobs of Invoices.zig, as an application writes them:
+//! a handler alone, with `scheduler.testing.call`; the jobs on a worker
+//! and `scheduler.MemoryStore`; a store that fails, with
+//! `scheduler.testing.FaultyStore`; and a rollout that parks a declared
+//! job. `zig build test-scheduler` runs them.
+
+const std = @import("std");
+const testing = std.testing;
+const scheduler = @import("scheduler");
+const Invoices = @import("Invoices.zig");
+
+const io = testing.io;
+const Worker = scheduler.Worker(struct { invoices: *Invoices.SendInvoice });
+
+/// What the worker would give the first attempt of the claim `fence` of
+/// the record of `life`: `testing.call` hands it to `run` as `ctx.info()`.
+fn runInfo(job: []const u8, key: []const u8, run_key: []const u8, life: scheduler.Life, fence: u64) scheduler.RunInfo {
+    const scheduled_at: scheduler.Instant = .fromUtc(2026, 10, 27, 9, 0, 0, .am);
+    return .{
+        .job = job,
+        .key = key,
+        .tenant = null,
+        // "<job>/<key>/<scheduled_at in ms>"
+        .run_key = run_key,
+        .attempt = 1,
+        .attempts = 5,
+        .scheduled_at = scheduled_at,
+        .started_at = scheduled_at,
+        .missed = 0,
+        .life = life,
+        .fence = fence,
+        .instance = "test/0123456789abcdef0123456789abcdef",
+    };
+}
+
+/// A deadline for `shutdown`, 5 s on.
+fn soon() std.Io.Clock.Timestamp {
+    return .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake });
+}
+
+/// Waits until the billing service sent `n` invoices: a loop on the clock,
+/// 10 s at most.
+fn waitForInvoices(billing: *Invoices.Billing, n: usize) !void {
+    for (0..500) |_| {
+        if (billing.count(io) >= n) return;
+        try io.sleep(.fromMilliseconds(20), .awake);
+    }
+    return error.TestTimedOut;
+}
+
+test "an invoice goes out once for each run key" {
+    var billing: Invoices.Billing = .init(testing.allocator);
+    defer billing.deinit();
+    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    const payload: Invoices.SendInvoice.Payload = .{ .order_id = 42, .amount_cents = 1999 };
+    const first = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793091600000", @splat(1), 1);
+    try scheduler.testing.call(io, testing.allocator, &invoices, payload, first);
+    // The same run again, as after a crash of the instance that ran it
+    // before it wrote the outcome: the run key is the same, no invoice.
+    var again = first;
+    again.attempt = 2;
+    again.fence = 2;
+    try scheduler.testing.call(io, testing.allocator, &invoices, payload, again);
+    try testing.expectEqual(1, billing.count(io));
+    // The job of the key scheduled again, for another time, is another
+    // run, with a run key of its own.
+    const later = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793178000000", @splat(2), 1);
+    try scheduler.testing.call(io, testing.allocator, &invoices, payload, later);
+    try testing.expectEqual(2, billing.count(io));
+}
+
+test "the invoice of an order that is gone fails with an error of give_up_on" {
+    var billing: Invoices.Billing = .init(testing.allocator);
+    defer billing.deinit();
+    billing.gone = &.{42};
+    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    const info = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793091600000", @splat(1), 1);
+    try testing.expectError(error.OrderGone, scheduler.testing.call(io, testing.allocator, &invoices, .{ .order_id = 42, .amount_cents = 1999 }, info));
+    try testing.expectEqual(0, billing.count(io));
+}
+
+test "the ledger refuses the post of a claim that a newer one took over" {
+    var ledger: Invoices.Ledger = .{ .gpa = testing.allocator };
+    defer ledger.deinit();
+    var close: Invoices.CloseDay = .{ .ledger = &ledger };
+    const life: scheduler.Life = @splat(7);
+    const run_key = "close-day//1793055600000";
+    // Claim 2 closes the day; claim 1, whose lease ran out and which went
+    // on anyway, comes late and is refused.
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, life, 2));
+    try testing.expectError(error.StaleClaim, scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, life, 1)));
+    // The record of the key made again is a new life, whose claims count
+    // from 1 again.
+    try scheduler.testing.call(io, testing.allocator, &close, {}, runInfo("close-day", "", run_key, @splat(8), 1));
+    // A run that stands for two nights it missed closes three days.
+    var late = runInfo("close-day", "", run_key, @splat(8), 2);
+    late.missed = 2;
+    try scheduler.testing.call(io, testing.allocator, &close, {}, late);
+    try testing.expectEqual(5, ledger.days_closed);
+}
+
+test "a worker sends the invoice when it is due, and the job goes" {
+    var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(testing.allocator, io, memory.store(), .{});
+    var billing: Invoices.Billing = .init(testing.allocator);
+    defer billing.deinit();
+    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var worker: Worker = try .init(testing.allocator, io, memory.store(), .{ .invoices = &invoices }, .{ .poll_every = .fromMilliseconds(100) });
+    defer worker.deinit(io);
+    try worker.start(io);
+
+    _ = try client.schedule(io, .root, Invoices.SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
+    try waitForInvoices(&billing, 1);
+    try worker.shutdown(io, soon());
+
+    // A succeeded job leaves no record; its history keeps a row.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expect(try client.get(io, .root, .of(Invoices.SendInvoice, "order-42"), arena.allocator(), .{}) == null);
+    const history = try client.history(io, .root, .{ .job = "send-invoice", .key = "order-42" }, .{}, arena.allocator(), .{});
+    try testing.expectEqual(1, history.runs.len);
+    try testing.expectEqual(scheduler.RunOutcome.succeeded, history.runs[0].outcome);
+    try testing.expectEqual(1, worker.stats().succeeded);
+}
+
+test "the worker waits while its store fails, and runs the job once it answers" {
+    // The worker warns of the failures.
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
+    defer memory.deinit();
+    var faulty: scheduler.testing.FaultyStore = .init(memory.store());
+    const client: scheduler.Client = .init(testing.allocator, io, faulty.store(), .{});
+    var billing: Invoices.Billing = .init(testing.allocator);
+    defer billing.deinit();
+    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var worker: Worker = try .init(testing.allocator, io, faulty.store(), .{ .invoices = &invoices }, .{ .poll_every = .fromMilliseconds(100) });
+    defer worker.deinit(io);
+    // The first three claims find the store unreachable.
+    faulty.failNext(io, .claim, error.Unavailable, 3);
+    try worker.start(io);
+
+    _ = try client.schedule(io, .root, Invoices.SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
+    try waitForInvoices(&billing, 1);
+    const stats = worker.stats();
+    try testing.expectEqual(3, stats.store_errors);
+    try testing.expect(!stats.store_down);
+    try worker.shutdown(io, soon());
+}
+
+test "after a lost reply, the same request again tells whether the job was made" {
+    var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
+    defer memory.deinit();
+    var faulty: scheduler.testing.FaultyStore = .init(memory.store());
+    const client: scheduler.Client = .init(testing.allocator, io, faulty.store(), .{});
+    const request: scheduler.Client.Request(Invoices.SendInvoice) = .{
+        .key = "order-42",
+        .when = .{ .after = .fromSeconds(60) },
+        .payload = .{ .order_id = 42, .amount_cents = 1999 },
+    };
+
+    // The store cannot be reached: nothing was done, and the call is safe
+    // to make again.
+    faulty.failNext(io, .create, error.Unavailable, 1);
+    try testing.expectError(error.Unavailable, client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectEqual(scheduler.Outcome.not_applied, scheduler.outcome(error.Unavailable));
+    // The store makes the job, and its reply is lost: the outcome is
+    // unknown.
+    faulty.loseNextReply(io, .create);
+    try testing.expectError(error.OutcomeUnknown, client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectEqual(scheduler.Outcome.unknown, scheduler.outcome(error.OutcomeUnknown));
+    // The same request again: the key is taken, so the job was made.
+    try testing.expectEqual(scheduler.Client.Scheduled.existing, try client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+}
+
+test "a declaration that left the code is parked until it is removed" {
+    var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(testing.allocator, io, memory.store(), .{});
+    var billing: Invoices.Billing = .init(testing.allocator);
+    defer billing.deinit();
+    var ledger: Invoices.Ledger = .{ .gpa = testing.allocator };
+    defer ledger.deinit();
+
+    // Version 1 of the shop declares the close of the day: its start
+    // writes the record of the declaration, whose key is "".
+    var close: Invoices.CloseDay = .{ .ledger = &ledger };
+    var v1: scheduler.Worker(struct { close: *Invoices.CloseDay }) = try .init(testing.allocator, io, memory.store(), .{ .close = &close }, .{});
+    defer v1.deinit(io);
+    try v1.start(io);
+    try v1.shutdown(io, soon());
+
+    // Version 2 closes the day of each tenant, with a job by key, and no
+    // longer declares it. Its start finds the record of the declaration:
+    // parked, which no instance of version 2 runs or removes. It warns,
+    // and counts it.
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    const CloseTenantDay = struct {
+        pub const scheduler_job: scheduler.Job = .{ .name = "close-day" };
+
+        pub fn run(_: *@This(), _: *scheduler.Context) !void {}
+    };
+    var close_tenant_day: CloseTenantDay = .{};
+    var remind: Invoices.RemindUnpaid = .{ .billing = &billing };
+    var v2: scheduler.Worker(struct { close: *CloseTenantDay, remind: *Invoices.RemindUnpaid }) = try .init(testing.allocator, io, memory.store(), .{ .close = &close_tenant_day, .remind = &remind }, .{});
+    defer v2.deinit(io);
+    try v2.start(io);
+    try testing.expectEqual(1, v2.stats().undeclared);
+
+    // Removed once, by hand, with the key "" that Ref.declared names.
+    try testing.expect(try client.cancel(io, .root, .declared(CloseTenantDay), .{}));
+    try v2.shutdown(io, soon());
+}
+```
+
+- **A handler alone.** `runInfo` fills what the worker would give: the
+  run key, the attempt, the life and the fence. The same run twice sends
+  one invoice; another run of the key, with a run key of its own, sends
+  another. The error of an order that is gone comes back as it is: the
+  `give_up_on` of `SendInvoice` is the worker's business, see
+  [Failures and retries](#failures-and-retries).
+- **The ledger** refuses the late claim of a record and takes the first
+  claim of a new life; a run that stands for missed nights closes them
+  too, see [Missed runs](#missed-runs).
+- **A worker in a test** polls every 100 ms, so that the test ends
+  sooner, and every wait is a loop on the clock: a run on a slow machine
+  takes longer, and still passes. A test stops its worker with `shutdown`
+  before it reads what the store kept: then every run has written its
+  outcome.
+- **A store that fails.** The worker logs a warning for each failure, so
+  the test lowers `std.testing.log_level` to `.err` around it; the test
+  runner would print the warnings, and they are what the test expects.
+  The worker waits out the three failures with growing pauses, runs the
+  job, and its counters show them.
+- **A lost reply.** `error.Unavailable` is of the class
+  `scheduler.outcome` calls `.not_applied`: nothing changed, and the call
+  may be made again. `error.OutcomeUnknown` is `.unknown`: the store may
+  have made the job. The same request again tells, since the key of a job
+  is taken once: `.existing` means the first call made it.
+- **A rollout.** Version 1 declares the close of the day; version 2 closes
+  the day of each tenant instead, with a job by key of the same name, and
+  declares only the morning reminder. Its start finds the record of the
+  old declaration, warns, and counts it in `stats().undeclared`; no
+  instance of version 2 runs it, and the test removes it by hand,
+  [as a service does](#rollouts-and-declared-jobs).
