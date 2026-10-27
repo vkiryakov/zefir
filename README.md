@@ -456,6 +456,8 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 `--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.11.0**, fetch `#v0.11.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
 
+A service also needs [zio](https://github.com/lalinsky/zio), the runtime it runs on; zio has no release for Zig 0.17 yet, so pin the commit that the guides name in their Installation: `zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a`.
+
 Then import the modules you need in your `build.zig`:
 
 ```zig
