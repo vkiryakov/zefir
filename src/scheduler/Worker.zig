@@ -109,15 +109,19 @@ pub fn Worker(comptime Jobs: type) type {
             w.engine.requestStop(io);
         }
 
-        /// `requestStop`, then a wait for the stop that returns no later than
-        /// 250 ms before `deadline`. The deadline cuts `shutdown_grace`: the
-        /// runs still going are cancelled 2 s and 250 ms before it, and their
-        /// jobs go back with contexts that end 250 ms before it. Of several
-        /// calls the earliest deadline counts.
+        /// `requestStop`, then a wait for the stop. The deadline cuts
+        /// `shutdown_grace`: the runs still going are cancelled 2 s and 250
+        /// ms before it, and their jobs go back with contexts that end 500
+        /// ms before it, so that the worker stops 250 ms before it. Of
+        /// several calls the earliest deadline counts.
         ///
-        /// `error.ShutdownTimeout`: the worker has not stopped by then, as when
-        /// a handler does not end after its cancel. It stays draining, and
-        /// `deinit` would wait for it without a limit: end the process.
+        /// `error.ShutdownTimeout`, 250 ms before the deadline: a handler
+        /// has not ended since its cancel. With every handler ended,
+        /// `shutdown` waits for the worker's own calls of the store until
+        /// the deadline itself, and one that has not returned by then is
+        /// error.ShutdownTimeout too: a call on its way when the stop began
+        /// ends by `store_timeout`. The worker stays draining, and `deinit`
+        /// would wait for it: end the process.
         pub fn shutdown(w: *Self, io: Io, deadline: Io.Clock.Timestamp) ShutdownError!void {
             w.engine.checkUse(io);
             return w.engine.shutdown(io, deadline);

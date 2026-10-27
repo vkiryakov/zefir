@@ -2537,11 +2537,14 @@ try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake 
    take in time come back when their leases end, with an attempt counted.
 
 `error.ShutdownTimeout` means that the worker had not stopped 250 ms
-before the deadline: a handler did not end after its cancel, since it
-never reached a point of cancellation, or the deadline was already past.
-The worker stays `draining`, and `deinit` would wait without a limit for
-a handler that does not end: end the process, as for a server of http
-that does not stop. The worker logs a warning for a handler that ends more
+before the deadline because a handler did not end after its cancel,
+since it never reached a point of cancellation, or that it had not
+stopped by the deadline itself because a call of the store had not
+returned: one on its way when the stop began ends by its own
+`store_timeout`. A deadline already past gives it too. The worker stays
+`draining`, and `deinit` would wait without a limit for a handler that
+does not end: end the process, as for a server of http that does not
+stop. The worker logs a warning for a handler that ends more
 than a second after its cancel, and for a stop that missed its deadline.
 
 The worker does not close its store or the client of MongoDB: they

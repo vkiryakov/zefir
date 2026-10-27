@@ -130,6 +130,40 @@ test "a handler that never yields makes shutdown return ShutdownTimeout" {
     try testing.expectEqual(Worker.State.draining, w.state());
 }
 
+/// A stop by `shutdown(now + 3 s)` while every outcome of the store fails,
+/// at once or once its deadline passed: the slot sends the return of its
+/// cancelled run again until the stop leaves no time, then gives up.
+fn stopInOutage(fault: enum { fail, stall }) !void {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{ .hold = .fromSeconds(10) };
+    var held: Held = .{ .probe = &probe };
+    try f.schedule(Held, "x", .{ .after = .zero });
+    var options = quick;
+    options.shutdown_grace = .fromMilliseconds(500);
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var w: Worker = try .init(testing.allocator, io, f.store(), .{ .held = &held }, options);
+    defer w.deinit(io);
+    try w.start(io);
+    try reach(&probe.runs, 1, 5);
+    switch (fault) {
+        .fail => f.faulty.failNext(io, .finish, error.Unavailable, 1000),
+        .stall => for (0..4) |_| f.faulty.stallNext(io, .finish, .fromSeconds(10)),
+    }
+    try w.shutdown(io, fromNow(3000));
+    try testing.expectEqual(Worker.State.stopped, w.state());
+    try testing.expectEqual(@as(u32, 1), probe.cancelled.load(.acquire));
+    // The return did not go: the job comes back when its lease ends.
+    try testing.expectEqual(@as(?scheduler.State, .running), try stateOf(&f, .of(Held, "x")));
+}
+
+test "a stop while the store fails returns once every run ended" {
+    try stopInOutage(.fail);
+    try stopInOutage(.stall);
+}
+
 test "a deadline closer than the grace cancels at once" {
     var f: Fixture = undefined;
     f.init();

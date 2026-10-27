@@ -431,9 +431,15 @@ pub fn isStopping(e: *Engine) bool {
 /// How much earlier than its deadline `shutdown` returns, so that the
 /// caller has time for what comes after.
 const reserve: Duration = .fromMilliseconds(250);
+/// How much earlier than that the calls of the store of a stop end, so
+/// that its tasks end before `shutdown` gives up.
+const unwind: Duration = .fromMilliseconds(250);
 
 /// `requestStop`, and a wait for the stop until 250 ms before `deadline`,
-/// which also cuts the grace (`graceEnd`).
+/// which also cuts the grace (`graceEnd`). A run that has not ended since
+/// its cancel by then holds the worker: error.ShutdownTimeout. Without
+/// one, the tasks end by themselves once their calls of the store return,
+/// and `shutdown` waits for them until `deadline` itself.
 pub fn shutdown(e: *Engine, io: Io, deadline: Io.Clock.Timestamp) ShutdownError!void {
     _ = e.in_calls.fetchAdd(1, .acq_rel);
     defer _ = e.in_calls.fetchSub(1, .acq_rel);
@@ -447,18 +453,30 @@ pub fn shutdown(e: *Engine, io: Io, deadline: Io.Clock.Timestamp) ShutdownError!
     e.requestStop(io);
     // The runs of a stop that began before look at their grace again.
     if (draining) e.wakeAll(io);
-    const until = due -| reserve.nanoseconds;
+    if (try e.waitStopped(io, due -| reserve.nanoseconds)) return;
+    if (e.cancelling.load(.acquire) == 0 and try e.waitStopped(io, due)) return;
+    const runs = e.cancelling.load(.acquire);
+    if (runs > 0) {
+        log.warn("the worker did not stop by its deadline: {d} runs have not ended since their cancel; it stays draining", .{runs});
+    } else {
+        log.warn("the worker did not stop by its deadline, and no run is being cancelled: a call of the store has not returned; it stays draining", .{});
+    }
+    return error.ShutdownTimeout;
+}
+
+/// Waits until the worker stopped, or until `until` on the awake clock:
+/// true once it stopped.
+fn waitStopped(e: *Engine, io: Io, until: i96) error{Canceled}!bool {
     while (!e.stopped.isSet()) {
         const now = Io.Clock.awake.now(io).nanoseconds;
-        if (now >= until) break;
+        if (now >= until) return false;
         const step = @min(until, now +| max_step.nanoseconds);
         e.stopped.waitTimeout(io, .{ .deadline = .{ .raw = .{ .nanoseconds = step }, .clock = .awake } }) catch |err| switch (err) {
             error.Canceled => |c| return c,
             error.Timeout => {},
         };
-    } else return;
-    log.warn("the worker did not stop by its deadline: {d} runs have not ended since their cancel; it stays draining", .{e.cancelling.load(.acquire)});
-    return error.ShutdownTimeout;
+    }
+    return true;
 }
 
 /// Waits until the worker stopped.
@@ -500,16 +518,17 @@ pub fn graceEnd(e: *Engine, io: Io) ?i96 {
     return @min(grace, @max(due -| (outcome_budget.nanoseconds + reserve.nanoseconds), began));
 }
 
-/// The time a stop leaves for the cancels and the outcomes after its grace.
+/// The time a stop leaves after its grace for the cancels, the outcomes
+/// and the end of the tasks.
 const outcome_budget: Duration = .fromSeconds(2);
 
 /// The last moment of a stop to write outcomes in, on the awake clock:
-/// 250 ms before the deadline of a `shutdown`, else 2 s after the grace;
+/// 500 ms before the deadline of a `shutdown`, else 2 s after the grace;
 /// null while no stop began.
 pub fn stopEnd(e: *Engine, io: Io) ?i96 {
     const grace = e.graceEnd(io) orelse return null;
     const due = e.deadlineOf(io) orelse return grace +| outcome_budget.nanoseconds;
-    return due -| reserve.nanoseconds;
+    return due -| (reserve.nanoseconds + unwind.nanoseconds);
 }
 
 fn deadlineOf(e: *Engine, io: Io) ?i96 {
@@ -527,12 +546,12 @@ pub fn entryOf(e: *const Engine, name: []const u8) ?*const Entry {
 }
 
 /// The context of a call of the store by the poll or a slot: never the
-/// handler's token, a deadline of `store_timeout`, and no later than 250 ms
+/// handler's token, a deadline of `store_timeout`, and no later than 500 ms
 /// before the deadline of a `shutdown`.
 pub fn callContext(e: *Engine, io: Io) core.Context {
     const ctx = core.Context.root.withDeadline(.after(Io.Clock.awake.now(io), e.options.store_timeout));
     const due = e.deadlineOf(io) orelse return ctx;
-    return ctx.withDeadline(.at(.{ .nanoseconds = due -| reserve.nanoseconds }));
+    return ctx.withDeadline(.at(.{ .nanoseconds = due -| (reserve.nanoseconds + unwind.nanoseconds) }));
 }
 
 /// Counts what a call of the store gave: an error, or an answer.
