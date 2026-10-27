@@ -919,9 +919,9 @@ error: rpc: UserHandler implements users.v1 but has no pub fn deleteUser(self: *
 
 Zig names a type after the file that declares it: `UserHandler` is the
 file `UserHandler.zig`, and the types of the contract take the name of the
-contract's root file. Where this guide builds its examples, that file is
-`users_api.zig`, so the message says `users_api.DeleteUserRequest`; in your
-package users-api, whose root file is `src/root.zig`, it says
+contract's root file. zefir builds the contract of this guide from the
+file `users_api.zig`, so the message says `users_api.DeleteUserRequest`; in
+your package users-api, whose root file is `src/root.zig`, it says
 `root.DeleteUserRequest`.
 
 Zig compiles only the code that something uses: a handler that is never
