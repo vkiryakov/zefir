@@ -386,7 +386,7 @@ fn addBench(b: *std.Build, target: std.Build.ResolvedTarget, mode: std.lang.Opti
 }
 
 /// The example `name` of src/nats/examples, built with a root that exits
-/// with code 3 on a panic instead of aborting.
+/// with code 3 on a panic instead of aborting, and with code 4 after 120 s.
 fn addExample(
     b: *std.Build,
     zefir: *std.Build.Dependency,
