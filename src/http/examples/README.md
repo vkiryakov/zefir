@@ -2784,6 +2784,47 @@ streams of that user:
 - **`close(io, key)`** ends the streams of a key, here when the user signs
   out: what was published before goes out first, then the end.
 
+In the controller of todos, the field `live` points to the manager of the
+streams, the `http.sse.Manager(dto.LiveEvent)` that `Service.start` makes
+with `init`. The handler of the `http.sse.get` route gives the stream of
+the client to the manager with `subscribe`, under the id of the user, and
+`publish` then writes to every stream of that id; `eventsClosed`, the
+`.on_close` of the route, logs the end of a stream:
+
+```zig
+pub fn events(self: *TodosV1Controller, ctx: *http.sse.Context) !void {
+    _ = try self.live.subscribe(ctx, try owner(ctx));
+}
+
+/// Once, when the stream has ended: the client left, `close`, a queue that
+/// overflowed or the stop of the server.
+pub fn eventsClosed(_: *TodosV1Controller, ctx: *http.sse.Context) void {
+    const user = ctx.locals.get(auth.CurrentUser) orelse return;
+    std.log.scoped(.todos).info("Live updates closed for {s}", .{user.id});
+}
+```
+
+`update`, as `create` and `delete` do, makes its change and then publishes
+it to the streams of the user: `publish` takes the request's
+`core.Context` and `io`, the key, and the event, here `todo.updated`,
+whose data is the `dto.TodoResponse` of the todo:
+
+```zig
+pub fn update(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoResponse) {
+    const path = try ctx.path(dto.TodoIdPath);
+    const body = try ctx.json(dto.UpdateTodoRequest);
+    const user = try owner(ctx);
+    const todo = try self.repo.update(ctx.operation(), ctx.io(), ctx.allocator(), user, path.id, .{
+        .title = body.title,
+        .done = body.done,
+        .priority = body.priority,
+        .due_date = body.due_date,
+    });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.updated" = .from(todo) } });
+    return .{ .value = .from(todo) };
+}
+```
+
 In one terminal, the stream of Ann; `curl -N` shows each event as it comes:
 
 ```text
@@ -3860,7 +3901,8 @@ response sent before its body was read, a 401 say, reads and drops up to
 64 KiB of the body, so the connection can go on; for more, it closes.
 
 How many requests a server answers in a second, and how long one takes,
-on one machine: [the benchmark of zefir-http](../../../tests/http/bench/README.md).
+on one machine: [the benchmark of zefir-http](https://github.com/vkiryakov/zefir/blob/dev/tests/http/bench/README.md),
+on GitHub.
 
 ## Stopping gracefully
 
