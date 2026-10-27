@@ -78,6 +78,9 @@ pub const Record = record.Record;
 pub const LastRun = record.LastRun;
 pub const Run = record.Run;
 
+/// Puts jobs on a time by a key and manages them.
+pub const Client = @import("Client.zig");
+
 /// The store contract: `scheduler.MemoryStore`, `mongo.SchedulerStore` or a
 /// store of your own behind one interface.
 pub const Store = @import("Store.zig");
@@ -117,4 +120,5 @@ test {
     _ = @import("tests/faulty_store_tests.zig");
     _ = @import("tests/conformance_tests.zig");
     _ = @import("tests/job_tests.zig");
+    _ = @import("tests/client_tests.zig");
 }
