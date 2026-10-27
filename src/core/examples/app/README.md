@@ -1045,7 +1045,10 @@ to build it:
   each in a task of its own, so each has the whole budget; then the other
   beans get theirs one at a time, the last built first. The servers of
   Zefir return from `shutdown` 250 ms before the deadline, so that the
-  beans after them have time.
+  beans after them have time. The worker of zefir-scheduler does too,
+  unless a call of its store that went out before the stop has not
+  returned: `shutdown` then waits for it until the deadline itself, see
+  [its guide](../../../scheduler/examples/README.md#the-stop).
 
 The methods of App:
 
