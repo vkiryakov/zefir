@@ -2558,7 +2558,7 @@ outlive it, and under zefir.App they stop after it, see
 | at `start` | with declared jobs, `start` returns the store's error and nothing runs; without them, `start` does not touch the store |
 | at a poll | waits `poll_every × 2^k`, at most `max_backoff`, give or take 10 %, and asks again; no job runs without a claim, `stats().store_down` is true, and `wait` never returns the store's errors |
 | at a renewal | tries again every quarter of `renew_every` until its own deadline of the lease; then it cancels the run, `interrupted`, `LeaseUnconfirmed`, and gives the job back once the store answers, unless another instance took it |
-| at an outcome | tries again every quarter of `renew_every`, while the claim may still be its own and a stop leaves time, so that a short outage does not run again a job that succeeded |
+| at an outcome | tries again every quarter of `renew_every`, while the claim may still be its own and a stop leaves time, so that a short outage does not run again a job that succeeded; an error that the same outcome meets again, `InvalidArgument`, `Corrupt` or `Cancelled`, ends the tries at once, and the job comes back when its lease ends |
 | at a lost reply | the store reads the job again to learn what happened; when it cannot, the call is `OutcomeUnknown`, a claim counts as not made and its lease runs out, and a renewal or an outcome is sent again |
 | a long outage | the due jobs wait; when the store is back, each one-shot job runs once, each repeating job by its misfire policy, and no instance claims more than its free slots |
 | the store's clock jumps | ahead: leases end sooner, and a run may come twice; back: jobs and takeovers come later |

@@ -253,7 +253,9 @@ fn handler(s: *Slot) anyerror!void {
 /// claim; a change of the client that came meanwhile is decided again. A
 /// failed call goes again a quarter of `renew_every` later while the
 /// claim may still be this one's, so a short outage of the store does not
-/// run the job twice; a stop cuts that short.
+/// run the job twice; a stop cuts that short. An error that the same
+/// request meets again (`retried`) ends the tries at once: the slot is
+/// free, and the job goes back when its lease ends.
 fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, ending: Ending) void {
     const e = s.engine;
     const io = e.io;
@@ -294,6 +296,10 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
         const options: Store.CallOptions = .{ .allocator = s.arena.allocator(), .diagnostics = &diag };
         const result = e.tally(io, .finish, e.store.finish(io, e.callContext(io), &request, options), &diag) catch |err| {
             if (Store.outcome(err) == .unknown) unknown = true;
+            if (!retried(err)) {
+                log.warn("{s}/{s}: the store will not take the outcome of the run, error.{t}: {s}; the job goes back when its lease ends", .{ r.job, r.key, err, diag.message() });
+                return;
+            }
             if (s.pause(io)) continue;
             log.warn("{s}/{s}: the outcome of the run could not be written before the stop; the job goes back when its lease ends", .{ r.job, r.key });
             return;
@@ -318,6 +324,19 @@ fn finish(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, e
             },
         }
     }
+}
+
+/// Whether a finish that failed with `err` goes again: the store may take
+/// the same request later. A request that breaks a rule of the store
+/// (`InvalidArgument`, such as an error name too long for it), a record
+/// that does not read (`Corrupt`) and a cancel, which no call of a slot
+/// has (`Cancelled`), meet the same request again. The switch is the table:
+/// a new name of `StoreError` stops the build until it has a place.
+pub fn retried(err: Store.StoreError) bool {
+    return switch (err) {
+        error.Unavailable, error.DeadlineExceeded, error.Refused, error.OutcomeUnknown, error.OutOfMemory => true,
+        error.InvalidArgument, error.Corrupt, error.Cancelled => false,
+    };
 }
 
 /// Waits a quarter of `renew_every` before a finish goes again; false once

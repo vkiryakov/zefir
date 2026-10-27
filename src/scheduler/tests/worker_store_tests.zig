@@ -1,11 +1,13 @@
 //! Tests of scheduler.Worker while its store fails: no run without a
 //! claim, the pauses of the poll, a claim whose reply is lost, a finish
-//! sent again until the store takes it, and `wait`, which never returns
-//! an error of the store.
+//! sent again until the store takes it unless the store refuses it for
+//! good, a renewal that hangs, and `wait`, which never returns an error of
+//! the store.
 
 const std = @import("std");
 const testing = std.testing;
 const scheduler = @import("../root.zig");
+const Slot = @import("../worker/Slot.zig");
 const fixture = @import("worker_fixture.zig");
 const Fixture = fixture.Fixture;
 const Probe = fixture.Probe;
@@ -100,6 +102,34 @@ test "a finish that fails is repeated until it goes through" {
     try testing.expectEqual(@as(u64, 3), w.stats().store_errors);
     // Three failed before the store; the fourth reached it.
     try testing.expectEqual(@as(u32, 1), f.faulty.calls(io, .finish));
+}
+
+test "a finish the store refuses for good gives its slot back" {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var job: Lossy = .{ .probe = &probe };
+    try f.schedule(Lossy, "a", .{ .after = .zero });
+    try f.schedule(Lossy, "b", .{ .after = .zero });
+    // Every outcome breaks a rule of the store, as an error name too long
+    // for it would: sending it again changes nothing.
+    f.faulty.failNext(io, .finish, error.InvalidArgument, 1000);
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var options = quick;
+    options.workers = 1;
+    var w: scheduler.Worker(struct { job: *Lossy }) = try .init(testing.allocator, io, f.store(), .{ .job = &job }, options);
+    defer w.deinit(io);
+    try w.start(io);
+    // One slot: the second job runs once the first gave it back.
+    try reach(&probe.runs, 2, 5);
+}
+
+test "a finish goes again after an error the same request may not meet again" {
+    const retried = Slot.retried;
+    for ([_]scheduler.StoreError{ error.Unavailable, error.DeadlineExceeded, error.Refused, error.OutcomeUnknown, error.OutOfMemory }) |err| try testing.expect(retried(err));
+    for ([_]scheduler.StoreError{ error.InvalidArgument, error.Corrupt, error.Cancelled }) |err| try testing.expect(!retried(err));
 }
 
 const Timed = Job(.{ .name = "timed", .timeout = .fromSeconds(2), .retry = .{ .attempts = 1 } });
