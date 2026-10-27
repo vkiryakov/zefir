@@ -343,8 +343,9 @@ fn stallDuringRenewals(io: Io) !void {
     var paused: Pause = .{};
     defer paused.endAtLast(io);
     try paused.begin(io);
+    // The worker counts the run once its handler has ended.
     limit = .of(io, 30, "the cancel of the run");
-    while (probe.cancelled.load(.acquire) < 1) try limit.tick(io);
+    while (probe.cancelled.load(.acquire) < 1 or w.stats().lost < 1) try limit.tick(io);
     try testing.expectEqual(@as(u32, 1), probe.began.load(.acquire));
     try testing.expectEqual(@as(u64, 1), w.stats().lost);
 
