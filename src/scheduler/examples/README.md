@@ -641,11 +641,11 @@ and day of the week, or 6 with the seconds first; the time is UTC.
 - **The two day fields.** When neither the day of the month nor the day
   of the week is exactly `*`, a day that matches either one comes: `0 0
   13 * FRI` runs on the 13th of each month and on every Friday. When one
-  is `*`, the other decides.
-- **`*/2` is no `*`.** `0 0 */2 * MON` runs on the odd days of the month
-  and on Mondays. Vixie cron, the classic crontab of Unix, counts a field
-  that starts with `*` as `*` for this rule, and runs the same line only
-  on the Mondays that fall on odd days.
+  is exactly `*`, the other decides.
+- **`*/2` is no `*`.** Only `*` itself leaves the day to the other field:
+  with `*/2`, or even `*/1`, either field may match, so `0 0 */2 * MON`
+  runs on the odd days of the month and on Mondays, and `0 0 1 * */1`
+  every day.
 - A day that never comes is an error, and the compiler says why:
 
   ```text
