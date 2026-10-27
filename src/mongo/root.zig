@@ -128,4 +128,5 @@ test {
     _ = @import("tests/scheduler_store_tests.zig");
     _ = @import("tests/scheduler_records_tests.zig");
     _ = @import("tests/scheduler_claims_tests.zig");
+    _ = @import("tests/scheduler_errors_tests.zig");
 }
