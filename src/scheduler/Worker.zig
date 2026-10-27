@@ -85,7 +85,9 @@ pub fn Worker(comptime Jobs: type) type {
             return w.wait(io);
         }
 
-        /// running. Thread-safe; for health checks.
+        /// Whether the worker is running: not starting, draining or
+        /// stopped. A store that fails does not change it, since the
+        /// worker waits for the store. Thread-safe; for health checks.
         pub fn isReady(w: *const Self) bool {
             return w.engine.isReady();
         }
