@@ -255,7 +255,13 @@ pub fn start(e: *Engine, io: Io, entries: []const Entry) StartError!void {
         if (e.state_value.load(.monotonic) == .starting) e.state_value.store(if (e.stop_requested) .draining else .running, .release);
         break :stop e.stop_requested;
     };
-    log.info("{d} job types, {d} workers, instance {s}", .{ e.entries.len, e.options.workers, e.instance });
+    log.info("{d} job type{s}, {d} worker{s}, instance {s}", .{
+        e.entries.len,
+        if (e.entries.len == 1) "" else "s",
+        e.options.workers,
+        if (e.options.workers == 1) "" else "s",
+        e.instance,
+    });
     if (stop) e.wakeAll(io);
 }
 
