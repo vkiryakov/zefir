@@ -1,4 +1,4 @@
-# Writing a transport: how rpc-nats is built
+# Writing a zefir-rpc transport: how zefir-rpc-nats is built
 
 **A transport carries the calls of rpc, and this page shows how to write
 one.** zefir-rpc moves no bytes itself: a *transport* takes a call from the
@@ -11,7 +11,7 @@ rpc-nats is written. This page builds it up step by step, on its real code;
 the [guide of rpc-nats](README.md) shows how to use it.
 
 Every Zig block on this page is a part of the sources of rpc-nats, as they
-are: `zig build test-rpc-nats` fails when a block no longer is. For the
+are, and a test of zefir fails when a block no longer is. For the
 smallest start, take
 [examples/rpc-custom-transport](../../../examples/rpc-custom-transport/README.md),
 a minimal skeleton of a transport in a package of its own; this page shows
@@ -28,10 +28,8 @@ a whole one.
 - [Tests](#tests)
 - [A package of your own](#a-package-of-your-own)
 
-The code comes from these files of rpc-nats:
-[Transport.zig](../Transport.zig) · [server.zig](../server.zig) ·
-[client.zig](../client.zig) · [wire.zig](../wire.zig) ·
-[conformance_tests.zig](../conformance_tests.zig) · [client_tests.zig](../client_tests.zig)
+The code comes from these files of rpc-nats: `Transport.zig`, `server.zig`,
+`client.zig`, `wire.zig`, `conformance_tests.zig` and `client_tests.zig`.
 
 ## The transport and the engine
 
@@ -1216,9 +1214,9 @@ the deadline. T16: the delivery is at most once. T17: it needs a live
 broker. T14 runs without its busy address, and T18 without its broken link
 during `start`: the report notes both.
 
-Against a live broker, `tests/rpc-nats/e2e/conformance.zig` runs the same
-suite on zefir-nats with `.live_broker = true` and `.time_scale = 2`, and a
-harness whose `restartPeer` stops and starts the NATS server: T17 runs too.
+Against a live broker, rpc-nats runs the same suite on zefir-nats with
+`.live_broker = true` and `.time_scale = 2`, and a harness whose
+`restartPeer` stops and starts the NATS server: T17 runs too.
 
 <details>
 <summary>The checks of the suite, T1–T22</summary>
