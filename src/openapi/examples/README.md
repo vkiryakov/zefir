@@ -265,7 +265,10 @@ pub fn find(repo: *const TodoRepository, id: u64) ?Todo {
 }
 ```
 
-**`src/TodosController.zig`**, the route and its texts:
+**`src/TodosController.zig`**, the route and its texts. This controller
+of zefir-http declares its one route in `http_routes`, and describes it
+for the OpenAPI document in its `pub const openapi`, a
+`zefir.openapi.ControllerDoc`:
 
 ```zig
 //! GET /api/v1/todos/{id}: one route, and its texts for the document.
@@ -331,7 +334,10 @@ pub const AppErrors = struct {
 };
 ```
 
-**`src/Service.zig`**, the one place where the server is built:
+**`src/Service.zig`**, the one place where the server is built. It builds
+the OpenAPI document of the zefir-http server from the type of its parts,
+with `zefir.openapi.document`, and serves it with `zefir.openapi.Docs`, the
+document at `/api/openapi.json` and a page of it at `/api/docs`:
 
 ```zig
 //! Builds the server for main and for the tests. The document is built
@@ -1601,9 +1607,10 @@ $ zig build test
 src/TodosV1Controller.zig:62:16: error: missing struct field: exportCsv
 ```
 
-The tests of the http guide's service reach every route, under the Debug
-check, and compare the document with its
-[`openapi.json`](../../http/examples/openapi.json).
+The tests of the http guide's service, in
+[the Tests chapter of that guide](../../http/examples/README.md#tests),
+reach every route, under the Debug check, and the last of them compares
+the document with the service's `openapi.json`.
 
 ## The Debug check
 
