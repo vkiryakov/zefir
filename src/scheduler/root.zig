@@ -121,4 +121,5 @@ test {
     _ = @import("tests/conformance_tests.zig");
     _ = @import("tests/job_tests.zig");
     _ = @import("tests/client_tests.zig");
+    _ = @import("tests/client_change_tests.zig");
 }

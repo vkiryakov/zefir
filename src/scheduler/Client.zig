@@ -122,6 +122,128 @@ pub fn schedule(c: *const Client, io: Io, ctx: core.Context, comptime J: type, r
     };
 }
 
+pub const Changed = enum {
+    changed,
+    /// It already was so: a pause of a paused job, an unpause of a pending
+    /// one.
+    unchanged,
+    /// The job finished (its record is kept for its history): the change
+    /// does not apply to it. Give a failed job its attempts back with
+    /// `retry`, or schedule the key again.
+    finished,
+    not_found,
+};
+
+/// Removes the job in any state. A run of it goes on until its owner
+/// renews the lease, within `renew_every`, and then stops. true: the
+/// record was there.
+pub fn cancel(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, options: CallOptions) Error!bool {
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    return c.store.remove(io, ctx, &ref, .{ .allocator = arena.allocator(), .diagnostics = options.diagnostics });
+}
+
+/// A pending job pauses; a running one pauses when its run ends.
+pub fn pause(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, options: CallOptions) Error!Changed {
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    return c.change(io, ctx, arena.allocator(), ref, .pause, options.diagnostics);
+}
+
+/// The job waits again for the time it had: a time already past runs at
+/// once, and a repeating job's missed runs go by its misfire policy.
+pub fn unpause(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, options: CallOptions) Error!Changed {
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    return c.change(io, ctx, arena.allocator(), ref, .unpause, options.diagnostics);
+}
+
+/// A one-shot job moves. For a repeating job `.at` and `.after` move its
+/// next run, and `.repeat` changes its schedule; `.repeat` makes a one-shot
+/// job a repeating one. `when` is checked as `schedule` checks it. A
+/// change during a run wins over the outcome of that run.
+pub fn reschedule(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, when: When, options: CallOptions) Error!Changed {
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    const start = try c.startOf(io, arena.allocator(), when, options.diagnostics);
+    const plan: ?[]const u8 = if (when == .repeat) start.plan else null;
+    return c.change(io, ctx, arena.allocator(), ref, .{ .move = .{ .run_at = start.moment, .plan = plan } }, options.diagnostics);
+}
+
+/// A failed job waits again, due at once, with all its attempts and the
+/// same run key. A live job is `.unchanged`, a succeeded one `.finished`.
+pub fn retry(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, options: CallOptions) Error!Changed {
+    var arena: std.heap.ArenaAllocator = .init(c.gpa);
+    defer arena.deinit();
+    return c.change(io, ctx, arena.allocator(), ref, .retry, options.diagnostics);
+}
+
+/// A change of the client, by the state of the record it finds.
+const Change = union(enum) {
+    pause,
+    unpause,
+    /// reschedule: the new time, and the plan of `.repeat`.
+    move: struct { run_at: Store.Moment, plan: ?[]const u8 },
+    retry,
+
+    const Step = union(enum) {
+        set: Store.Patch,
+        answer: Changed,
+    };
+
+    /// The patch of `r`, or the answer when it needs none.
+    fn step(what: Change, r: record.Record) Step {
+        if (r.state == .succeeded or (r.state == .failed and what != .retry)) return .{ .answer = .finished };
+        return switch (what) {
+            .pause => switch (r.state) {
+                .pending => .{ .set = .{ .state = .paused } },
+                .running => if (r.pause_requested) .{ .answer = .unchanged } else .{ .set = .{ .pause_requested = true } },
+                else => .{ .answer = .unchanged },
+            },
+            .unpause => switch (r.state) {
+                .paused => .{ .set = .{ .state = .pending } },
+                .running => if (r.pause_requested) .{ .set = .{ .pause_requested = false } } else .{ .answer = .unchanged },
+                else => .{ .answer = .unchanged },
+            },
+            .move => |move| .{ .set = .{ .run_at = move.run_at, .plan = move.plan } },
+            .retry => if (r.state == .failed) .{ .set = .{ .state = .pending, .reset = true } } else .{ .answer = .unchanged },
+        };
+    }
+};
+
+/// How many races a change may lose in a row before error.Contended.
+const max_lost = 8;
+
+/// Reads the record, computes the patch by its state and writes it on
+/// condition of its revision and state. A race lost to another change is
+/// computed again from the record the store returns with it.
+fn change(c: *const Client, io: Io, ctx: core.Context, a: Allocator, ref: record.Ref, what: Change, d: ?*Diagnostics) Error!Changed {
+    const options: Store.CallOptions = .{ .allocator = a, .diagnostics = d };
+    var current = (try c.store.get(io, ctx, &ref, options)) orelse return .not_found;
+    var lost: u32 = 0;
+    while (true) {
+        const set = switch (what.step(current)) {
+            .set => |set| set,
+            .answer => |answer| return answer,
+        };
+        if (lost == max_lost) {
+            if (d) |x| x.set(null, "{d} other changes of the record came first, one after another; try again", .{max_lost});
+            return error.Contended;
+        }
+        var tag: Store.Tag = undefined;
+        io.random(&tag);
+        const request: Store.UpdateRequest = .{ .ref = ref, .expect = .{ .revision = current.revision, .state = current.state }, .set = set, .tag = tag };
+        switch (try c.store.update(io, ctx, &request, options)) {
+            .updated => return .changed,
+            .not_found => return .not_found,
+            .conflict => |now| {
+                current = now;
+                lost += 1;
+            },
+        }
+    }
+}
+
 /// The last moment of `.at`: 9999-12-31T23:59:59.999Z.
 const last_ms = 253_402_300_799_999;
 /// The longest `.after`: 100 years of 365.25 days.
