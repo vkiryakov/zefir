@@ -14,6 +14,7 @@ const mongo_guide = @import("src/mongo/examples/cases.zig");
 const odm_cases = @import("src/odm/tests/cases.zig");
 const odm_guide = @import("src/odm/examples/cases.zig");
 const scheduler_cases = @import("src/scheduler/tests/cases.zig");
+const scheduler_guide = @import("src/scheduler/examples/cases.zig");
 const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -269,6 +270,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "scheduler", .module = scheduler },
         .{ .name = "core", .module = core },
     }, target, optimize);
+    addSchedulerGuide(b, test_scheduler, .{ .core = core, .log = log, .confy = confy, .scheduler = scheduler }, target, optimize, tsan);
     const openapi_app = addHttpCompileChecks(b, test_http, http, validator, target, optimize);
     // `zig build openapi` rewrites every OpenAPI document of zefir's tests
     // and guides from the code: the tests that compare them with their
@@ -1670,6 +1672,96 @@ fn addOdmGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_odm.dependOn(&addRun(b, b.addTest(.{ .name = "odm-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The modules that the examples of the scheduler guide import here.
+/// zefir-mongo is not among them: what `test-scheduler` builds never
+/// imports it, and the programs that need mongod build in tests/scheduler.
+const SchedulerGuideModules = struct {
+    core: *std.Build.Module,
+    log: *std.Build.Module,
+    confy: *std.Build.Module,
+    scheduler: *std.Build.Module,
+};
+
+/// The examples of src/scheduler/examples/README.md, the guide of
+/// zefir-scheduler, as cases.zig there lists them: the tests on
+/// scheduler.MemoryStore, and the programs that need no server, each
+/// through example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is,
+/// every run of those programs as it printed, and only the compile errors
+/// that the compile checks of the scheduler give. The programs that need
+/// mongod import zio and zefir-mongo: only tests/scheduler builds and runs
+/// them.
+fn addSchedulerGuide(
+    b: *std.Build,
+    test_scheduler: *std.Build.Step,
+    m: SchedulerGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/scheduler/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "scheduler", .module = m.scheduler },
+    };
+    for (scheduler_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("scheduler-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_scheduler.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            // The compile checks of the scheduler, with the errors that
+            // README.md quotes: a file of another directory of src/, which
+            // a module reaches only as a module.
+            .{ .name = "scheduler-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/scheduler/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    for (scheduler_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("scheduler-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_scheduler.dependOn(&addRun(b, b.addTest(.{ .name = "scheduler-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The modules that the examples of the redis guide import here.
