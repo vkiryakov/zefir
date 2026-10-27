@@ -1,15 +1,5 @@
 # zefir-mongo: an async MongoDB driver for Zig
 
-> [!WARNING]
-> **No TLS yet: use it only in a network you trust.** zefir-mongo speaks
-> plain TCP. SCRAM, the way it authenticates, never sends the password
-> itself, but every command and every document travels unencrypted, and
-> whoever records a SCRAM exchange can try to guess the password offline.
-> Until the driver has TLS, keep mongod and its services in a closed
-> network, give each service a user of its own with a long random
-> password, and across a network you do not trust, use a tunnel:
-> WireGuard, SSH or a service mesh.
-
 **A MongoDB driver for Zig services.** MongoDB is a database of
 *documents*: records like JSON objects, kept in *collections*, such as the
 customers or the orders of a shop. A service sends it *commands*: insert
@@ -21,6 +11,16 @@ collections with the operations of MongoDB's CRUD specification:
 `insertOne`, `find`, `updateMany`, `aggregate` and the rest. It is written against
 `std.Io` only, and runs on [zio](https://github.com/lalinsky/zio) in
 production.
+
+> [!WARNING]
+> **No TLS yet: use it only in a network you trust.** zefir-mongo speaks
+> plain TCP. SCRAM, the way it authenticates, never sends the password
+> itself, but every command and every document travels unencrypted, and
+> whoever records a SCRAM exchange can try to guess the password offline.
+> Until the driver has TLS, keep mongod and its services in a closed
+> network, give each service a user of its own with a long random
+> password, and across a network you do not trust, use a tunnel:
+> WireGuard, SSH or a service mesh.
 
 > [!IMPORTANT]
 > **Not implemented yet (TODO):**
@@ -152,7 +152,8 @@ flowchart LR
 - **Documents.** A document is a set of named fields, like a JSON object,
   with more types than JSON has: 32- and 64-bit integers, dates,
   ObjectIds, binary data, decimals. On the wire and on disk it is BSON, a
-  binary form of it, which zefir-mongo reads and writes itself, see
+  binary form of it, which zefir-mongo reads and writes with
+  zefir-mongo-bson, see
   [Documents: zefir-mongo-bson](#documents-zefir-mongo-bson).
 - **`_id`.** Every document has an `_id`, unique in its collection. An
   insert gives a document without one an *ObjectId*: 12 bytes made of the
@@ -278,9 +279,9 @@ docker run --rm -p 27017:27017 mongo:9.0.4
 
 ## Quick start
 
-The customers of the shop. The program connects, makes the e-mail of a
-customer unique, signs four customers up, finds the adults, gives one a
-birthday, lets one go, and counts the adults again:
+The customers of the shop, in `quick_start.zig`. The program connects,
+makes the e-mail of a customer unique, signs four customers up, finds the
+adults, gives one a birthday, lets one go, and counts the adults again:
 
 ```zig
 //! The quick start of the guide: the customers of a shop, in the
@@ -1319,16 +1320,19 @@ cut short:     error.InvalidBson
    | an exhaustive `enum` | string, the name of its tag |
    | `?T` | null, or the value |
    | a struct | document |
-   | `[]const T`, `[N]T`, a tuple | array |
+   | `[]const T`, `[N]T` | array |
+   | a tuple | array, written only: `decode` reads an array into a slice or an `[N]T` |
    | `bson.ObjectId`, `bson.DateTime`, `bson.Binary`, `bson.Decimal128`, `bson.Timestamp`, `bson.Regex`, `bson.Null`, `bson.MinKey`, `bson.MaxKey`, `bson.Value`, `bson.RawDocument` | as they are |
    | `bson.OwnedDocument` | document, written only: `decode` reads a document into a `bson.RawDocument` |
    | `bson.DbPointer`, `bson.JavaScriptWithScope` | as they are, read only: deprecated types, never written |
 
-   `u64`, `usize`, `isize` and `c_int` stop the build, as BSON's integers
-   are signed and of fixed sizes; so do integers of more than 64 bits,
-   floats other than `f32` and `f64`, non-exhaustive enums, `??T`, unions,
-   pointers other than slices, and a type that holds itself. The message
-   names the field and says what to use instead.
+   `u64`, `usize`, `isize` and the C integer types, such as `c_int`, stop
+   the build, as BSON's integers are signed and of fixed sizes; so do
+   integers of more than 64 bits, floats other than `f32` and `f64`,
+   non-exhaustive enums, `??T`, unions, pointers other than slices, and a
+   type that holds itself. `bson.encode` also takes a pointer to an array
+   or to a tuple, such as a string literal or `&.{ a, b }`; `bson.decode`
+   does not. The message names the field and says what to use instead.
 
    This table holds wherever zefir-mongo-bson writes or reads a struct,
    so for every operation of zefir-mongo. zefir-odm narrows it for its
@@ -1344,7 +1348,7 @@ cut short:     error.InvalidBson
    and a `deleteMany` with it would delete them all. A null `_id` is the
    exception: an insert makes the `_id` there.
 3. **Decoding.** A field that the document lacks takes its default, an
-   optional one null; any other missing field is an error that names it.
+   optional one null; any other missing field is `error.MissingField`.
    Fields that the struct lacks are skipped, since servers add fields to
    their replies; `.unknown_fields = .fail` refuses them. An integer field
    takes an int32, an int64 or a whole double that fits it: a number that
@@ -1352,10 +1356,11 @@ cut short:     error.InvalidBson
    arena; `.copy_strings = false` leaves them pointing into the document.
 4. **Anonymous literals** are written where they go, with operators and
    paths as fields named `.@"$gte"` and `.@"address.city"`. A literal
-   number is an int32, or an int64 when it does not fit. A tuple is an
-   array, so the stages of a pipeline go as `.{ stage1, stage2 }`. `.{}`
-   is the empty document, which as a filter matches everything; in the
-   place of a list it is the empty list.
+   integer is an int32, or an int64 when it does not fit; a float literal,
+   such as `1.0`, is a double. A tuple is an array, so the stages of a
+   pipeline go as `.{ stage1, stage2 }`. `.{}` is the empty document,
+   which as a filter matches everything; in the place of a list it is the
+   empty list.
 5. **`bson.literal`** makes a document when the program compiles, in
    static bytes: no allocator and no `try`. It is for what does not
    change, such as a sort, a projection or the keys of an index.
@@ -1614,8 +1619,8 @@ as a whole. `partial` and the diagnostics say how far it came:
 The documents after `answered` may or may not be in. `partial.inserted_ids`
 holds the `_id` of every document, made before the first batch: look the
 doubtful ones up by them, with `.{ ._id = .{ .@"$in" = ids } }`, and send
-only the missing ones. A test shows it, with a server that goes away at
-the third batch:
+only the missing ones. A test, `import_test.zig`, shows it, with a server
+that goes away at the third batch:
 
 ```zig
 //! An import of ten customers, cut in the middle: what insertMany says
@@ -1719,8 +1724,9 @@ and a trace. `.of(ctx)` makes one.
   without one.
 
 One deadline covers all the calls made under it: in the handler of a
-request, every call takes what is left of the request's time. Tests
-against a scripted server that holds its replies show each case:
+request, every call takes what is left of the request's time. The tests
+of `deadlines_test.zig`, against a scripted server that holds its
+replies, show each case:
 
 ```zig
 //! Deadlines and cancellation, against a scripted server whose replies
@@ -1927,12 +1933,12 @@ watches them, and stops them all within one deadline. The client is a bean
 as it is. The guides of the modules write App `core.App`: it is
 `zefir.App` of the umbrella module.
 
-The module below declares what App builds. `Mongo` is a struct of
-factories, whose functions make beans: `mongoClient` the client, from the
-config that `main` hands to `init`; `usersDb` the database of the users,
-from that client and the generator of ObjectIds. The generator and the
-repository `Users` are providers, built by their `init`, whose parameters
-App passes by their types:
+`app.zig` signs a user up under App. Its module declares what App
+builds. `Mongo` is a struct of factories, whose functions make beans:
+`mongoClient` the client, from the config that `main` hands to `init`;
+`usersDb` the database of the users, from that client and the generator
+of ObjectIds. The generator and the repository `Users` are providers,
+built by their `init`, whose parameters App passes by their types:
 
 ```zig
 //! The users of the shop under zefir.App: a module declares the client of
@@ -2180,7 +2186,7 @@ the `sequence` of its documents for a write, and the number of the
 came; and `count(io, name)`, the commands of one name. With it a test
 checks what your code sent, and that it sent nothing twice.
 
-The users of the shop, as an application keeps them:
+`Users.zig`: the users of the shop, as an application keeps them:
 
 ```zig
 //! The users of the shop, as the application keeps them in the collection
@@ -2236,7 +2242,7 @@ pub fn byEmail(users: Users, io: std.Io, op: mongo.OperationContext, arena: std.
 }
 ```
 
-And their tests:
+And their tests, `users_test.zig`:
 
 ```zig
 //! Tests of the users of the shop without MongoDB. Each runs `Users` on a
@@ -2380,10 +2386,11 @@ to `odm.Registry.init`; the driver lives longer than the registry.
   waits for the sessions of a generation itself before it closes it.
 - **The operations are those of this guide.** odm's insert is an ordered
   `insertMany`; its updates are `updateOne`, `updateMany` and
-  `replaceOne`; its find is `find`, or `findOne` when it asks for one
-  document; then `countDocuments`, `createIndexes`, `aggregate` and
-  `runCommand`. odm builds the BSON, and the driver builds no command of
-  its own.
+  `replaceOne`; its deletes `deleteOne` and `deleteMany`; its find is
+  `find`, or `findOne` when it asks for one document; then
+  `countDocuments`, `createIndexes`, `aggregate` and `runCommand`. odm
+  builds the BSON, and the driver builds one command of its own, the
+  `{ping: 1}` of odm's `ping`.
 - **The errors keep their names**, and their diagnostics their texts and
   codes; a write that a unique index refused, codes 11000, 11001 and
   12582, is odm's `DuplicateKey`, with the index of the document.
@@ -2394,5 +2401,5 @@ to `odm.Registry.init`; the driver lives longer than the registry.
   aggregations and commands. Against `mongo.testing.FakeServer`, which
   keeps no data, it passes group C.
 
-The guide of odm, [src/odm/examples/README.md](../../odm/examples/README.md),
-starts from its quick start.
+[The guide of zefir-odm](../../odm/examples/README.md) starts from its
+quick start.
