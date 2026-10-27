@@ -64,7 +64,7 @@ pub fn Request(comptime J: type) type {
         when: When,
         payload: J.Payload,
         /// 1–128 bytes of UTF-8 without NUL; a field and a filter of
-        /// `list` and `history`, not a border of security.
+        /// `list` and `history`, not a security boundary.
         tenant: ?[]const u8 = null,
     };
     return struct {
@@ -176,6 +176,25 @@ pub fn retry(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, optio
     var arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer arena.deinit();
     return c.change(io, ctx, arena.allocator(), ref, .retry, options.diagnostics);
+}
+
+/// The record of `ref`, or null; its strings are in `arena`.
+pub fn get(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, arena: Allocator, options: CallOptions) Error!?record.Record {
+    return c.store.get(io, ctx, &ref, .{ .allocator = arena, .diagnostics = options.diagnostics });
+}
+
+/// The records of `filter` in the order (job, key), a page at a time;
+/// their strings are in `arena`. A record of a job type that no instance
+/// knows shows here too.
+pub fn list(c: *const Client, io: Io, ctx: core.Context, filter: record.ListFilter, page: record.Page, arena: Allocator, options: CallOptions) Error!record.RecordPage {
+    return c.store.list(io, ctx, &.{ .filter = filter, .page = page }, .{ .allocator = arena, .diagnostics = options.diagnostics });
+}
+
+/// The rows of the history of `filter`, the newest first, a page at a time;
+/// their strings are in `arena`. `.outcome = .abandoned` finds the attempts
+/// whose effects are unknown.
+pub fn history(c: *const Client, io: Io, ctx: core.Context, filter: record.HistoryFilter, page: record.Page, arena: Allocator, options: CallOptions) Error!record.RunPage {
+    return c.store.history(io, ctx, &.{ .filter = filter, .page = page }, .{ .allocator = arena, .diagnostics = options.diagnostics });
 }
 
 /// A change of the client, by the state of the record it finds.

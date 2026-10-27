@@ -4,9 +4,11 @@
 
 const std = @import("std");
 const Duration = std.Io.Duration;
+const Allocator = std.mem.Allocator;
 const Diagnostics = @import("Diagnostics.zig");
 const Instant = @import("Instant.zig");
 const job_type = @import("Job.zig");
+const payload_json = @import("payload.zig");
 
 /// Which job: the name of its type and its key. `.of(SendInvoice,
 /// "order-42")` in code, or `.{ .job = "send-invoice", .key = "order-42" }`
@@ -129,6 +131,13 @@ pub const Record = struct {
     /// Since when, by the store's clock, no instance that claimed the job
     /// could read it; null while it reads.
     unreadable_since: ?Instant,
+
+    /// The payload as `J.Payload`, with its strings in `arena`. A field
+    /// that `J.Payload` does not know is skipped, and a missing one takes
+    /// its default; a job without `Payload` reads it as `void`.
+    pub fn payloadAs(r: Record, comptime J: type, arena: Allocator) payload_json.DecodeError!job_type.PayloadOf(J) {
+        return payload_json.decode(J, arena, r.payload);
+    }
 };
 
 /// What a record shows of its last run.
