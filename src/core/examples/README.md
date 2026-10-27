@@ -10,8 +10,9 @@ does I/O: you pass it the time.
 A request comes to a gateway with a `traceparent` header and two seconds to
 get its answer. The gateway gives it a context: a deadline 2 s away, a
 cancellation token that the request owns, and a span of its own in the
-caller's trace. User Service, in the same process, takes that context as it
-is and checks it before each step. Its call to Billing, in another process,
+caller's trace. User Service, in the same process, takes that
+context with its deadline and token as they are, checks it before work
+and adds a span of its own. Its call to Billing, in another process,
 carries only the W3C headers and a budget in milliseconds: the call's own
 500 ms, never more than the request has left. Billing builds a context of
 its own from them. When the client goes away, the gateway cancels the
@@ -47,8 +48,9 @@ flowchart LR
 
 core also holds `zefir.App`, the root of an application: it builds the
 application out of modules and starts and stops its servers. App is the one
-exception to the rule above, since it holds memory, runs tasks and reads the
-clock. **[Read the guide of App →](app/README.md)**
+exception to the rule that core's primitives never allocate, read a clock
+or do I/O: it holds memory, runs tasks and reads the clock.
+**[Read the guide of App →](app/README.md)**
 
 A request's context, as [core in a minute](#core-in-a-minute) makes it:
 
@@ -144,6 +146,10 @@ pub fn build(b: *std.Build) void {
 }
 ```
 
+Every program of this guide is such a `src/main.zig`, and `zig build run`
+runs it; the two test files go next to it, as `src/context_test.zig` and
+`src/trace_test.zig`.
+
 > [!TIP]
 > core is also part of the umbrella module: with `zefir.module("zefir")`
 > imported as `zefir`, it is `@import("zefir").core`. Both are the same
@@ -216,11 +222,13 @@ original stays as it was. The fields are read-only: change them only through
 
 A server gives every request a context: the request scope owns the token,
 and the deadline is the time the server allows a request. The handler
-checks the context before work. When a check fails, the server turns the
-failure into a status through `core.ErrorCode`: 499 for a client that went
-away, 504 for a request out of time.
+checks the context before work. zefir-http gives a handler this context as
+`ctx.operation()`; once the deadline passes it answers 504, and it sends
+nothing to a client that has gone.
 
-A whole program, `http_handler.zig`; its `main` plays the server:
+A whole program, `http_handler.zig`. Its `main` plays a server of its own,
+which names each failure with `core.ErrorCode` and maps the class to a
+status, 499 for a client that went away and 504 for a request out of time:
 
 ```zig
 //! An HTTP-style handler: the server gives every request a context with a
@@ -308,6 +316,9 @@ One rule for RPC, HTTP and background jobs:
   fields of long-lived services); a context carries neither;
 - transport types (an RPC context, an HTTP request) never cross the handler
   boundary.
+
+zefir-http and zefir-rpc give a handler its `core.Context` as
+`ctx.operation()`.
 
 The repository of the program below takes the context next to its other
 parameters, and checks it before work:
@@ -610,8 +621,9 @@ those over 128 characters first, then from the right.
 - **traceparent:** version `00` exactly (55 characters, lowercase hex, no
   all-zero ids); newer versions are read the W3C way and written back as
   `00`; spaces and tabs around the value are ignored.
-- **Flags:** `sampled` and `random` are sent; unknown bits are kept in memory
-  but always sent as zero, as W3C requires.
+- **Flags:** `sampled` and `random` are sent; the unknown bits of a
+  version-00 traceparent are kept in memory but always sent as zero, as W3C
+  requires; of a newer version, only `sampled` and `random` are read.
 - **tracestate:** at most 32 entries; keys and values follow the W3C grammar;
   empty members and whitespace around them are allowed; a repeated key is
   allowed and kept (`get` returns the left-most value). Any other invalid
@@ -627,8 +639,10 @@ The transport's part:
 - join several `tracestate` fields with `,` in their order before parsing;
 - drop a `tracestate` that arrives without a valid `traceparent`;
 - do not send an empty tracestate;
-- if your transport allows only `0x20-0x7E` in values, check tracestate with
-  `parseTracestate` instead: the whitespace it keeps may contain a tab.
+- if your transport allows only `0x20-0x7E` in values, rebuild the value
+  from `trace.state.iterator()` before sending it: `parseTracestate`
+  keeps the spaces and tabs between members, so `trace.state.header`
+  may hold a tab.
 
 ## Three services
 
