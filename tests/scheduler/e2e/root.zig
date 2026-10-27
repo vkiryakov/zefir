@@ -132,24 +132,100 @@ pub const Admin = struct {
         return a.at(database).collection(name);
     }
 
+    /// Configures the fail point `failCommand` of the server to act on the
+    /// next `times` commands that `data` names: `.{ .failCommands =
+    /// .{"update"}, .appName = app, .closeConnection = true }`. The server
+    /// needs enableTestCommands=1.
+    pub fn failPoint(a: *Admin, io: Io, times: u32, data: anytype) !void {
+        try a.command(io, "admin", .{ .configureFailPoint = "failCommand", .mode = .{ .times = @as(i32, @intCast(times)) }, .data = data });
+    }
+
+    pub fn failPointOff(a: *Admin, io: Io) void {
+        a.command(io, "admin", .{ .configureFailPoint = "failCommand", .mode = "off" }) catch {};
+    }
+
+    /// Pings until the server answers, for 30 s at most: after a restart
+    /// the connections of the pool are dead, and the pool then opens one
+    /// at most every 500 ms.
+    pub fn awaitAnswer(a: *Admin, io: Io) !void {
+        const began = Io.Clock.awake.now(io);
+        while (true) {
+            if (a.at("admin").runCommand(io, .of(within(io, .fromSeconds(5))), .{ .ping = 1 }, .{ .allocator = testing.allocator })) |pong| {
+                pong.deinit();
+                return;
+            } else |err| if (began.durationTo(Io.Clock.awake.now(io)).toSeconds() >= 30) return err;
+            try io.sleep(.fromMilliseconds(100), .awake);
+        }
+    }
+
     fn at(a: *Admin, name: []const u8) mongo.Database {
         return .init(&a.client, name, &a.ids);
     }
 };
 
-/// Runs `docker` with `args` on std's test `Io`, whatever runtime the test
-/// is on, and fails unless it succeeds. From a task of zio it holds that
-/// task's executor until docker returns.
-pub fn docker(args: []const []const u8) !void {
+/// Runs `docker` with `args` and returns what it printed, from
+/// `testing.allocator`; fails unless docker succeeds. Docker runs on std's
+/// test `Io`, in a task of its own, while the scenario waits for it on
+/// `io`: a task of zio that ran it itself would hold its executor for as
+/// long as docker runs, and with one executor stop the workers under test.
+pub fn docker(io: Io, args: []const []const u8) ![]u8 {
     var argv: [8][]const u8 = undefined;
     argv[0] = "docker";
     @memcpy(argv[1..][0..args.len], args);
-    const result = try std.process.run(testing.allocator, testing.io, .{ .argv = argv[0 .. args.len + 1] });
-    defer testing.allocator.free(result.stdout);
+    var done: std.atomic.Value(bool) = .init(false);
+    var task = try testing.io.concurrent(runDocker, .{ argv[0 .. args.len + 1], &done });
+    const canceled = while (!done.load(.acquire)) {
+        io.sleep(.fromMilliseconds(10), .awake) catch break true;
+    } else false;
+    const output = task.await(testing.io);
+    if (canceled) {
+        if (output) |text| testing.allocator.free(text) else |_| {}
+        return error.Canceled;
+    }
+    return output;
+}
+
+fn runDocker(argv: []const []const u8, done: *std.atomic.Value(bool)) ![]u8 {
+    defer done.store(true, .release);
+    const result = try std.process.run(testing.allocator, testing.io, .{ .argv = argv });
     defer testing.allocator.free(result.stderr);
+    errdefer testing.allocator.free(result.stdout);
     if (!result.term.success()) {
-        std.debug.print("docker {s} failed: {s}\n", .{ args[0], result.stderr });
+        std.debug.print("docker {s} failed: {s}\n", .{ argv[1], result.stderr });
         return error.DockerFailed;
+    }
+    return result.stdout;
+}
+
+/// Pauses `container`: mongod takes what comes and answers nothing.
+pub fn pause(io: Io, container: []const u8) !void {
+    testing.allocator.free(try docker(io, &.{ "pause", container }));
+}
+
+/// Unpauses `container` and waits until its health check passes again,
+/// for `zig build e2e` waits for every server to be healthy.
+pub fn unpause(io: Io, container: []const u8) !void {
+    testing.allocator.free(try docker(io, &.{ "unpause", container }));
+    try awaitHealthy(io, container);
+}
+
+/// Restarts `container` and waits until it is healthy again: a new
+/// mongod, with an empty database, as the services keep their data in
+/// memory.
+pub fn restart(io: Io, container: []const u8) !void {
+    testing.allocator.free(try docker(io, &.{ "restart", container }));
+    try awaitHealthy(io, container);
+}
+
+/// Waits until the health check of `container` passes, for 60 s at most.
+pub fn awaitHealthy(io: Io, container: []const u8) !void {
+    const began = Io.Clock.awake.now(io);
+    while (true) {
+        const status = try docker(io, &.{ "inspect", "--format", "{{.State.Health.Status}}", container });
+        defer testing.allocator.free(status);
+        if (std.mem.eql(u8, std.mem.trim(u8, status, " \r\n"), "healthy")) return;
+        if (began.durationTo(Io.Clock.awake.now(io)).toSeconds() >= 60) return error.TestNeverHealthy;
+        try io.sleep(.fromMilliseconds(100), .awake);
     }
 }
 
@@ -161,4 +237,5 @@ test {
     _ = @import("instances.zig");
     _ = @import("takeover.zig");
     _ = @import("kill.zig");
+    _ = @import("faults.zig");
 }
