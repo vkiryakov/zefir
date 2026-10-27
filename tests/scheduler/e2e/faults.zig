@@ -20,7 +20,9 @@ const Proxy = @import("Proxy.zig");
 // Lost replies.
 
 /// The job of the scenario with lost replies; what a run does depends on
-/// its key. Its effects go straight to the server, past the proxy.
+/// its key. Its effects go straight to the server, past the proxy. Each
+/// loss is armed by the first claim of its job alone: a run that comes
+/// again after one the worker interrupted loses nothing more.
 const Lossy = struct {
     effects: mongo.Collection,
     proxy: *Proxy,
@@ -31,10 +33,15 @@ const Lossy = struct {
         const io = ctx.io();
         const start = fixture.nowMs(io);
         const key = ctx.info().key;
+        // An interrupted run goes back with its attempt not counted, so the
+        // fence tells the first claim.
+        const first = ctx.info().fence == 1;
         if (std.mem.eql(u8, key, "renew")) {
             // The reply of the next renewal is lost; the run outlasts two.
-            try self.proxy.settle(io, .fromMilliseconds(600));
-            self.proxy.loseReply(1);
+            if (first) {
+                try self.proxy.settle(io, .fromMilliseconds(600));
+                self.proxy.loseReply(1);
+            }
             try io.sleep(.fromMilliseconds(2500), .awake);
         } else if (std.mem.eql(u8, key, "taken") and ctx.info().attempt == 1) {
             // The owner is cut off: it can neither renew nor report.
@@ -42,13 +49,28 @@ const Lossy = struct {
             while (true) try io.sleep(.fromSeconds(1), .awake);
         }
         try fixture.note(self.effects, ctx, start);
-        if (std.mem.eql(u8, key, "finish")) {
+        if (std.mem.eql(u8, key, "finish") and first) {
             // The reply of this run's transition is lost.
             try self.proxy.settle(io, .fromMilliseconds(600));
             self.proxy.loseReply(1);
         }
     }
 };
+
+/// The settings of the workers of the scenario with lost replies, whose
+/// calls of the store reconnect through the proxy after the loss and read
+/// the record again, or send the renewal again, within their time: those
+/// of `fixture.options` with calls of the store within 3 s and a lease of
+/// 8 s, renewed every second. A renewal then has min(lease − 2 ×
+/// renew_every, store_timeout) = 3 s, and a run that no renewal confirms
+/// holds 7 s, more than the 3.1 s of the run of "renew"; a claim has 3 s
+/// for its round, the read after a loss included.
+fn lossyOptions(instance: []const u8, workers: u16) fixture.Options {
+    var options = fixture.options(instance, workers);
+    options.lease = .fromSeconds(8);
+    options.store_timeout = .fromSeconds(3);
+    return options;
+}
 
 const LossyJobs = struct { lossy: *Lossy };
 
@@ -102,24 +124,26 @@ fn lostReplies(io: Io) !void {
     try proxy.settle(io, .fromMilliseconds(600));
     proxy.loseReply(2);
     {
-        var w: scheduler.Worker(LossyJobs) = try .init(testing.allocator, io, p.store.store(), .{ .lossy = &lossy }, fixture.options("claims", 4));
+        var w: scheduler.Worker(LossyJobs) = try .init(testing.allocator, io, p.store.store(), .{ .lossy = &lossy }, lossyOptions("claims", 4));
         defer w.deinit(io);
+        errdefer std.debug.print("the worker of the claims counted {any}; the proxy lost {d} replies\n", .{ w.stats(), proxy.lostReplies() });
         try w.start(io);
         var limit: fixture.Limit = .of(io, 30, "the runs of c1, c2 and c3");
         while (try countEffects(io, &scene) < 3) try limit.tick(io);
         try fixture.stop(io, &w);
         try testing.expectEqual(@as(u64, 0), w.stats().store_errors);
         try testing.expectEqual(@as(u64, 0), w.stats().taken_over);
+        try testing.expectEqual(@as(u32, 3), proxy.lostReplies());
+        for (try fixture.effectsOf(io, scene.effects(), arena, Lossy.scheduler_job.name)) |effect|
+            try testing.expectEqual(@as(i64, 1), effect.attempt);
     }
-    try testing.expectEqual(@as(u32, 3), proxy.lostReplies());
-    for (try fixture.effectsOf(io, scene.effects(), arena, Lossy.scheduler_job.name)) |effect|
-        try testing.expectEqual(@as(i64, 1), effect.attempt);
 
     // renew and finish, by a worker of one slot, whose only writes are
     // then those of its run: the renewal goes once more, and the
     // transition is found applied by its tag.
-    var w: scheduler.Worker(LossyJobs) = try .init(testing.allocator, io, p.store.store(), .{ .lossy = &lossy }, fixture.options("one-slot", 1));
+    var w: scheduler.Worker(LossyJobs) = try .init(testing.allocator, io, p.store.store(), .{ .lossy = &lossy }, lossyOptions("one-slot", 1));
     defer w.deinit(io);
+    errdefer std.debug.print("the worker of one slot counted {any}; the proxy lost {d} replies\n", .{ w.stats(), proxy.lostReplies() });
     try w.start(io);
     for ([_][]const u8{ "renew", "finish" }, [_]u32{ 4, 5 }) |key, lost| {
         _ = try straight.schedule(io, within10s(io), Lossy, .{ .key = key, .when = .{ .after = .zero } }, .{});
@@ -138,15 +162,22 @@ fn lostReplies(io: Io) !void {
 
     // finish of a claim taken over: cut off, the worker cancels its run,
     // another instance takes the job over; then the reply of the late
-    // transition is lost, and the store finds it not applied.
+    // transition is lost, and it does not apply: the record stays as the
+    // instance that took it over left it.
     var taker: scheduler.Worker(LossyJobs) = try .init(testing.allocator, io, d.store.store(), .{ .lossy = &lossy }, fixture.options("taker", 1));
     defer taker.deinit(io);
+    errdefer std.debug.print("the worker that takes over counted {any}\n", .{taker.stats()});
     _ = try straight.schedule(io, within10s(io), Lossy, .{ .key = "taken", .when = .{ .after = .zero } }, .{});
     var limit: fixture.Limit = .of(io, 30, "the run of taken");
     while (!proxy.frozen.load(.acquire)) try limit.tick(io);
     try taker.start(io);
     const taken = try awaitState(io, &straight, arena, "taken", .succeeded);
     try testing.expectEqual(@as(u64, 2), taken.fence);
+    // A try of the outcome that the frozen proxy holds would reach the
+    // server after the thaw without its reply lost, and the worker would
+    // send no other: cut, it fails, and until the thaw no connection gets
+    // past its handshake, so the next write comes after the loss is armed.
+    _ = proxy.cutAll();
     try proxy.settle(io, .fromMilliseconds(600));
     proxy.loseReply(1);
     proxy.thaw();

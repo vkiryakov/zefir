@@ -14,9 +14,13 @@ const e2e = @import("root.zig");
 
 pub const Options = scheduler.Worker(struct {}).Options;
 
-/// Times that hold on a slow machine ("Time on CI"): a lease of 3 s
-/// renewed every second, a poll every 100 ms, calls of the store within
-/// 1 s, and the pauses of a failing poll up to 2 s.
+/// Short times, for workers whose calls of the store are single exchanges
+/// on a connection that is there: a lease of 3 s renewed every second, a
+/// poll every 100 ms, calls of the store within 1 s, and the pauses of a
+/// failing poll up to 2 s. A renewal has min(lease − 2 × renew_every,
+/// store_timeout) = 1 s, too little for one that must reconnect on a
+/// slow machine ("Time on CI"): a scenario whose calls do takes longer
+/// times, as the one of lost replies does.
 pub fn options(instance: []const u8, workers: u16) Options {
     return .{
         .workers = workers,
