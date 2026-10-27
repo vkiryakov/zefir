@@ -550,14 +550,20 @@ try b.useKeys(&keys);
 for ([_][]const u8{ old_token, new_token }) |token| {
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+    switch (result.outcome) {
+        .ok => |charge| try testing.expectEqualStrings("user-7", charge.customer),
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 // Step 3: the old key is gone, and a token it signed is refused.
 try b.useKeys(keys[1..]);
 var result = try b.charge(.{ .bearer = old_token });
 defer result.deinit();
-try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+switch (result.outcome) {
+    .ok => return error.TestUnexpectedResult,
+    .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+}
 ```
 
 ## Signing in
@@ -1277,9 +1283,10 @@ test "POST /api/login gives a token for 15 minutes" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const verified = try s.verifier.verify(auth.Claims, s.clock.io(), arena.allocator(), answer.access_token, .{});
-    try testing.expectEqualStrings("user-7", verified.registered.subject.?);
-    try testing.expectEqual(noon, verified.registered.issued_at.?);
-    try testing.expectEqual(15 * 60, verified.registered.expires_at - verified.registered.issued_at.?);
+    try testing.expectEqualDeep(@as(?[]const u8, "user-7"), verified.registered.subject);
+    const issued_at = verified.registered.issued_at orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(noon, issued_at);
+    try testing.expectEqual(15 * 60, verified.registered.expires_at - issued_at);
     try testing.expectEqual(1, verified.claims.roles.len);
     try testing.expectEqualStrings("buyer", verified.claims.roles[0]);
 
@@ -1287,7 +1294,7 @@ test "POST /api/login gives a token for 15 minutes" {
     var refused = try s.signIn("guess", null);
     defer refused.deinit();
     try testing.expectEqual(401, refused.status);
-    try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), refused.header("www-authenticate"));
 }
 
 test "GET /api/orders with the token sees the user" {
@@ -1302,6 +1309,7 @@ test "GET /api/orders with the token sees the user" {
     try testing.expectEqual(200, res.status);
     const mine = try std.json.parseFromSliceLeaky(OrdersController.OrdersResponse, res.arena.allocator(), res.body, .{});
     try testing.expectEqualStrings("user-7", mine.user);
+    try testing.expectEqual(1, mine.roles.len);
     try testing.expectEqualStrings("buyer", mine.roles[0]);
 }
 
@@ -1313,7 +1321,7 @@ test "without a token the request is anonymous, and a protected route says 401" 
     var res = try s.backend.request(s.clock.io(), .{ .method = .GET, .target = "/api/orders" });
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), res.header("www-authenticate"));
     // Nothing was refused: no token came.
     try testing.expectEqualStrings("", s.records.written());
 }
@@ -1330,7 +1338,7 @@ test "an expired token is 401 invalid_token with its description" {
     var res = try s.getOrders(token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token has expired\"", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer error=\"invalid_token\", error_description=\"the token has expired\""), res.header("www-authenticate"));
     // The log says why, and nothing of the token.
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=Expired claim=exp") != null);
     try testing.expect(std.mem.find(u8, s.records.written(), token) == null);
@@ -1364,7 +1372,7 @@ test "with an expired token and a wrong secret, POST /api/login refuses the secr
     var res = try s.signIn("guess", token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), res.header("www-authenticate"));
     try testing.expectEqualStrings("{\"code\":\"invalid_credentials\",\"message\":\"Wrong user or secret\"}", res.body);
 }
 
@@ -1379,7 +1387,7 @@ test "a token for billing alone is 401 at orders" {
     var res = try s.getOrders(token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token is not meant for this service\"", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer error=\"invalid_token\", error_description=\"the token is not meant for this service\""), res.header("www-authenticate"));
 }
 
 test "a token of orders without sub is 401 where a user is needed" {
@@ -1393,7 +1401,7 @@ test "a token of orders without sub is 401 where a user is needed" {
     var res = try s.getOrders(token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token lacks a required claim\"", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer error=\"invalid_token\", error_description=\"the token lacks a required claim\""), res.header("www-authenticate"));
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=MissingClaim claim=sub") != null);
 }
 
@@ -1686,8 +1694,13 @@ test "billing takes the token of orders" {
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
     // The handler charged the user of the token.
-    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
-    try testing.expectEqual(42, result.outcome.ok.order_id);
+    switch (result.outcome) {
+        .ok => |charge| {
+            try testing.expectEqualStrings("user-7", charge.customer);
+            try testing.expectEqual(42, charge.order_id);
+        },
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 test "a token without billing among its audiences is unauthenticated" {
@@ -1699,8 +1712,13 @@ test "a token without billing among its audiences is unauthenticated" {
 
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", result.outcome.failure.message);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 }
 
 test "no token is anonymous, and a method that needs a user refuses it" {
@@ -1710,8 +1728,13 @@ test "no token is anonymous, and a method that needs a user refuses it" {
 
     var result = try b.charge(.none);
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
-    try testing.expectEqualStrings("Authentication required", result.outcome.failure.message);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Authentication required", failure.message);
+        },
+    }
 }
 
 test "an expired token is unauthenticated" {
@@ -1725,7 +1748,10 @@ test "an expired token is unauthenticated" {
     b.clock.set(noon + 16 * 60);
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+    }
 }
 
 test "Basic credentials and a token without sub are unauthenticated" {
@@ -1736,8 +1762,13 @@ test "Basic credentials and a token without sub are unauthenticated" {
     // Billing takes tokens alone.
     var basic = try b.charge(.{ .basic = .{ .user = "ann", .password = "ann-secret" } });
     defer basic.deinit();
-    try testing.expectEqual(.unauthenticated, basic.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", basic.outcome.failure.message);
+    switch (basic.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 
     // A token that orders signed for nobody: no caller to charge.
     const signer: jwt.Signer = try .init(&b.orders_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
@@ -1745,8 +1776,13 @@ test "Basic credentials and a token without sub are unauthenticated" {
     defer testing.allocator.free(token);
     var nobody = try b.charge(.{ .bearer = token });
     defer nobody.deinit();
-    try testing.expectEqual(.unauthenticated, nobody.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", nobody.outcome.failure.message);
+    switch (nobody.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 }
 
 test "while the key of orders changes, billing takes the tokens of both keys" {
@@ -1767,14 +1803,20 @@ test "while the key of orders changes, billing takes the tokens of both keys" {
     for ([_][]const u8{ old_token, new_token }) |token| {
         var result = try b.charge(.{ .bearer = token });
         defer result.deinit();
-        try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+        switch (result.outcome) {
+            .ok => |charge| try testing.expectEqualStrings("user-7", charge.customer),
+            .failure => return error.TestUnexpectedResult,
+        }
     }
 
     // Step 3: the old key is gone, and a token it signed is refused.
     try b.useKeys(keys[1..]);
     var result = try b.charge(.{ .bearer = old_token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+    }
 }
 ```
 

@@ -1953,9 +1953,16 @@ test "a created user can be read back" {
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
     defer created.deinit();
-    var found = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = created.outcome.ok.id }, .{});
+    const ada = switch (created.outcome) {
+        .ok => |user| user,
+        .failure => return error.TestUnexpectedResult,
+    };
+    var found = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = ada.id }, .{});
     defer found.deinit();
-    try testing.expectEqualStrings("Ada Lovelace", found.outcome.ok.name);
+    switch (found.outcome) {
+        .ok => |user| try testing.expectEqualStrings("Ada Lovelace", user.name),
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 test "an unknown user is the failure users.not_found" {
@@ -1969,8 +1976,13 @@ test "an unknown user is the failure users.not_found" {
 
     var r = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = 42 }, .{});
     defer r.deinit();
-    try testing.expectEqual(.not_found, r.outcome.failure.code);
-    try testing.expectEqualStrings("users.not_found", r.outcome.failure.app_code);
+    switch (r.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.not_found, failure.code);
+            try testing.expectEqualStrings("users.not_found", failure.app_code);
+        },
+    }
 }
 
 test "a request against the rules is not sent" {
@@ -1985,7 +1997,10 @@ test "a request against the rules is not sent" {
     var r = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "", .email = "ada@example.com" }, .{});
     defer r.deinit();
     try testing.expect(!r.sent);
-    try testing.expectEqualStrings("name", r.outcome.failure.field.?);
+    switch (r.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqualDeep(@as(?[]const u8, "name"), failure.field),
+    }
     try testing.expectEqual(0, try repo.count(testing.io));
 }
 
@@ -2044,10 +2059,16 @@ test "deleteUser needs the permission users.delete" {
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
     defer created.deinit();
-    const id = created.outcome.ok.id;
+    const id = switch (created.outcome) {
+        .ok => |user| user.id,
+        .failure => return error.TestUnexpectedResult,
+    };
     var denied = try client.call(testing.io, .root, api.UserApi.deleteUser, .{ .id = id }, .{});
     defer denied.deinit();
-    try testing.expectEqual(.permission_denied, denied.outcome.failure.code);
+    switch (denied.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.permission_denied, failure.code),
+    }
 
     // Between calls, a test may give the callers another identity.
     auth.identity = .{ .subject = "admin", .permissions = &.{"users.delete"} };
