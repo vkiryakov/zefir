@@ -207,6 +207,54 @@ test "S17 takes a right answer or OutcomeUnknown after a lost reply" {
     try testing.expect(definite.outcome(.s17) == .passed);
 }
 
+/// A MemoryStore whose claim of two records or more, after
+/// `loseNextReply(.claim)`, gives the first record it took in place of the
+/// second, as a store that resolves the lost reply by "a running record of
+/// the owner" rather than by its mark would; every other reply is whole.
+const TwiceHarness = struct {
+    memory: MemoryStore = undefined,
+    vtable: Store.VTable = undefined,
+    armed: bool = false,
+
+    pub fn setUp(h: *TwiceHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        h.vtable = h.memory.store().vtable.*;
+        h.vtable.name = "twice";
+        h.vtable.claim = claim;
+        h.armed = false;
+        return .{ .store = .{ .ptr = &h.memory, .vtable = &h.vtable }, .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *TwiceHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+
+    pub fn loseNextReply(h: *TwiceHarness, io: Io, op: scheduler.testing.Op) !void {
+        _ = io;
+        if (op == .claim) h.armed = true;
+    }
+
+    fn claim(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.ClaimRequest, options: Store.CallOptions) scheduler.StoreError!Store.ClaimResult {
+        const h: *TwiceHarness = @fieldParentPtr("memory", memoryOf(ptr));
+        const result = try memoryOf(ptr).claim(io, ctx, request, options);
+        if (!h.armed or result.claimed.len < 2) return result;
+        h.armed = false;
+        const twice = try options.allocator.alloc(Store.Claimed, result.claimed.len);
+        @memcpy(twice, result.claimed);
+        twice[1] = twice[0];
+        return .{ .claimed = twice, .next_in = result.next_in };
+    }
+};
+
+test "S17 fails a claim that gives a record twice after a lost reply" {
+    var harness: TwiceHarness = .{};
+    var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s17} });
+    defer report.deinit();
+    try testing.expectEqualStrings("a claim with its reply lost gave s17-three/t1 twice", try failedWhy(report.outcome(.s17)));
+}
+
 /// A get that sleeps 10 s first: S3, which starts with one, cannot end in
 /// time.
 fn sleepyGet(vtable: *Store.VTable) void {

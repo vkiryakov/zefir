@@ -306,37 +306,59 @@ pub fn s17(r: *Runner) Error!void {
         try r.expect(result == .lost, "finish of a claim taken over with its reply lost answered {t}, not lost", .{result});
     try r.expectSame(took.record, try r.fetch(job, "k5"), &.{}, "a finish of a claim taken over with its reply lost");
 
-    // A claim of three: each record it gave is its own; another claim takes
-    // the rest after the lease.
+    // A claim of three: each record it gave is its own, and none twice;
+    // another claim takes the rest after the lease, and between them the
+    // two took each of the three once.
     for ([_][]const u8{ "t1", "t2", "t3" }) |key| _ = try r.create("s17-three", key, .{ .after = .zero });
     const start = r.now();
     try lose(r, .claim);
     const claimed = try answer(r, r.store().claim(io, r.ctx(), &.{ .owner = owner, .any_key = &.{}, .keyed_only = &.{"s17-three"}, .max = 3, .lease = short, .tag = r.newTag() }, r.call()), "claim");
     const given: []const Store.Claimed = if (claimed) |result| result.claimed else &.{};
     try r.expect(given.len <= 3, "a claim of at most 3 with its reply lost gave {d} records", .{given.len});
+    var by: [3]Giver = @splat(.none);
     for (given) |c| {
         try r.expectShape(c.record, "a claim with its reply lost");
         try r.expect(c.record.state == .running and std.mem.eql(u8, c.record.owner orelse "", owner) and c.record.fence == 1 and std.mem.eql(u8, c.record.job, "s17-three"), "a claim with its reply lost gave {s}/{s}, not running with its owner and fence 1", .{ c.record.job, c.record.key });
+        try noteGiven(r, &by, c.record, .lost);
         const renewed = try r.renew(c.record, owner, long);
         try r.expect(renewed == .renewed, "renew of {s}, which a claim with its reply lost gave, answered {t}", .{ c.record.key, renewed });
     }
     try r.waitPast(start.add(short));
-    var rest: usize = 0;
     const give_up = Io.Clock.awake.now(io).addDuration(r.ms(10_000));
-    while (rest < 3 - given.len) {
+    while (std.mem.findScalar(Giver, &by, .none) != null) {
         const result = try r.claim("s17-w2", &.{}, &.{"s17-three"}, 3, long);
-        for (result.claimed) |c| {
-            for (given) |g| try r.expect(!std.mem.eql(u8, g.record.key, c.record.key), "a claim took {s}, which a claim with its reply lost gave and its owner renewed", .{c.record.key});
+        for (result.claimed) |c| try noteGiven(r, &by, c.record, .again);
+        if (std.mem.findScalar(Giver, &by, .none) == null) break;
+        if (Io.Clock.awake.now(io).nanoseconds > give_up.nanoseconds) {
+            const left = std.mem.count(Giver, &by, &.{.none});
+            return r.fail("{d} records that a claim with its reply lost did not give were not claimed again within 10 s after its lease", .{left});
         }
-        rest += result.claimed.len;
-        if (rest < 3 - given.len) {
-            if (Io.Clock.awake.now(io).nanoseconds > give_up.nanoseconds) return r.fail("{d} records that a claim with its reply lost did not give were not claimed again within 10 s after its lease", .{3 - given.len - rest});
-            try r.sleep(r.ms(50));
-        }
+        try r.sleep(r.ms(50));
     }
     // After it all, the invariants hold.
     _ = try r.listAll(.{}, 7);
     _ = try r.historyAll(.{}, 7);
+}
+
+/// Which claim gave each of t1, t2 and t3 of the claim of three in S17:
+/// the one whose reply was lost, or one after its lease.
+const Giver = enum { none, lost, again };
+
+/// Notes that a claim of S17 gave `rec`, which must be t1, t2 or t3 of
+/// s17-three and given by no claim before.
+fn noteGiven(r: *Runner, by: *[3]Giver, rec: Record, giver: Giver) Error!void {
+    const keys = [_][]const u8{ "t1", "t2", "t3" };
+    const i = for (keys, 0..) |key, k| {
+        if (std.mem.eql(u8, rec.job, "s17-three") and std.mem.eql(u8, rec.key, key)) break k;
+    } else return r.fail("a claim of s17-three gave {s}/{s}, which is none of its records", .{ rec.job, rec.key });
+    switch (by[i]) {
+        .none => by[i] = giver,
+        .lost => if (giver == .lost)
+            return r.fail("a claim with its reply lost gave {s}/{s} twice", .{ rec.job, rec.key })
+        else
+            return r.fail("a claim took {s}/{s}, which a claim with its reply lost gave and its owner renewed", .{ rec.job, rec.key }),
+        .again => return r.fail("a claim took {s}/{s}, which another claim took after the lease", .{ rec.job, rec.key }),
+    }
 }
 
 /// The records of the mix: 8 keys of s20-a, 8 of s20-b, and the declared
