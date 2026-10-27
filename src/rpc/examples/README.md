@@ -1491,9 +1491,10 @@ pub const Audit = struct {
 it has left this minute in the metadata of the response,
 `ratelimit-remaining`: `ctx.setResponseMetadata` on the server,
 `result.metadata().get("ratelimit-remaining")` on the client. A real
-service keeps such counts in Redis, shared by all its replicas, through a
-client of Redis that runs on `std.Io`; the examples take a stand-in with
-the same calls, which [Authentication](#authentication) uses:
+service keeps such counts in Redis, shared by all its replicas, through
+the `redis.Client` of [zefir-redis](../../redis/examples/README.md), which
+runs on `std.Io`. The examples take a stand-in with the calls of Redis
+they need, `Store.zig`, which [Authentication](#authentication) uses:
 
 <details>
 <summary><code>Store.zig</code>: a key-value store in memory with the calls of Redis</summary>
