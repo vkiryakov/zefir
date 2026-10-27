@@ -2,6 +2,7 @@ const std = @import("std");
 const manifest = @import("build.zig.zon");
 const app_cases = @import("src/core/app/tests/cases.zig");
 const app_guide = @import("src/core/examples/app/cases.zig");
+const core_guide = @import("src/core/examples/cases.zig");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
@@ -352,25 +353,9 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_jwt.dependOn(&b.addRunArtifact(jwt_fuzz_tests).step);
 
-    // core examples: `zig build test` builds and runs them; an example that
-    // exits with an error fails the step.
-    for ([_][]const u8{ "http_handler", "rpc_handler", "services" }) |name| {
-        const example = b.addExecutable(.{
-            .name = name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(b.fmt("src/core/examples/{s}.zig", .{name})),
-                .target = target,
-                .optimize = optimize,
-                .sanitize_thread = tsan,
-                .imports = &.{
-                    .{ .name = "core", .module = core },
-                },
-            }),
-        });
-        const run = addRun(b, example, tsan);
-        run.expectExitCode(0);
-        test_core.dependOn(&run.step);
-    }
+    // The examples of the zefir-core guide: its programs and its tests, and
+    // "core in a minute" of the repository's README.md.
+    addCoreGuide(b, test_core, core, target, optimize, tsan);
 
     // log examples: `zig build test` builds and runs them, like the core ones.
     for ([_][]const u8{ "service", "config", "alerts" }) |name| {
@@ -2528,6 +2513,75 @@ fn addSecurityGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_security.dependOn(&addRun(b, b.addTest(.{ .name = "security-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The examples of src/core/examples/README.md, the guide of zefir-core, as
+/// cases.zig there lists them: the tests, and the programs, each run through
+/// example_main.zig, which exits with code 3 on a panic instead of aborting
+/// and with code 4 past its time limit; it must exit with 0. readme_test.zig
+/// then checks that README.md shows every file as it is and every run as it
+/// printed, and that README.md of the repository shows "core in a minute"
+/// and its run.
+fn addCoreGuide(
+    b: *std.Build,
+    test_core: *std.Build.Step,
+    core: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/core/examples/";
+    const imports: []const std.Build.Module.Import = &.{.{ .name = "core", .module = core }};
+    for (core_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("core-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_core.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "core in a minute" of the repository's README.md is a program of the
+    // guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (core_guide.programs) |program| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("core-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        // A program that logs with std.log prints to stderr.
+        const output = switch (program.output) {
+            .stdout => run.captureStdOut(.{}),
+            .stderr => run.captureStdErr(.{}),
+        };
+        readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = output });
+    }
+    test_core.dependOn(&addRun(b, b.addTest(.{ .name = "core-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The compile checks of security.jwt, from the lists in
