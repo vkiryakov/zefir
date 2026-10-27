@@ -1,4 +1,4 @@
-# INI
+# zefir-confy: INI files
 
 INI files are made for people: short lines, sections, and comments next to the
 values they explain. Every value is text that confy parses into its field's type.
@@ -23,7 +23,7 @@ Use INI for hand-edited settings such as per-environment overrides.
 
 ## At a glance
 
-**`main.zig`**
+The configuration struct of this page:
 
 ```zig
 const Config = struct {
@@ -44,7 +44,7 @@ const Config = struct {
 };
 ```
 
-**`config.ini`**
+A `config.ini` that sets it:
 
 ```ini
 ; Keys before the first section are top-level fields.
@@ -237,9 +237,7 @@ its default unnoticed. A key set twice is a problem too.
 ## Problems
 
 A line with a syntax error is skipped, and the rest of the file is still read,
-so one run reports everything. This file:
-
-**`config.ini`**
+so one run reports everything. This `config.ini`:
 
 ```ini
 name = zefir-demo

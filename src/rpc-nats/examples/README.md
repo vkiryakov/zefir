@@ -1,12 +1,4 @@
-# rpc-nats
-
-> [!WARNING]
-> **No TLS yet: run rpc over NATS only in a network you trust.** zefir-nats
-> speaks plain TCP, so the link to the broker carries the bodies of calls,
-> the tokens of their credentials and the passwords of the connections
-> unencrypted. Until it has TLS, put it only in a closed network, and give
-> every service NATS credentials and permissions of its own, as
-> [Permissions](#permissions) shows.
+# zefir-rpc-nats: zefir-rpc over NATS
 
 **The calls of zefir-rpc over NATS.** [NATS](../../nats/examples/README.md)
 is a message server: services publish messages to *subjects* and subscribe
@@ -19,6 +11,14 @@ client knows the name of the method, and the broker finds a server. This
 module is the transport of [rpc](../../rpc/examples/README.md) on NATS:
 everything else, the contract, the handlers, middleware, the stop, is the
 same as on any transport.
+
+> [!WARNING]
+> **No TLS yet: run rpc over NATS only in a network you trust.** zefir-nats
+> speaks plain TCP, so the link to the broker carries the bodies of calls,
+> the tokens of their credentials and the passwords of the connections
+> unencrypted. Until it has TLS, put it only in a closed network, and give
+> every service NATS credentials and permissions of its own, as
+> [Permissions](#permissions) shows.
 
 **The default transport of rpc, and the reference one.** zefir-rpc-nats is
 the network transport that zefir ships for rpc, and the reference
@@ -89,11 +89,10 @@ sequenceDiagram
 - [Memory](#memory)
 - [Tests and other NATS libraries](#tests-and-other-nats-libraries)
 
-Examples that `zig build e2e` in `tests/rpc-nats` builds and runs against
-the NATS servers of the repository's `docker-compose.yml`, checking what
-they print against this guide:
-[the users service on NATS](getting_started.zig) · [two services with permissions of their own](two_services.zig) ·
-[the users service under zefir.App](app.zig)
+Every program of this guide is shown whole, with what it printed against a
+NATS server:
+[the users service on NATS](#getting-started) · [two services with permissions of their own](#permissions) ·
+[the users service under zefir.App](#under-zefirapp)
 
 ## Installation
 
@@ -123,51 +122,57 @@ rpc shows, and the handler is a file of the service.
 
 ```zig
 // build.zig of the users service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-// The users service of the guide of rpc, from the files of zefir.
-const users_api = b.createModule(.{
-    .root_source_file = zefir.path("src/rpc/examples/users_api.zig"),
-    .target = target,
-    .optimize = optimize,
-    .imports = &.{
-        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-        .{ .name = "validator", .module = zefir.module("zefir-validator") },
-    },
-});
-const users_service = b.createModule(.{
-    .root_source_file = zefir.path("src/rpc/examples/users_service.zig"),
-    .target = target,
-    .optimize = optimize,
-    .imports = &.{
-        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-        .{ .name = "core", .module = zefir.module("zefir-core") },
-        .{ .name = "users-api", .module = users_api },
-    },
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
 
-const exe = b.addExecutable(.{
-    .name = "user-service",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    // The users service of the guide of rpc, from the files of zefir.
+    const users_api = b.createModule(.{
+        .root_source_file = zefir.path("src/rpc/examples/users_api.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-            .{ .name = "rpc-nats", .module = zefir.module("zefir-rpc-nats") },
-            .{ .name = "nats", .module = zefir.module("zefir-nats") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
+            .{ .name = "validator", .module = zefir.module("zefir-validator") },
+        },
+    });
+    const users_service = b.createModule(.{
+        .root_source_file = zefir.path("src/rpc/examples/users_service.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
             .{ .name = "core", .module = zefir.module("zefir-core") },
             .{ .name = "users-api", .module = users_api },
-            .{ .name = "users-service", .module = users_service },
         },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "user-service",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+                .{ .name = "rpc-nats", .module = zefir.module("zefir-rpc-nats") },
+                .{ .name = "nats", .module = zefir.module("zefir-nats") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+                .{ .name = "users-api", .module = users_api },
+                .{ .name = "users-service", .module = users_service },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -560,9 +565,7 @@ them, every service gets its own NATS user, and that user may only:
 - answer the requests it got, and only them: `allow_responses`.
 
 The configuration of a NATS server with these permissions, for users and
-orders, which call each other, and billing, which calls neither. The
-end-to-end tests of rpc-nats run it, and check that billing sees nothing of
-the calls of the others:
+orders, which call each other, and billing, which calls neither:
 
 ```text
 # The NATS permissions of rpc services, as the guide of rpc-nats gives them:
@@ -614,7 +617,7 @@ authorization {
 }
 ```
 
-The passwords here are those of the tests: give every service its own
+The passwords here are samples: give every service its own
 secret, and keep it out of the configuration in plain text
 (`nats server passwd` makes a bcrypt hash of it).
 
@@ -1006,8 +1009,9 @@ its `fake.conn()`, so a test runs the transport and the services on it
 without a network or Docker. Its options deny subjects to publish to or
 subscribe to (`.deny_publish`, `.deny_subscribe`), and its hooks drop the
 link and bring it back (`disconnect`, `reconnect`), close it for good
-(`close`) and delay every message (`setDelay`): the doc of
-[`testing/FakeConn.zig`](../testing/FakeConn.zig) lists them all. A test of
+(`close`) and delay every message (`setDelay`):
+[Tests](writing-a-transport.md#tests) in the tutorial lists them all, with a
+test that closes the connection while a call waits. A test of
 the handlers alone needs no NATS at all: `rpc.testing.Server` of the
 [rpc guide](../../rpc/examples/README.md#tests) runs them on the memory
 transport.
@@ -1017,13 +1021,12 @@ transport.
 `unsubscribe`, `flush`) and `isConnected`, which an adapter of the library
 fills in and hands out with `rpc_nats.Conn.init(&adapter)`, for
 `rpc_nats.Transport.initConn`.
-`rpc_nats.ZefirNats` is the one for zefir-nats; the doc of
-[`Conn.zig`](../Conn.zig) lists the rules that an adapter of another
-library keeps. Subjects, headers, statuses and the budget stay in the
-transport, so every library puts the same bytes on the wire. The
-conformance suite of rpc checks the result:
-[`conformance_tests.zig`](../conformance_tests.zig) runs it on `FakeConn`,
-and `tests/rpc-nats/e2e/conformance.zig` against a live server.
+`rpc_nats.ZefirNats` is the one for zefir-nats; the doc comment of
+`rpc_nats.Conn` lists the rules that an adapter of another library keeps.
+Subjects, headers, statuses and the budget stay in the transport, so every
+library puts the same bytes on the wire. The conformance suite of rpc
+checks the result: rpc-nats runs it on `FakeConn` and against a live NATS
+server, as [Tests](writing-a-transport.md#tests) in the tutorial shows.
 
 **Counters.** `bus.counters()` returns what the transport dropped or lost
 so far, for metrics and tests: requests without a reply subject or with one

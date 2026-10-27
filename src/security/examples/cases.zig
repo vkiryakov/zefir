@@ -1,6 +1,8 @@
 //! The examples of README.md, the guide of zefir-security. build.zig builds and
-//! runs the programs and the tests; readme_test.zig checks that README.md
-//! shows every file as it is and every run as it printed.
+//! runs the programs and the tests, and checks the claims that must not
+//! compile; readme_test.zig checks that README.md shows every file as it
+//! is, every run as it printed and the message of every claims type that
+//! does not compile.
 
 /// A setting of a program, which it reads from the environment with confy.
 pub const Setting = struct {
@@ -60,6 +62,17 @@ pub const files = [_][]const u8{
 /// The tests among `files`: `zig build test-security` runs them. The test of
 /// the contract, billing_api, runs with its package.
 pub const tests = [_][]const u8{ "auth_test", "rpc_auth_test" };
+
+/// Claims that README.md says do not compile, and the message of each
+/// after `error: `. Each file is compile_errors/<name>/auth.zig, named as
+/// the file of orders that declares `Claims`, so the message names
+/// `auth.Claims`.
+pub const CompileError = struct { name: []const u8, expect: []const u8 };
+
+pub const compile_errors = [_]CompileError{
+    .{ .name = "exp", .expect = "jwt: auth.Claims.exp: \"exp\" is a registered claim, which jwt sets and checks itself (jwt.Registered); remove the field or give it another claim name" },
+    .{ .name = "since", .expect = "jwt: auth.Claims.since: [3]u8 is not a claim type; a claim is bool, an integer, f32, f64, an enum, []const u8 or a struct, alone, as ?T or as []const T" },
+};
 
 /// The command README.md shows for a run of `program`.
 pub fn command(comptime program: Program) []const u8 {

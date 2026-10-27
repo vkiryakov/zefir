@@ -1,4 +1,4 @@
-# Writing a transport: how rpc-nats is built
+# Writing a zefir-rpc transport: how zefir-rpc-nats is built
 
 **A transport carries the calls of rpc, and this page shows how to write
 one.** zefir-rpc moves no bytes itself: a *transport* takes a call from the
@@ -11,7 +11,7 @@ rpc-nats is written. This page builds it up step by step, on its real code;
 the [guide of rpc-nats](README.md) shows how to use it.
 
 Every Zig block on this page is a part of the sources of rpc-nats, as they
-are: `zig build test-rpc-nats` fails when a block no longer is. For the
+are, and a test of zefir fails when a block no longer is. For the
 smallest start, take
 [examples/rpc-custom-transport](../../../examples/rpc-custom-transport/README.md),
 a minimal skeleton of a transport in a package of its own; this page shows
@@ -28,10 +28,8 @@ a whole one.
 - [Tests](#tests)
 - [A package of your own](#a-package-of-your-own)
 
-The code comes from these files of rpc-nats:
-[Transport.zig](../Transport.zig) · [server.zig](../server.zig) ·
-[client.zig](../client.zig) · [wire.zig](../wire.zig) ·
-[conformance_tests.zig](../conformance_tests.zig) · [client_tests.zig](../client_tests.zig)
+The code comes from these files of rpc-nats: `Transport.zig`, `server.zig`,
+`client.zig`, `wire.zig`, `conformance_tests.zig` and `client_tests.zig`.
 
 ## The transport and the engine
 
@@ -763,8 +761,8 @@ pub fn call(t: *Transport, io: std.Io, request: *const rpc.transport.Request, op
 ```
 
 - A cancelation that was pending on entry comes before any other error.
-- In Debug, `checkIo` panics when the call brings another `std.Io` than
-  the transport's first one.
+- In safe builds (Debug and ReleaseSafe), `checkIo` panics when the call
+  brings another `std.Io` than the transport's first one.
 - Without a link to the broker, the call fails at once with
   `error.Unavailable`: a request kept in a buffer through a reconnect would
   reach the server with a stale budget.
@@ -889,6 +887,9 @@ fn readInbox(t: *Transport, io: std.Io, sub: Conn.Sub) void {
     }
 }
 ```
+
+`deliver` hands one response to the call that waits in the slot of its
+number:
 
 ```zig
 fn deliver(t: *Transport, io: std.Io, message: Conn.InMsg) void {
@@ -1213,12 +1214,14 @@ So the report of rpc-nats on `FakeConn` skips three checks. T12: the
 harness has no `breakLink`, and with one T12 would still be skipped, since
 `info().reports_connection_loss` is false: NATS sees a broken link only at
 the deadline. T16: the delivery is at most once. T17: it needs a live
-broker. T14 runs without its busy address, and T18 without its broken link
-during `start`: the report notes both.
+broker. T6 and T7 run without the cancel on the server, since NATS has no
+signal that a client gave up; T9 without the body limit, since
+`max_body_bytes` is null; T14 without its busy address; and T18 without
+its broken link during `start`: the report notes each.
 
-Against a live broker, `tests/rpc-nats/e2e/conformance.zig` runs the same
-suite on zefir-nats with `.live_broker = true` and `.time_scale = 2`, and a
-harness whose `restartPeer` stops and starts the NATS server: T17 runs too.
+Against a live broker, rpc-nats runs the same suite on zefir-nats with
+`.live_broker = true` and `.time_scale = 2`, and a harness whose
+`restartPeer` stops and starts the NATS server: T17 runs too.
 
 <details>
 <summary>The checks of the suite, T1–T22</summary>

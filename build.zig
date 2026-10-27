@@ -2,10 +2,13 @@ const std = @import("std");
 const manifest = @import("build.zig.zon");
 const app_cases = @import("src/core/app/tests/cases.zig");
 const app_guide = @import("src/core/examples/app/cases.zig");
+const core_guide = @import("src/core/examples/cases.zig");
 const validator_cases = @import("src/validator/testdata/cases.zig");
 const rpc_guide = @import("src/rpc/examples/cases.zig");
+const log_guide = @import("src/log/examples/cases.zig");
 const http_cases = @import("src/http/tests/cases.zig");
 const http_guide = @import("src/http/examples/cases.zig");
+const confy_guide = @import("src/confy/examples/cases.zig");
 const jwt_cases = @import("src/security/jwt/tests/cases.zig");
 const security_guide = @import("src/security/examples/cases.zig");
 const openapi_cases = @import("src/openapi/tests/cases.zig");
@@ -315,6 +318,9 @@ pub fn build(b: *std.Build) void {
     // The guide of zefir.App: the tests of its shop, which imports the
     // umbrella module, and a program whose server does not stop.
     addAppGuide(b, test_zefir, zefir, target, optimize, tsan);
+    // The guide of zefir-confy: the tests of its pages, the code that must
+    // not compile, and its programs, which read the files of their pages.
+    addConfyGuide(b, test_confy, confy, target, optimize, tsan);
 
     addOpenapiCompileChecks(b, test_openapi, zefir, target, optimize, openapi_app);
     addOpenapiGoldens(b, test_openapi, openapi_step, zefir, target, optimize, tsan);
@@ -352,45 +358,14 @@ pub fn build(b: *std.Build) void {
     });
     fuzz_jwt.dependOn(&b.addRunArtifact(jwt_fuzz_tests).step);
 
-    // core examples: `zig build test` builds and runs them; an example that
-    // exits with an error fails the step.
-    for ([_][]const u8{ "http_handler", "rpc_handler", "services" }) |name| {
-        const example = b.addExecutable(.{
-            .name = name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(b.fmt("src/core/examples/{s}.zig", .{name})),
-                .target = target,
-                .optimize = optimize,
-                .sanitize_thread = tsan,
-                .imports = &.{
-                    .{ .name = "core", .module = core },
-                },
-            }),
-        });
-        const run = addRun(b, example, tsan);
-        run.expectExitCode(0);
-        test_core.dependOn(&run.step);
-    }
+    // The examples of the zefir-core guide: its programs and its tests, and
+    // "core in a minute" of the repository's README.md.
+    addCoreGuide(b, test_core, core, target, optimize, tsan);
 
-    // log examples: `zig build test` builds and runs them, like the core ones.
-    for ([_][]const u8{ "service", "config", "alerts" }) |name| {
-        const example = b.addExecutable(.{
-            .name = b.fmt("log-{s}", .{name}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(b.fmt("src/log/examples/{s}.zig", .{name})),
-                .target = target,
-                .optimize = optimize,
-                .sanitize_thread = tsan,
-                .imports = &.{
-                    .{ .name = "core", .module = core },
-                    .{ .name = "log", .module = log },
-                },
-            }),
-        });
-        const run = addRun(b, example, tsan);
-        run.expectExitCode(0);
-        test_log.dependOn(&run.step);
-    }
+    // The examples of the zefir-log guide: its programs and their runs,
+    // the program that posts to Slack, which is only built, and the calls
+    // that must not compile.
+    addLogGuide(b, test_log, .{ .core = core, .confy = confy, .log = log }, target, optimize, tsan);
 
     // log panic programs: `flush`, `shutdown` or `unsubscribe` called from a
     // handler or the writer thread panics in safe builds. Each program must
@@ -1245,6 +1220,11 @@ pub fn build(b: *std.Build) void {
     }
     test_rpc_nats.dependOn(&addRun(b, rpc_nats_guide, tsan).step);
 
+    // The guide of nats shows its examples as they are, and its snippets
+    // compile. The programs need NATS servers and zio: tests/nats builds
+    // and runs them.
+    addNatsGuide(b, test_nats, nats, log, target, optimize, tsan);
+
     addRpcGuide(b, test_rpc, .{
         .core = core,
         .validator = validator,
@@ -1442,6 +1422,50 @@ fn addRpcGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_rpc.dependOn(&addRun(b, b.addTest(.{ .name = "rpc-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The guide of zefir-nats, src/nats/examples/README.md: fragments.zig, the
+/// snippets of the guide that are no part of a whole program, built as a
+/// test that runs none of them, and readme_test.zig, which checks that
+/// README.md shows every file of the examples as it is, and the
+/// repository's README.md its "nats in a minute". The programs need NATS
+/// servers and zio: tests/nats builds and runs them, and checks their runs
+/// against both.
+fn addNatsGuide(
+    b: *std.Build,
+    test_nats: *std.Build.Step,
+    nats: *std.Build.Module,
+    log: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/nats/examples/";
+    const fragments = b.addTest(.{
+        .name = "nats-guide-fragments",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "fragments.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .imports = &.{
+                .{ .name = "nats", .module = nats },
+                .{ .name = "log", .module = log },
+            },
+        }),
+    });
+    test_nats.dependOn(&addRun(b, fragments, tsan).step);
+    const readme = b.addTest(.{
+        .name = "nats-guide-readme",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+        }),
+    });
+    readme.root_module.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    test_nats.dependOn(&addRun(b, readme, tsan).step);
 }
 
 /// The modules that the examples of the mongo guide import here.
@@ -1861,13 +1885,29 @@ fn addValidatorTests(
     test_step.dependOn(&check_list.step);
 
     // The examples of src/validator/examples/README.md: a test must pass, and
-    // a program must exit with 0 and log each line of its `records`. Each
-    // record starts with a timestamp, the only part that changes from run to
-    // run, so a line must follow the "Z" that ends a timestamp. readme_test.zig
-    // checks that README.md shows every example and a run of every program.
-    // The programs are not part of `compile_step`: zefir-log uses 64-bit
-    // atomics, which Zig does not support on x86-linux-musl, the 32-bit
-    // target of CI.
+    // a program runs through example_main.zig, which exits with code 3 on a
+    // panic instead of aborting and with code 4 after 120 s, and must exit
+    // with 0. runs_test.zig then checks that the program logged its `records`
+    // and nothing else, each line after a timestamp, the only part that
+    // changes from run to run. readme_test.zig checks that README.md shows
+    // every example and a run of every program, and that the guide shows no
+    // Zig code that is not a part of its examples. The programs and runs_test
+    // are not part of `compile_step`: zefir-log uses 64-bit atomics, which
+    // Zig does not support on x86-linux-musl, the 32-bit target of CI.
+    const cases = b.createModule(.{
+        .root_source_file = b.path("src/validator/testdata/cases.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const runs_test = b.addTest(.{
+        .name = "runs_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/validator/examples/runs_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "cases", .module = cases }},
+        }),
+    });
     for (validator_cases.examples) |example| {
         const example_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("src/validator/examples/{s}.zig", .{example.name})),
@@ -1878,13 +1918,19 @@ fn addValidatorTests(
                 .{ .name = "log", .module = log },
             },
         });
-        if (example.records) |records| {
-            const example_exe = b.addExecutable(.{ .name = example.name, .root_module = example_module });
+        if (example.records != null) {
+            const example_exe = b.addExecutable(.{
+                .name = example.name,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/validator/examples/example_main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "example", .module = example_module }},
+                }),
+            });
             const example_run = addRun(b, example_exe, tsan);
-            var lines = std.mem.splitScalar(u8, records, '\n');
-            while (lines.next()) |line| {
-                if (line.len > 0) example_run.expectStdOutMatch(b.fmt("Z {s}\n", .{line}));
-            }
+            example_run.expectExitCode(0);
+            runs_test.root_module.addAnonymousImport(b.fmt("{s}.out", .{example.name}), .{ .root_source_file = example_run.captureStdOut(.{}) });
             test_step.dependOn(&example_run.step);
         } else {
             const example_test = b.addTest(.{ .name = example.name, .root_module = example_module });
@@ -1892,19 +1938,20 @@ fn addValidatorTests(
             compile_step.dependOn(&example_test.step);
         }
     }
+    test_step.dependOn(&b.addRunArtifact(runs_test).step);
     const readme_test = b.addTest(.{
         .name = "readme_test",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/validator/examples/readme_test.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "cases", .module = b.createModule(.{
-                .root_source_file = b.path("src/validator/testdata/cases.zig"),
-                .target = target,
-                .optimize = optimize,
-            }) }},
+            .imports = &.{.{ .name = "cases", .module = cases }},
         }),
     });
+    // strings.md shows the options of v.strongPassword as strings.zig
+    // declares them. A test embeds no file outside the directory of its
+    // module, so the file comes to it as an anonymous import, under its name.
+    readme_test.root_module.addAnonymousImport("strings.zig", .{ .root_source_file = b.path("src/validator/strings.zig") });
     test_step.dependOn(&b.addRunArtifact(readme_test).step);
     compile_step.dependOn(&readme_test.step);
 }
@@ -2434,6 +2481,109 @@ fn addOpenapiCompileChecks(
     }
 }
 
+/// The examples of the guide of zefir-confy, src/confy/examples/README.md
+/// and its pages, as cases.zig there lists them: the tests of the pages;
+/// the code that must not compile, each file with its message; and the
+/// programs, run once per run of cases.zig with its variables, through
+/// example_main.zig, which exits with code 3 on a panic instead of aborting
+/// and with code 4 past its time limit. A program that reads files works in
+/// their directory under testdata/: it gets the absolute path from the
+/// build (`fixtures`) and goes there itself, so the run starts where every
+/// run does (see addOpenapiGoldens); the files are inputs of its runs. Each
+/// run must exit with the code of its case. readme_test.zig then checks
+/// that the pages, and README.md of the repository, show every file as it
+/// is and every run as it printed to stderr, where std.log writes.
+fn addConfyGuide(
+    b: *std.Build,
+    test_confy: *std.Build.Step,
+    confy: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/confy/examples/";
+    const imports: []const std.Build.Module.Import = &.{.{ .name = "confy", .module = confy }};
+    for (confy_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("confy-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_confy.dependOn(&addRun(b, tests, tsan).step);
+    }
+    // Each file is compiled (never run) and passes only when the
+    // compilation fails with an error whose message is `expect`, from its
+    // start: `error: ` in front of it, as in addHttpCompileChecks.
+    for (confy_guide.compile_errors) |code| {
+        const t = b.addTest(.{
+            .name = b.fmt("confy-guide-{s}", .{code.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "compile_errors/{s}.zig", .{code.name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{code.expect}) };
+        test_confy.dependOn(&t.step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "confy in a minute" of the repository's README.md is a program of
+    // the guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (confy_guide.programs) |program| {
+        const files_dir = if (program.dir) |name| b.fmt(dir ++ "testdata/{s}/", .{name}) else "";
+        const fixtures = b.addOptions();
+        fixtures.addOption([]const u8, "dir", if (program.dir == null) "" else b.root.joinString(b.allocator, files_dir) catch @panic("OOM"));
+        const exe = b.addExecutable(.{
+            .name = b.fmt("confy-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        exe.root_module.addOptions("fixtures", fixtures);
+        for (program.runs, 0..) |case, i| {
+            const run = addRun(b, exe, tsan);
+            // A run gets the APP_ variables of its case and none of the
+            // shell's: the programs read them, and Zig caches the variables
+            // of a run with the configuration, past an unset in the shell.
+            const env = run.getEnvMap();
+            var k = env.count();
+            while (k > 0) {
+                k -= 1;
+                const key = env.keys()[k];
+                if (std.ascii.startsWithIgnoreCase(key, "APP_")) _ = env.swapRemove(key);
+            }
+            for (case.env) |pair| run.setEnvironmentVariable(pair[0], pair[1]);
+            for (program.files) |file| run.addFileInput(b.path(b.fmt("{s}{s}", .{ files_dir, file })));
+            run.expectExitCode(case.exit);
+            readme.addAnonymousImport(b.fmt("{s}.{d}.err", .{ program.name, i }), .{ .root_source_file = run.captureStdErr(.{}) });
+        }
+    }
+    test_confy.dependOn(&addRun(b, b.addTest(.{ .name = "confy-guide-readme", .root_module = readme }), tsan).step);
+}
+
 /// The modules that the examples of the security guide import.
 const SecurityGuideModules = struct {
     core: *std.Build.Module,
@@ -2448,11 +2598,12 @@ const SecurityGuideModules = struct {
 /// The examples of src/security/examples/README.md, the guide of
 /// zefir-security, as cases.zig there lists them: the tests of the
 /// services, on the backend of zefir-http and the server of zefir-rpc in
-/// memory, and the programs, each run with its settings in the environment
-/// through example_main.zig, which exits with code 3 on a panic instead of
-/// aborting and with code 4 past its time limit; it must exit with 0.
-/// readme_test.zig then checks that README.md shows every file as it is
-/// and every run as it printed.
+/// memory, the claims that must not compile, and the programs, each run
+/// with its settings in the environment through example_main.zig, which
+/// exits with code 3 on a panic instead of aborting and with code 4 past
+/// its time limit; it must exit with 0. readme_test.zig then checks that
+/// README.md shows every file as it is, every run as it printed and the
+/// message of every claims type that does not compile.
 fn addSecurityGuide(
     b: *std.Build,
     test_security: *std.Build.Step,
@@ -2498,6 +2649,21 @@ fn addSecurityGuide(
         });
         test_security.dependOn(&addRun(b, tests, tsan).step);
     }
+    // The claims of README.md that must not compile: compiled, never run,
+    // and passing only with their message.
+    for (security_guide.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = b.fmt("security-guide-error-{s}", .{fixture.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "compile_errors/{s}/auth.zig", .{fixture.name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_security.dependOn(&t.step);
+    }
 
     const readme = b.createModule(.{
         .root_source_file = b.path(dir ++ "readme_test.zig"),
@@ -2528,6 +2694,75 @@ fn addSecurityGuide(
         readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = run.captureStdOut(.{}) });
     }
     test_security.dependOn(&addRun(b, b.addTest(.{ .name = "security-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// The examples of src/core/examples/README.md, the guide of zefir-core, as
+/// cases.zig there lists them: the tests, and the programs, each run through
+/// example_main.zig, which exits with code 3 on a panic instead of aborting
+/// and with code 4 past its time limit; it must exit with 0. readme_test.zig
+/// then checks that README.md shows every file as it is and every run as it
+/// printed, and that README.md of the repository shows "core in a minute"
+/// and its run.
+fn addCoreGuide(
+    b: *std.Build,
+    test_core: *std.Build.Step,
+    core: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/core/examples/";
+    const imports: []const std.Build.Module.Import = &.{.{ .name = "core", .module = core }};
+    for (core_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("core-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_core.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "core in a minute" of the repository's README.md is a program of the
+    // guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (core_guide.programs) |program| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("core-guide-{s}", .{program.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{program.name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        // A program that logs with std.log prints to stderr.
+        const output = switch (program.output) {
+            .stdout => run.captureStdOut(.{}),
+            .stderr => run.captureStdErr(.{}),
+        };
+        readme.addAnonymousImport(b.fmt("{s}.out", .{program.name}), .{ .root_source_file = output });
+    }
+    test_core.dependOn(&addRun(b, b.addTest(.{ .name = "core-guide-readme", .root_module = readme }), tsan).step);
 }
 
 /// The compile checks of security.jwt, from the lists in
@@ -2575,4 +2810,103 @@ fn addJwtCompileChecks(
         });
         test_step.dependOn(&t.step);
     }
+}
+
+/// The modules that the examples of the log guide import.
+const LogGuideModules = struct {
+    core: *std.Build.Module,
+    confy: *std.Build.Module,
+    log: *std.Build.Module,
+};
+
+/// The examples of src/log/examples/README.md, the guide of zefir-log, as
+/// cases.zig there lists them. Every program runs through example_main.zig,
+/// which exits with code 3 on a panic instead of aborting and with code 4
+/// past its time limit, and must exit with 0; what it prints on stdout and
+/// on stderr goes to readme_test.zig. The program that posts to Slack is
+/// only built, and each call that must not compile has to fail with the
+/// error the guide shows. readme_test.zig then checks that README.md shows
+/// every file as it is, every run as it printed and those calls with their
+/// errors, and that the README.md of the repository shows "log in a
+/// minute" and its run.
+fn addLogGuide(
+    b: *std.Build,
+    test_log: *std.Build.Step,
+    m: LogGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/log/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "log", .module = m.log },
+    };
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+    });
+    // "log in a minute" of the repository's README.md is a program of the
+    // guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    // Each program is the reader's src/main.zig: it runs from a copy named
+    // main.zig, so the call site it logs names main.zig, as there.
+    const copies = b.addWriteFiles();
+    for (log_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("log-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = copies.addCopyFile(b.path(b.fmt(dir ++ "{s}.zig", .{name})), b.fmt("{s}/main.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+        readme.addAnonymousImport(b.fmt("{s}.err", .{name}), .{ .root_source_file = run.captureStdErr(.{}) });
+    }
+    // Built, not run: a run would post to a Slack webhook.
+    for (log_guide.compiled) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("log-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_log.dependOn(&exe.step);
+    }
+    // Each test of compile_errors.zig, compiled on its own, must fail with
+    // the error of its case, from its start: `error: ` in front of it.
+    const compile_errors = b.createModule(.{
+        .root_source_file = b.path(dir ++ "compile_errors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    });
+    for (log_guide.compile_errors, 0..) |case, i| {
+        const t = b.addTest(.{
+            .name = b.fmt("log-guide-compile-error-{d}", .{i}),
+            .root_module = compile_errors,
+            .filters = &.{case.name},
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{case.text}) };
+        test_log.dependOn(&t.step);
+    }
+    test_log.dependOn(&addRun(b, b.addTest(.{ .name = "log-guide-readme", .root_module = readme }), tsan).step);
 }

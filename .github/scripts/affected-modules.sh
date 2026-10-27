@@ -19,10 +19,14 @@
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
 # module.
-# Documentation outside src/ (*.md files and docs/) affects none, but
-# README.md at the root: its "rpc in a minute" and "http in a minute" are
-# programs of the guides of rpc and of http, which their tests check, so it
-# counts as both.
+# Documentation outside src/ and the paths above (*.md files,
+# CONTRIBUTING.md among them, and docs/) affects none, and neither does
+# context7.json, which says what Context7 indexes of the guides. README.md
+# at the root does: its "confy in a minute", "core in a minute", "log in a
+# minute", "nats in a minute", "rpc in a minute" and "http in a minute"
+# are programs of the guides of those modules, which their tests check, so
+# it counts as all six; with core among them, it affects every module but
+# mongo-bson.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
@@ -107,6 +111,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
     while IFS= read -r path; do
         case $path in
         "") ;;
+        context7.json) ;;
         build.zig | build.zig.zon | src/zefir.zig | .github/*) all=true ;;
         src/*/*)
             module=${path#src/}
@@ -127,7 +132,7 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/app/*) changed="$changed zefir" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
         docker-compose.yml) changed="$changed nats rpc-nats mongo odm redis" ;;
-        README.md) changed="$changed rpc http" ;;
+        README.md) changed="$changed rpc http core log confy nats" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac

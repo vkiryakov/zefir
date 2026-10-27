@@ -50,18 +50,31 @@ call did not run.
 
 ## Why the application gives the transport its zefir
 
-The module `rpc-mailbox` imports `zefir-rpc` and `zefir-core`, but its
-`build.zig` gives it no imports: the application adds them from its own
-zefir dependency.
+The module `rpc-mailbox` imports `zefir-rpc` and `zefir-core`, and the
+application gives them to it from its own zefir dependency: the package's
+`build.zig` adds them only for the package's own tests, when it is built
+by itself. In `consumer/`, the application side of this sample,
+`build.zig` starts its `build` function with:
 
 ```zig
-// build.zig of the application
+const target = b.standardTargetOptions(.{});
+const optimize = b.standardOptimizeOption(.{});
 const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
 const mailbox = b.dependency("rpc_mailbox", .{ .target = target, .optimize = optimize });
+
+// One zefir in the build: the transport takes the application's.
 const mailbox_module = mailbox.module("rpc-mailbox");
 mailbox_module.addImport("zefir-rpc", zefir.module("zefir-rpc"));
 mailbox_module.addImport("zefir-core", zefir.module("zefir-core"));
+const imports: []const std.Build.Module.Import = &.{
+    .{ .name = "zefir-core", .module = zefir.module("zefir-core") },
+    .{ .name = "zefir-rpc", .module = zefir.module("zefir-rpc") },
+    .{ .name = "rpc-mailbox", .module = mailbox_module },
+};
 ```
+
+The modules of the application, here its tests, take `imports`, so that
+they and the transport share one zefir-rpc and one zefir-core.
 
 If the package took zefir from a dependency of its own, and the
 application pinned another version, the build would hold two different
@@ -74,35 +87,163 @@ The package still names zefir in its `build.zig.zon`, pinned to one
 release and marked lazy: only its own tests use it. An application that
 depends on the package never fetches it.
 
-## Running the tests
+## An application on the mailbox
 
-```sh
-zig build test              # here: the suite against the zefir the package pins
-cd consumer && zig build test   # as an application builds it, with zefir of this checkout
+An application hands the two sides of the transport to zefir-rpc, each as
+`.transport`: the server side to `rpc.Server`, the client side to
+`rpc.Client`. A test of `consumer/` serves a contract and calls it over
+the mailbox, on one broker. `api.UserApi` there is a contract with one
+method, `getUser`; `UserHandler` serves it, as in the
+[guide of rpc](../../src/rpc/examples/README.md#getting-started); and
+`far(io)` is a deadline 30 s away:
+
+```zig
+test "rpc.Server and rpc.Client over the mailbox" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var broker: mailbox.Broker = .init(gpa, .{});
+    defer broker.deinit();
+
+    var server_side: mailbox.Server = .init(&broker);
+    var users: UserHandler = .{};
+    var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = server_side.serverTransport() });
+    defer server.deinit(io);
+    try server.start(io);
+
+    var client_side: mailbox.Client = try .init(&broker, .{});
+    // Before connect: deinit also frees a client whose connect failed.
+    defer client_side.deinit(io);
+    try client_side.connect(io);
+    var client = try rpc.Client.init(gpa, .{}, .{ .transport = client_side.clientTransport() });
+    defer client.deinit();
+
+    var found = try client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});
+    defer found.deinit();
+    switch (found.outcome) {
+        .ok => |user| try std.testing.expectEqualStrings("Ada", user.name),
+        .failure => return error.TestUnexpectedResult,
+    }
+
+    var missing = try client.call(io, .root, api.UserApi.getUser, .{ .id = 2 }, .{});
+    defer missing.deinit();
+    switch (missing.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try std.testing.expectEqualStrings("users.not_found", failure.app_code),
+    }
+
+    // Once the server stops, its queue is gone: the call surely did not run.
+    try server.shutdown(io, far(io));
+    try std.testing.expectError(error.Unavailable, client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{}));
+}
 ```
 
-`consumer/` is the application side: its `build.zig` wires the modules as
-above, and its tests run the conformance suite on the transport, checks of
-its own (the deadline, the peer, the `std.Io` of a call), a contract
-through `rpc.Server` and `rpc.Client` over it, and the tests in
-`src/root.zig` (where a reply goes, a message of the wrong kind). CI runs
-it on every change to rpc, against the commit it checks, not the one the
-package pins: that the package builds there shows it does not force its
-own zefir.
+- **The server side**, `mailbox.Server`, does no I/O when it is made and
+  has no `deinit`: `rpc.Server` starts it in `start`, and drains and
+  closes it when it stops, in `shutdown` or in its own `deinit`.
+- **`connect`.** `mailbox.Client.init` does no I/O either: it only takes
+  room for the calls that may wait. `connect(io)` declares the client's
+  reply queue, under a name drawn from `io.randomSecure`, and starts the
+  task that reads it; a call before it gets `error.Unavailable`, and a
+  second `connect` does nothing. From `connect` on, the client stays where
+  it is, and its calls come on the `io` of `connect`: a safe build panics
+  on another one.
+- **The order of the `deinit` calls** is the reverse of the `defer`s:
+  `rpc.Client` first, which borrows its transport; then `mailbox.Client`,
+  which takes its reply queue out of the broker and ends its task, with
+  no call in flight; then `rpc.Server`, which stops and closes the server
+  side; the broker last, once no queue is left in it. `client_side.deinit`
+  is deferred before `connect`, so that it frees a client whose `connect`
+  failed too.
+- **A server that stopped** has no queue: a call to it gets
+  `error.Unavailable` at once, and surely did not run.
 
-The suite reports, for the mailbox:
+## The conformance suite
+
+`rpc.testing.conformance.run` checks that a transport keeps the rules the
+engine relies on, T1–T22: zefir's memory and NATS transports pass it, and
+so does the mailbox. It takes a harness, `testing.Harness` in
+`src/root.zig`, which makes a fresh broker with a server side and a client
+side for every check, and returns a report. The test of `consumer/`:
+
+```zig
+test "the mailbox passes the conformance suite of rpc" {
+    var harness: mailbox.testing.Harness = .{};
+    var report = try rpc.testing.conformance.run(std.testing.io, std.testing.allocator, &harness, .{});
+    defer report.deinit();
+    if (report.failedCount() > 0) {
+        std.debug.print("{f}", .{&report});
+        return error.TestUnexpectedResult;
+    }
+    // Skipped are only the checks the mailbox cannot take: T12 (it does not
+    // see a broken link at once), T16 (it delivers at most once) and T17
+    // (it needs a live broker that restarts).
+    for ([_]rpc.testing.conformance.Check{ .t12, .t16, .t17 }) |check| {
+        try std.testing.expect(report.outcome(check) == .skipped);
+    }
+    try std.testing.expectEqual(@as(usize, 3), report.skippedCount());
+}
+```
+
+The package's own `zig build test` runs the suite with the zefir that its
+`build.zig.zon` pins. The `zig build test` of `consumer/` runs it with the
+application's zefir, together with the test of
+[An application on the mailbox](#an-application-on-the-mailbox), checks of
+its own (the deadline, the peer, the `std.Io` of a call) and the tests in
+`src/root.zig` (where a reply goes, a message of the wrong kind).
+
+`consumer/build.zig.zon` takes zefir by the relative path `../../..`, which
+leads nowhere in a copy of this directory. In a copy, `consumer/` is your
+application: delete the `.zefir` entry of its `build.zig.zon`, then run
+`zig fetch --save` in `consumer/`, as
+[Installation](../../src/rpc/examples/README.md#installation) of the guide
+of rpc shows.
+
+The report of the suite on the mailbox, as `{f}` writes it:
 
 ```text
 rpc conformance of "mailbox": 19 passed, 0 failed, 3 skipped
-  …
+  passed   T1   echo: bodies byte for byte, empty, not UTF-8
+  passed   T2   metadata: order, repeated keys, empty values, reserved keys
+  passed   T3   failures: every code, app code, message, field and failure body
+  passed   T4   the head on the server: route, request id, codec, peer
+  passed   T5   budget: the server sees the time left; a past deadline is not sent
+  passed   T6   client deadline: Timeout on time; a late response is not seen
+  passed   T7   canceling the caller: Canceled once; the server is told
+  passed   T8   64 calls at once with random delays: responses not mixed up
+  passed   T9   sizes: a body at the limit and one byte over; response limits
+  passed   T10  unknown route: unimplemented or Unavailable
+  passed   T11  drain: calls in flight answered, new ones not taken
   skipped  T12  broken link: ConnectionLost, Unavailable, calls canceled: the harness has no breakLink
+  passed   T13  server discipline under the recording dispatcher
+  passed   T14  lifecycle: a busy address, drain and close twice
+  passed   T15  memory: the caller's buffers and allocator after return
   skipped  T16  at-least-once delivery: one response per call: info().delivery is not at_least_once
   skipped  T17  restart of the other side: new calls go through: it needs a live broker: options.live_broker is false
+  passed   T18  reentrance: an answer before start returns, a cancel during start, start refused
+  passed   T19  drain, close and release keep a cancelation of their task
+  passed   T20  close while a request is on its way: abandon, bounded close
+  passed   T21  a refusal at admission arrives with refused = true
+  passed   T22  metadata of middleware passes unchanged
+  note     T6   the cancel on the server after Timeout was not checked: info().propagates_cancellation is false
+  note     T7   the cancel on the server was not checked: info().propagates_cancellation is false
+  note     T18  a broken link during start was not checked: it needs harness.breakLink and info().reports_connection_loss
+  defaults left by the transport: rpc.ServerTransport.isReady
 ```
 
+A check that the transport or its harness cannot take is skipped, with
+the reason. T12, a broken link, needs `breakLink` in the harness and a
+client side that sees a broken link at once,
+`info().reports_connection_loss`; T16 is for a transport that delivers a
+request at least once; T17 needs a live broker that the harness restarts.
+A note names a part of a check that did not run: the mailbox has no
+signal that a client gave up (`info().propagates_cancellation`), and no
+broken link. The last line names an entry the transport left at its
+default: the mailbox has no `isReady` of its own.
+
 A transport for a real broker adds `breakLink` and `restartPeer` to its
-harness (`testing.Harness` in `src/root.zig`) and runs the suite against
-the broker with `.live_broker = true`.
+harness, sets `reports_connection_loss` in `info()` when its client sees a
+broken link at once, and runs the suite against the broker with
+`.live_broker = true`.
 
 ## From the sample to a real broker
 

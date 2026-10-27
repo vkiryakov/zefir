@@ -1,0 +1,6 @@
+{
+  "nmae": "zefir-demo",
+  "log_level": "verbose",
+  "http": { "port": 70000 },
+  "db": { "url": "postgres://db.internal:5432/app", "password": 12345 }
+}

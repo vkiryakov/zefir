@@ -1,0 +1,5 @@
+{
+  "name": "zefir-demo",
+  "http": { "port": 8080, },
+  "db": { "url": "postgres://db.internal:5432/app", "password": "change-me" }
+}

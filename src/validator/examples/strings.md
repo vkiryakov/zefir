@@ -1,4 +1,4 @@
-# Strings
+# zefir-validator: Strings
 
 Rules for string fields: `v.minLength`, `v.maxLength` and `v.length` count
 characters (code points), `v.minBytes` and `v.maxBytes` count bytes, `v.utf8`
@@ -7,6 +7,8 @@ check the bytes, three rules check the widths of validator.js, `v.contains` and
 `v.notContains` look for a substring, and `v.strongPassword` checks a password.
 
 ```zig
+const v = @import("validator");
+
 const SignUp = struct {
     name: []const u8,
     login: []const u8,
@@ -73,8 +75,11 @@ const SignUp = struct {
   [Preconditions](README.md#preconditions)). To word that case, put
   `v.utf8.withMessage("...")` first in the tuple. The other rules read bytes,
   never decode, and have no precondition: a byte of invalid UTF-8 is a byte.
-- **No transformations.** The rules only read the value: no trimming, no case
-  folding and no Unicode normalization.
+- **The rules only read the value**: no trimming, no case folding and no
+  Unicode normalization. To trim or change the case first, put `v.trim`,
+  `v.toLower` or `v.toUpper` before the rules of the entry, and call
+  `v.transform` before the check: `v.check` and `v.checkAll` never run
+  transforms ([Names and transforms](README.md#names-and-transforms)).
 - **Contradictions are compile errors.** Bounds of one measure in one tuple
   that let no value pass do not compile
   ([D60](class_validator.md#deviations-from-validatorjs)).
@@ -105,24 +110,26 @@ Every rule of this page without a parameter, and `v.strongPassword`, has a
 predicate for code outside `field_rules` (`validateSelf`, a service, a test):
 `v.isX(s)` is `true` exactly when the rule passes `s`, and it is `false` on
 invalid UTF-8 where the rule reports the precondition. A predicate never panics
-or allocates.
+or allocates. Each takes the string, `s: []const u8`, and returns a `bool`;
+`v.isStrongPassword` also takes the options of the rule, a
+`v.StrongPasswordOptions`, which may be known at run time only.
 
-```zig
-pub fn isUtf8(s: []const u8) bool
-pub fn isNotBlank(s: []const u8) bool
-pub fn isAscii(s: []const u8) bool
-pub fn isPrintableAscii(s: []const u8) bool
-pub fn isAlphanumeric(s: []const u8) bool
-pub fn isAlpha(s: []const u8) bool
-pub fn isDigits(s: []const u8) bool
-pub fn isLowercase(s: []const u8) bool
-pub fn isUppercase(s: []const u8) bool
-pub fn isMultibyte(s: []const u8) bool
-pub fn isFullWidth(s: []const u8) bool
-pub fn isHalfWidth(s: []const u8) bool
-pub fn isVariableWidth(s: []const u8) bool
-pub fn isStrongPassword(s: []const u8, options: v.StrongPasswordOptions) bool
-```
+| Predicate | `true` exactly when this rule passes |
+| --- | --- |
+| `v.isUtf8(s)` | `v.utf8` |
+| `v.isNotBlank(s)` | `v.notBlank` |
+| `v.isAscii(s)` | `v.ascii` |
+| `v.isPrintableAscii(s)` | `v.printableAscii` |
+| `v.isAlphanumeric(s)` | `v.alphanumeric` |
+| `v.isAlpha(s)` | `v.alpha` |
+| `v.isDigits(s)` | `v.digits` |
+| `v.isLowercase(s)` | `v.lowercase` |
+| `v.isUppercase(s)` | `v.uppercase` |
+| `v.isMultibyte(s)` | `v.multibyte` |
+| `v.isFullWidth(s)` | `v.fullWidth` |
+| `v.isHalfWidth(s)` | `v.halfWidth` |
+| `v.isVariableWidth(s)` | `v.variableWidth` |
+| `v.isStrongPassword(s, options)` | `v.strongPassword(options)` |
 
 The rules with a count or a substring (`v.minLength`, `v.maxLength`,
 `v.length`, `v.minBytes`, `v.maxBytes`, `v.contains`, `v.notContains`) have no
@@ -665,7 +672,7 @@ A string contains `seed`.
   allocates nothing.
 - **Deviations:** [D29](class_validator.md#deviations-from-validatorjs).
 
-Searching without case and counting occurrences are not in v1.
+Searching without case and counting occurrences are not supported yet (TODO).
 
 Compile errors:
 
@@ -731,6 +738,9 @@ Examples:
 
 A password is long enough and mixes the classes of characters that `options`
 asks for.
+
+The options of `v.strongPassword`, `v.StrongPasswordOptions`, as the validator
+declares them:
 
 ```zig
 pub const StrongPasswordOptions = struct {

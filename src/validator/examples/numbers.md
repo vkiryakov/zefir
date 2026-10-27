@@ -1,4 +1,4 @@
-# Numbers
+# zefir-validator: Numbers
 
 Rules for integer and float fields: `v.min`, `v.max` and `v.range` bound a
 number, `v.positive`, `v.nonNegative`, `v.negative` and `v.nonPositive` check its
@@ -6,6 +6,8 @@ sign, `v.divisibleBy` checks that it is a multiple, and `v.finite` that a float
 is a number at all.
 
 ```zig
+const v = @import("validator");
+
 const Payment = struct {
     amount_cents: u64,
     rate: f64,

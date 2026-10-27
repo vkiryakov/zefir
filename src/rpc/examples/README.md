@@ -1,4 +1,4 @@
-# rpc
+# zefir-rpc: typed RPC between Zig services
 
 **Typed calls between Zig services.** A service often needs an answer from
 another one: the orders service asks the users service who the customer is
@@ -133,12 +133,12 @@ $ zig build run
 - [Limits](#limits)
 - [Your own transport](#your-own-transport)
 
-Examples that `zig build test-rpc` compiles and runs, checking what they
-print against this guide:
-[getting started](getting_started.zig) · [a service that calls another](orders.zig) ·
-[authentication and middleware](service.zig) · [tests](users_test.zig) ·
-[access logs](access_log.zig) · [idempotency](idempotency.zig) · [a graceful stop](shutdown.zig) ·
-[under zefir.App](app.zig)
+Every example of this guide is shown whole, and every program with what it
+printed:
+[getting started](#getting-started) · [a service that calls another](#a-service-that-calls-another) ·
+[authentication and middleware](#authentication) · [tests](#tests) ·
+[access logs](#access-logs) · [idempotency](#idempotency) · [a graceful stop](#lifecycle-and-stopping) ·
+[under zefir.App](#under-zefirapp)
 
 ## Why RPC
 
@@ -225,42 +225,63 @@ Then import the modules in `build.zig`. The examples also read their
 settings with confy, log with log, and take contexts from core. The package
 of a contract imports `rpc` and `validator` and gets them from the service
 that imports it: so the service and the contract use one zefir, and their
-types fit.
+types fit. The `test` step runs the tests of the service,
+`src/users_test.zig` of [Tests](#tests).
 
 ```zig
 // build.zig of the users service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-// The package of the contract, from build.zig.zon, with the modules of
-// this service's zefir.
-const users_api = b.dependency("users_api", .{}).module("users-api");
-users_api.addImport("rpc", zefir.module("zefir-rpc"));
-users_api.addImport("validator", zefir.module("zefir-validator"));
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
 
-const exe = b.addExecutable(.{
-    .name = "user-service",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "users-api", .module = users_api },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+    // The package of the contract, from build.zig.zon, with the modules of
+    // this service's zefir.
+    const users_api = b.dependency("users_api", .{}).module("users-api");
+    users_api.addImport("rpc", zefir.module("zefir-rpc"));
+    users_api.addImport("validator", zefir.module("zefir-validator"));
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "rpc", .module = zefir.module("zefir-rpc") },
+        .{ .name = "core", .module = zefir.module("zefir-core") },
+        .{ .name = "confy", .module = zefir.module("zefir-confy") },
+        .{ .name = "log", .module = zefir.module("zefir-log") },
+        .{ .name = "users-api", .module = users_api },
+    };
+
+    const exe = b.addExecutable(.{
+        .name = "user-service",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/users_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+}
 ```
 
 The package of the contract has a `build.zig` of its own, which declares
-the module and gives it no imports:
+the module and gives it no imports, and no target or mode either: the
+module takes those of the service that imports it.
 
 ```zig
 // build.zig of the package users-api
+const std = @import("std");
+
 pub fn build(b: *std.Build) void {
     _ = b.addModule("users-api", .{ .root_source_file = b.path("src/root.zig") });
 }
@@ -900,13 +921,20 @@ names the handler and says what to write:
 | an error of the framework in `.errors` | `rpc: users.v1: .errors.Unavailable: rpc maps Unavailable by itself, so a contract cannot list it; give the error another name` |
 | a type that JSON does not carry | `rpc: users.v1.listUsers: request <Req>.limit has unsupported type usize; its size depends on the target: use u64 or i64` |
 
-Take `deleteUser` out of `UserHandler.zig`, and the build of
-[getting_started.zig](getting_started.zig) stops with this error, whose
+Take `deleteUser` out of `UserHandler.zig`, and the build of the program
+of [Getting started](#getting-started) stops with this error, whose
 `referenced by` then points at the line of `rpc.Server.init`:
 
 ```text
 error: rpc: UserHandler implements users.v1 but has no pub fn deleteUser(self: *UserHandler, ctx: *rpc.Context, req: users_api.DeleteUserRequest) !void
 ```
+
+Zig names a type after the file that declares it: `UserHandler` is the
+file `UserHandler.zig`, and the types of the contract take the name of the
+contract's root file. zefir builds the contract of this guide from the
+file `users_api.zig`, so the message says `users_api.DeleteUserRequest`; in
+your package users-api, whose root file is `src/root.zig`, it says
+`root.DeleteUserRequest`.
 
 Zig compiles only the code that something uses: a handler that is never
 passed to a server is never checked. Keep a test that builds the server of
@@ -1393,7 +1421,7 @@ Links stand on three levels:
 
 A call runs the server's links, then the handler's, then the method's,
 each level left to right, and unwinds them in reverse. The middleware of
-the users service:
+the users service, `middleware.zig`:
 
 ```zig
 //! The middleware of the users service: code around its calls. Each link
@@ -1463,9 +1491,10 @@ pub const Audit = struct {
 it has left this minute in the metadata of the response,
 `ratelimit-remaining`: `ctx.setResponseMetadata` on the server,
 `result.metadata().get("ratelimit-remaining")` on the client. A real
-service keeps such counts in Redis, shared by all its replicas, through a
-client of Redis that runs on `std.Io`; the examples take a stand-in with
-the same calls, which [Authentication](#authentication) uses:
+service keeps such counts in Redis, shared by all its replicas, through
+the `redis.Client` of [zefir-redis](../../redis/examples/README.md), which
+runs on `std.Io`. The examples take a stand-in with the calls of Redis
+they need, `Store.zig`, which [Authentication](#authentication) uses:
 
 <details>
 <summary><code>Store.zig</code>: a key-value store in memory with the calls of Redis</summary>
@@ -1596,7 +1625,8 @@ which the server runs in the task of every call, before the middleware.
 token, `.basic` with a user and a password, or `.custom` with a value of
 another scheme; `ctx.io()`, `ctx.operation()`, `ctx.allocator()`,
 `ctx.metadata()` and `ctx.route()` give the rest of the call. It returns the
-caller's identity, or null for an anonymous call:
+caller's identity, or null for an anonymous call. The authenticator of the
+users service, `TokenAuthenticator.zig`:
 
 ```zig
 //! The authenticator of the users service: who calls. It checks the bearer
@@ -1666,9 +1696,9 @@ An authenticator that verifies signed tokens instead of a table of them is
 `JwtAuthenticator` of [the zefir-security guide](../../security/examples/README.md),
 of the same shape.
 
-The whole service, with the authenticator, the store and the middleware on
-three levels; one client calls it as three callers, and the admin console
-takes its token from a provider:
+The whole service, `service.zig`, with the authenticator, the store and the
+middleware on three levels; one client calls it as three callers, and the
+admin console takes its token from a provider:
 
 ```zig
 //! The users service with authentication and middleware on all three
@@ -1893,7 +1923,8 @@ them, authentication, middleware, JSON, validation and the mapping of
 errors, on a memory transport of its own. Its `init` takes the parts of
 `rpc.Server.init` and the options but `.transport`, and `t.client(parts,
 options)` gives clients of it, with the parts and the options of
-`rpc.Client.init` but `.transport`. A test of a service needs no network:
+`rpc.Client.init` but `.transport`. A test of a service needs no network;
+the users service keeps its tests in `users_test.zig`:
 
 ```zig
 //! Tests of the users service without a network: `rpc.testing.Server`
@@ -1922,9 +1953,16 @@ test "a created user can be read back" {
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
     defer created.deinit();
-    var found = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = created.outcome.ok.id }, .{});
+    const ada = switch (created.outcome) {
+        .ok => |user| user,
+        .failure => return error.TestUnexpectedResult,
+    };
+    var found = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = ada.id }, .{});
     defer found.deinit();
-    try testing.expectEqualStrings("Ada Lovelace", found.outcome.ok.name);
+    switch (found.outcome) {
+        .ok => |user| try testing.expectEqualStrings("Ada Lovelace", user.name),
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 test "an unknown user is the failure users.not_found" {
@@ -1938,8 +1976,13 @@ test "an unknown user is the failure users.not_found" {
 
     var r = try client.call(testing.io, .root, api.UserApi.getUser, .{ .id = 42 }, .{});
     defer r.deinit();
-    try testing.expectEqual(.not_found, r.outcome.failure.code);
-    try testing.expectEqualStrings("users.not_found", r.outcome.failure.app_code);
+    switch (r.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.not_found, failure.code);
+            try testing.expectEqualStrings("users.not_found", failure.app_code);
+        },
+    }
 }
 
 test "a request against the rules is not sent" {
@@ -1954,7 +1997,10 @@ test "a request against the rules is not sent" {
     var r = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "", .email = "ada@example.com" }, .{});
     defer r.deinit();
     try testing.expect(!r.sent);
-    try testing.expectEqualStrings("name", r.outcome.failure.field.?);
+    switch (r.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqualDeep(@as(?[]const u8, "name"), failure.field),
+    }
     try testing.expectEqual(0, try repo.count(testing.io));
 }
 
@@ -2013,10 +2059,16 @@ test "deleteUser needs the permission users.delete" {
 
     var created = try client.call(testing.io, .root, api.UserApi.createUser, .{ .name = "Ada Lovelace", .email = "ada@example.com" }, .{});
     defer created.deinit();
-    const id = created.outcome.ok.id;
+    const id = switch (created.outcome) {
+        .ok => |user| user.id,
+        .failure => return error.TestUnexpectedResult,
+    };
     var denied = try client.call(testing.io, .root, api.UserApi.deleteUser, .{ .id = id }, .{});
     defer denied.deinit();
-    try testing.expectEqual(.permission_denied, denied.outcome.failure.code);
+    switch (denied.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.permission_denied, failure.code),
+    }
 
     // Between calls, a test may give the callers another identity.
     auth.identity = .{ .subject = "admin", .permissions = &.{"users.delete"} };

@@ -33,6 +33,16 @@ fn codeFor(err: anyerror) core.ErrorCode {
     };
 }
 
+/// A new span id: 8 random bytes, drawn again in the rare case that all of
+/// them are zero.
+fn newSpanId(io: std.Io) core.SpanId {
+    while (true) {
+        var bytes: [8]u8 = undefined;
+        io.random(&bytes);
+        return core.SpanId.fromBytes(bytes) catch continue;
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var stdout_buffer: [256]u8 = undefined;
@@ -42,25 +52,21 @@ pub fn main(init: std.process.Init) !void {
 
     const repo: Repository = .{ .users = &.{.{ .id = 42, .name = "Ada" }} };
 
-    // The call scope owns the token; the context only points to it.
+    // What the call brought: the trace of the caller, and the budget it has
+    // left for the call.
+    const caller = try core.w3c.parseTraceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    const budget: std.Io.Duration = .fromMilliseconds(500);
+
+    // The call scope owns the token; the context only points to it. The
+    // handler's span is a child of the caller's, in the same trace.
     var token: core.CancellationToken = .init;
-    const now = std.Io.Clock.awake.now(io);
-    var span: [8]u8 = undefined;
-    var trace: [16]u8 = undefined;
-    io.random(&span);
-    io.random(&trace);
     const ctx = core.Context.root
-        .withTrace(.{
-            .trace_id = core.TraceId.fromBytes(trace) catch return error.ZeroTraceId,
-            .span_id = core.SpanId.fromBytes(span) catch return error.ZeroSpanId,
-            .flags = .{ .sampled = true },
-            .state = .empty,
-        })
-        .withDeadline(.after(now, .fromMilliseconds(500)))
+        .withTrace(caller.child(newSpanId(io)))
+        .withDeadline(.after(std.Io.Clock.awake.now(io), budget))
         .withCancellation(&token);
 
     const user = try getUser(ctx, io, repo, 42);
-    try out.print("trace {f}: user {d} is {s}\n", .{ ctx.trace.?.trace_id, user.id, user.name });
+    try out.print("trace {f}: user {d} is {s}\n", .{ caller.trace_id, user.id, user.name });
 
     if (getUser(ctx, io, repo, 7)) |_| return error.ExpectedNotFound else |err| {
         try out.print("user 7: {t}\n", .{codeFor(err)});

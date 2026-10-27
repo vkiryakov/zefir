@@ -1,4 +1,4 @@
-# zefir.App
+# zefir.App: an application container for zefir services
 
 **One place that builds a service and runs it.** A service is made of
 parts: clients of databases and of NATS, repositories, services, an HTTP

@@ -1,4 +1,4 @@
-# redis
+# zefir-redis: a Redis and Valkey client for Zig
 
 > [!WARNING]
 > **No TLS yet: use it only in a network you trust.** zefir-redis speaks
@@ -23,7 +23,7 @@ it reads straight into Zig types. It is written against `std.Io` only,
 and runs on [zio](https://github.com/lalinsky/zio) in production.
 
 > [!IMPORTANT]
-> **Not in v0.1 (TODO):**
+> **Not implemented yet (TODO):**
 >
 > - **One standalone server only.** Sentinel and Cluster come later, and
 >   with them replicas to read from and sharded pub/sub. A client refuses a
@@ -130,14 +130,15 @@ const profile = (try client.run(io, op, cmd.hgetall(Profile, "user:42"), .{ .all
 - [Logs](#logs)
 - [Tests without Redis](#tests-without-redis)
 
-Programs that `zig build e2e` in `tests/redis` builds and runs against
-Redis and Valkey, checking what they print against this guide: [quick start](quick_start.zig) · [connecting](connect.zig) ·
-[the best customers](leaders.zig) · [checkout](checkout.zig) · [a limit on
-requests](limits.zig) · [shipping](orders.zig) ·
-[notifications](notifications.zig) · [errors](errors.zig). Tests that
-`zig build test-redis` runs without a server: [pipelines](pipeline_test.zig)
-· [deadlines](deadlines_test.zig) · [tests of an
-application](profiles_test.zig).
+Every example of this guide is shown whole, and every program with what
+it printed against Redis: [quick start](#quick-start) ·
+[connecting](#what-can-go-wrong-at-the-start) ·
+[the best customers](#the-best-customers-and-the-sessions-of-one) ·
+[checkout](#transactions-and-watch) · [a limit on requests](#scripts) ·
+[shipping](#streams-and-consumer-groups) · [notifications](#pubsub) ·
+[errors](#errors-and-what-is-safe-to-retry). The tests need no Redis
+server: [pipelines](#pipelines) · [deadlines](#deadlines-and-cancellation) ·
+[tests of an application](#tests-without-redis).
 
 ## How Redis keeps data
 
@@ -251,27 +252,36 @@ use Zefir's confy for settings, log for records and core for deadlines:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "redis", .module = zefir.module("zefir-redis") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "redis", .module = zefir.module("zefir-redis") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
+
+Each program of this guide is a whole `src/main.zig`, and `zig build run`
+runs it.
 
 > [!TIP]
 > zefir-redis is also part of the umbrella module: with
@@ -292,10 +302,10 @@ same.
 
 ## Quick start
 
-The sessions, the page views and the profiles of the shop. The program
-connects, signs a customer in with a session that expires, counts the
-views of the home page with a pipeline, keeps the customer's profile in a
-hash, and signs the customer out:
+The sessions, the page views and the profiles of the shop. The program,
+`quick_start.zig`, connects, signs a customer in with a session that
+expires, counts the views of the home page with a pipeline, keeps the
+customer's profile in a hash, and signs the customer out:
 
 ```zig
 //! The quick start of the guide: the sessions, the page views and the
@@ -515,8 +525,8 @@ password `p@ss`, and `redis://:secret@cache` the password of the user
 `default`. Better still, keep the password out of the URL and give it in
 `Options.password`, from a `confy.Secret`.
 
-`init` refuses what v0.1 cannot do, with a text that says what to do
-instead: `rediss://`, which wants TLS, and options after `?`, which live
+`init` refuses what the client cannot do yet, with a text that says what to
+do instead: `rediss://`, which wants TLS, and options after `?`, which live
 in `redis.Client.Options`, are `Unsupported`, and so are UNIX sockets and
 other schemes; a password both in the URL and in the options, and a user
 without a password, are `InvalidArgument`.
@@ -700,8 +710,9 @@ $ APP_REDIS_URL=redis://127.0.0.1:6380 APP_REDIS_PASSWORD=change-me zig build ru
   here too: a cluster node, a Sentinel, Redis before 7.2 or Valkey before
   8 is `Unsupported`, with what it is, such as "the server at db:6379 is
   Redis 6.2.24; v0.1 needs Redis 7.2 or later".
-- **URLs** that ask for what v0.1 cannot do stop at `init`, with what to
-  do instead.
+- **URLs** that ask for what the client cannot do yet stop at `init`,
+  with what to do instead. The client's texts say v0.1: the first version
+  of zefir-redis, which came with zefir v0.10.0.
 - `connect` may be called again after a failure; until it succeeds, a call
   is `Unavailable`: "connect() has not succeeded". Once the client is
   connected, `connect` does nothing.
@@ -917,7 +928,7 @@ replies](#commands-and-replies) has the rules every one follows.
 
 | Function | Command | Returns |
 |---|---|---|
-| `zadd(key, members, .{ .only, .compare, .changed })` | ZADD [NX\|XX] [GT\|LT] [CH] | `u64`: how many were added |
+| `zadd(key, members, .{ .only, .compare, .changed })` | ZADD [NX\|XX] [GT\|LT] [CH] | `u64`: how many were added, or with `.changed` added or changed |
 | `zincrby(key, by, member)`, `zscore(key, member)` | ZINCRBY, ZSCORE | `f64`, `?f64` |
 | `zrank(key, member)`, `zrevrank(key, member)` | ZRANK, ZREVRANK | `?u64` |
 | `zrem(key, members)`, `zcard(key)`, `zcount(key, min, max)` | ZREM, ZCARD, ZCOUNT | `u64` |
@@ -1164,8 +1175,8 @@ The rules:
 - A blocking command holds the commands after it; give a pipeline one at
   most, and last, see [Blocking commands](#blocking-commands-and-the-reliable-queue).
 
-The tests show each case, against a server that the test scripts (see
-[Tests without Redis](#tests-without-redis)):
+The tests of `pipeline_test.zig` show each case, against a server that the
+test scripts (see [Tests without Redis](#tests-without-redis)):
 
 ```zig
 //! Pipelines against `redis.testing.FakeServer`: commands of several types
@@ -2127,8 +2138,10 @@ sent it or the client's own text; `code()`, the first word of the server's
 error, such as `WRONGTYPE`, and `isCode(name)` to test it; `phase`, where
 the error happened; and for a pipeline or a transaction `command`, the
 index of the command it is about, and `answered`, the replies that came
-before a break. Every call starts it afresh. A subscriber and an iterator
-keep their own, for the errors of their `next`. The client's texts never
+before a break. Every call starts it afresh. An iterator writes what went
+wrong with a page to the Diagnostics in `.diagnostics` of `client.iterate`,
+afresh for each page it fetches; only a subscriber keeps its own,
+`sub.diagnostics()`, for the errors of its `next`. The client's texts never
 hold arguments, values or passwords; a server's text may quote arguments,
 as `ERR unknown command` does, so log it where such values may go.
 
@@ -2331,9 +2344,9 @@ and a trace. `.of(ctx)` makes one.
   deadline, see [Blocking commands](#blocking-commands-and-the-reliable-queue).
 
 One deadline covers all the calls made under it: in the handler of a
-request, every call takes what is left of the request's time. Tests
-against a server whose replies wait as long as the test says show each
-case:
+request, every call takes what is left of the request's time. The tests
+of `deadlines_test.zig`, against a server whose replies wait as long as
+the test says, show each case:
 
 ```zig
 //! Deadlines and cancellation, against `redis.testing.FakeServer`, whose
@@ -2678,7 +2691,8 @@ your code talks to it through a `redis.Client`, as to any Redis.
   With it a test checks what your code sent, and that it sent nothing
   twice.
 
-The profiles of the shop's customers, as an application keeps them:
+The profiles of the shop's customers, as an application keeps them, in
+`Profiles.zig`:
 
 ```zig
 //! The profiles of the shop's customers, as the application keeps them: a
@@ -2733,7 +2747,7 @@ fn key(buffer: *[32]u8, id: u64) []const u8 {
 }
 ```
 
-And their tests:
+And their tests, `profiles_test.zig`:
 
 ```zig
 //! Tests of the profiles of the shop without Redis. Each runs `Profiles`
@@ -2828,6 +2842,8 @@ test "a profile is saved as a field of the hash for each field of the struct but
 - The server comes before the client, and `defer client.deinit()` before
   `defer client.close(io)`, so that their `defer`s close the client first
   and stop the server last.
-- The build of zefir runs these tests, and those of
-  [pipelines](#pipelines) and of [deadlines](#deadlines-and-cancellation),
-  in `zig build test-redis`.
+- These tests need no Redis, and neither do those of
+  [pipelines](#pipelines) and of [deadlines](#deadlines-and-cancellation):
+  they are ordinary Zig tests, which a test step of your `build.zig` runs
+  with nothing to start first. Their module imports `redis`, and `core`
+  for the deadlines, declared as in [Installation](#installation).

@@ -1,3 +1,4 @@
+// Application code (src/errors.zig of the orders service): zefir-security ships none of these.
 //! The error handler of the orders service: the one place where errors
 //! become responses. Every 401 carries `WWW-Authenticate`, as RFC 9110
 //! asks: that of `requireUser` with the reason when a token was refused

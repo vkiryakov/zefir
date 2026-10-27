@@ -3,8 +3,9 @@
 //! zefir-core from the application's zefir. CI runs it.
 //!
 //!   zig build test   the conformance suite on the transport, its own
-//!                    checks, rpc.Server and rpc.Client over it, and the
-//!                    tests of the transport's package itself
+//!                    checks, rpc.Server and rpc.Client over it, the tests
+//!                    of the transport's package itself, and the check of
+//!                    the package's README.md
 
 const std = @import("std");
 
@@ -38,6 +39,30 @@ pub fn build(b: *std.Build) void {
     // another module do not run with the tests above.
     const package_tests = b.addTest(.{ .name = "rpc-mailbox", .root_module = mailbox_module });
     test_step.dependOn(&b.addRunArtifact(package_tests).step);
+
+    // README.md of the transport's package shows parts of this build.zig,
+    // of the tests above and of the transport, and the report of the
+    // conformance suite. A test embeds no file outside the directory of its
+    // module, so those files come to it as anonymous imports, under their
+    // names; the checks come from the guide of rpc in zefir.
+    const readme = b.addTest(.{
+        .name = "readme",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/readme_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    readme.root_module.addImport("guide-check", b.createModule(.{
+        .root_source_file = zefir.path("src/rpc/examples/guide_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    readme.root_module.addAnonymousImport("README.md", .{ .root_source_file = mailbox.path("README.md") });
+    readme.root_module.addAnonymousImport("build.zig", .{ .root_source_file = b.path("build.zig") });
+    readme.root_module.addAnonymousImport("root.zig", .{ .root_source_file = mailbox.path("src/root.zig") });
+    test_step.dependOn(&b.addRunArtifact(readme).step);
 
     // A safe build checks that a call comes on the std.Io of connect: on
     // another, it panics. The program ends in its own panic handler, which

@@ -1,4 +1,4 @@
-# JSON
+# zefir-confy: JSON files
 
 JSON is the richest source: values keep their types, objects nest as deep as
 your structs, and it is the only source that can hold **lists of structs**. Use
@@ -27,9 +27,8 @@ it for the configuration that lives in the repository.
 
 ## At a glance
 
-Every field type, and how JSON writes it:
-
-**`main.zig`**
+Every field type, and how JSON writes it. The configuration struct of this
+page:
 
 ```zig
 const Config = struct {
@@ -51,7 +50,7 @@ const Config = struct {
 };
 ```
 
-**`config.json`**
+A `config.json` that sets it:
 
 ```json
 {
@@ -134,15 +133,20 @@ For `[]const u8` fields. All JSON escapes work.
 For any integer type, signed or unsigned, up to 128 bits. The value must fit
 the field's type, and the problem says which range it expected.
 
-| Field | You write                     | You get                                           |
-| ----- | ----------------------------- | ------------------------------------------------- |
-| `u16` | `"port": 8080`                | `8080`                                            |
-| `u16` | `"port": "8080"`              | `8080`: strings are parsed too                    |
-| `u16` | `"port": 70000`               | problem: `invalid (expected an integer 0..65535)` |
-| `u16` | `"port": -1`                  | problem: `invalid (expected an integer 0..65535)` |
-| `u16` | `"port": 80.5`                | problem: `invalid (expected an integer 0..65535)` |
-| `i8`  | `"offset": -3`                | `-3`                                              |
-| `u64` | `"max": 18446744073709551615` | `18446744073709551615`                            |
+| Field  | You write                                         | You get                                           |
+| ------ | ------------------------------------------------- | ------------------------------------------------- |
+| `u16`  | `"port": 8080`                                    | `8080`                                            |
+| `u16`  | `"port": "8080"`                                  | `8080`: strings are parsed too                    |
+| `u16`  | `"port": 70000`                                   | problem: `invalid (expected an integer 0..65535)` |
+| `u16`  | `"port": -1`                                      | problem: `invalid (expected an integer 0..65535)` |
+| `u16`  | `"port": 80.5`                                    | problem: `invalid (expected an integer 0..65535)` |
+| `i8`   | `"offset": -3`                                    | `-3`                                              |
+| `u64`  | `"max": 18446744073709551615`                     | `18446744073709551615`                            |
+| `u128` | `"id": "340282366920938463463374607431768211455"` | `340282366920938463463374607431768211455`         |
+
+A JSON number holds an integer up to 2^127-1, the largest `i128`. A larger
+`u128` must be a JSON string, as in the last row: written as a number, it is a
+problem.
 
 ## Floats
 
@@ -286,9 +290,8 @@ A `confy.Secret` field takes a string:
 
 ## Problems
 
-confy reads the whole file and reports every problem at once. This file:
-
-**`config.json`**
+confy reads the whole file and reports every problem at once. This
+`config.json`:
 
 ```json
 {
@@ -313,7 +316,18 @@ error(confy): 5 configuration problems:
 ### Syntax errors
 
 A file that isn't valid JSON is skipped as a whole, so the fields it would have
-set are reported as missing too. A trailing comma on line 3:
+set are reported as missing too. This `config.json` has a trailing comma on
+line 3:
+
+```json
+{
+  "name": "zefir-demo",
+  "http": { "port": 8080, },
+  "db": { "url": "postgres://db.internal:5432/app", "password": "change-me" }
+}
+```
+
+and gives:
 
 ```text
 error(confy): 5 configuration problems:

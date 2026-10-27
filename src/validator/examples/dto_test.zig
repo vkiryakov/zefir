@@ -32,5 +32,5 @@ test "CreateUserRequest rejects an invalid email" {
     const bad: CreateUserRequest = .{ .email = "ada.example.com", .name = "Ada", .birthday = "1990-12-10", .roles = &.{.admin} };
     const violation = v.check(&bad, &path_buf) orelse return error.NoViolation;
     try std.testing.expectEqualStrings("validation.email", violation.code);
-    try std.testing.expectEqualStrings("email", violation.field.?);
+    try std.testing.expectEqualStrings("email", violation.field orelse return error.NoField);
 }
