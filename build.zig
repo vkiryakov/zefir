@@ -1839,7 +1839,8 @@ fn addValidatorTests(
     // a program must exit with 0 and log each line of its `records`. Each
     // record starts with a timestamp, the only part that changes from run to
     // run, so a line must follow the "Z" that ends a timestamp. readme_test.zig
-    // checks that README.md shows every example and a run of every program.
+    // checks that README.md shows every example and a run of every program,
+    // and that the guide shows no Zig code that is not a part of its examples.
     // The programs are not part of `compile_step`: zefir-log uses 64-bit
     // atomics, which Zig does not support on x86-linux-musl, the 32-bit
     // target of CI.
@@ -1880,6 +1881,10 @@ fn addValidatorTests(
             }) }},
         }),
     });
+    // strings.md shows the options of v.strongPassword as strings.zig
+    // declares them. A test embeds no file outside the directory of its
+    // module, so the file comes to it as an anonymous import, under its name.
+    readme_test.root_module.addAnonymousImport("strings.zig", .{ .root_source_file = b.path("src/validator/strings.zig") });
     test_step.dependOn(&b.addRunArtifact(readme_test).step);
     compile_step.dependOn(&readme_test.step);
 }

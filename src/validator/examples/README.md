@@ -165,31 +165,44 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.11.0, fetch `#v0.11.0` instead.
 
-Then import the `zefir-validator` module in `build.zig`:
+Then import the `zefir-validator` module in `build.zig`. The example programs
+of this guide also log what they find with
+[zefir-log](../../log/examples/README.md), as text, one line per record, so
+this `build.zig` imports `zefir-log` too, and its `zig build test` runs the
+tests of the program, such as those of
+[Testing a DTO package](#testing-a-dto-package):
 
 ```zig
-const zefir = b.dependency("zefir", .{
-    .target = target,
-    .optimize = optimize,
-});
+// build.zig of a program that checks its values
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "validator", .module = zefir.module("zefir-validator") },
-        },
-    }),
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "validator", .module = zefir.module("zefir-validator") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the program").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{ .root_module = exe.root_module });
+    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+}
 ```
 
-The validator works without other modules. The example programs of this guide
-also log what they find with [zefir-log](../../log/examples/README.md), as text,
-one line per record; to run them, import it too:
-`.{ .name = "log", .module = zefir.module("zefir-log") }`.
+The validator itself works without other modules: a program that does not
+log leaves out the line of `log`.
 
 > [!TIP]
 > validator is also part of the umbrella module: with `zefir.module("zefir")`
@@ -1103,12 +1116,12 @@ mistake, and a program calls `v.transform` on each:
 
 ```zig
 // Speaker: a transform after a rule
-.email = .{ v.email, v.trim },
+.email = .{ v.email, v.trim }, // compile error: transforms must come before the rules
 // TalkProposal: a string transform on a u16
-.duration_minutes = .{ v.rename("durationMinutes"), v.trim },
+.duration_minutes = .{ v.rename("durationMinutes"), v.trim }, // compile error: trim expects a string
 // Reviewer: two fields with one outside name
 .display_name = v.rename("displayName"),
-.login = v.rename("displayName"),
+.login = v.rename("displayName"), // compile error: both are named "displayName" outside
 ```
 
 The build stops at the first mistake (paths and line numbers shortened, the
