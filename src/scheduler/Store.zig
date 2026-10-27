@@ -176,8 +176,7 @@ pub fn outcome(err: Error) Outcome {
 /// The store behind the interface: one constant table per store type,
 /// built by `init`.
 pub const VTable = struct {
-    /// "memory", "mongodb": for logs and the report of the conformance
-    /// suite.
+    /// "memory", "mongodb": for the report of the conformance suite.
     name: []const u8,
     now: *const fn (ptr: *anyopaque, io: Io) Instant,
     create: *const fn (ptr: *anyopaque, io: Io, ctx: core.Context, request: *const CreateRequest, options: CallOptions) StoreError!CreateResult,

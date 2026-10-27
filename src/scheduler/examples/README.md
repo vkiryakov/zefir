@@ -3175,8 +3175,8 @@ store.
 
 ### The type
 
-A store is a type with `pub const name: []const u8`, which the logs and
-the report of the suite show, and ten methods. `Store.init(&my_store)`
+A store is a type with `pub const name: []const u8`, which the report of
+the conformance suite shows, and ten methods. `Store.init(&my_store)`
 builds the table when the program compiles, and a method that is missing
 or has another signature stops the build with the one to write:
 
