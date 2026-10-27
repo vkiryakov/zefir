@@ -168,6 +168,8 @@ test "start twice is InvalidState; a store that fails at start gives its error" 
     var probe: Probe = .{};
     var pulse: Pulse = .{ .probe = &probe };
     f.faulty.failNext(io, .create, error.Unavailable, 1);
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
     var failed: scheduler.Worker(struct { pulse: *Pulse }) = try .init(testing.allocator, io, f.store(), .{ .pulse = &pulse }, quick);
     defer failed.deinit(io);
     try testing.expectError(error.Unavailable, failed.start(io));
