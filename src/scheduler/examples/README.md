@@ -904,7 +904,10 @@ calls that change a job take one:
 
 `Changed` is `.changed`; `.unchanged`, when it already was so, as a pause
 of a paused job; `.finished`, when the job ended and its record is kept
-for its history, so the change does not apply to it; or `.not_found`.
+for its history, so the change does not apply to it; or `.not_found`,
+when no job has the key, or the job the call read was cancelled before
+its change: a job scheduled again with the key since is another one,
+which the change leaves alone.
 
 `orders.zig` keeps reminders to pay, one for each order, and the weekly
 reports of tenants, one for each tenant. Only the client works here: no
@@ -1105,12 +1108,16 @@ $ zig build run
 | `.after` | 0 to 100 years |
 
 A change of the client reads the record, computes the change from its
-state, and writes it on condition that nothing else changed the record
-in between. When another change came first, the client reads again and
-computes again; after 8 such races lost in a row, it gives up with
-`error.Contended`, which nothing applied, so the call may be made again.
-When the job was cancelled meanwhile, the call answers `.not_found`, and
-a job scheduled again with the key since is left alone.
+state, and writes it on condition that the record is as it read it: the
+same life, revision and state. The revision grows with each change of
+the client, the state changes with a claim and at the end of a run, and
+a job scheduled again with the key is another life. When the record
+changed meanwhile, the store answers with the record as it is, and the
+client computes the change again from it; after 8 such races lost in a
+row, it gives up with `error.Contended`, which nothing applied, so the
+call may be made again. When the job was cancelled meanwhile, the call
+answers `.not_found`, and a job scheduled again with the key since, of
+another life, is left alone.
 
 <details>
 <summary><b>Changes while a job runs</b></summary>
@@ -2639,8 +2646,8 @@ a failed call may have changed the store: `.not_applied` or `.unknown`.
 | `Cancelled` | the token or the task was cancelled before sending | `.not_applied` |
 | `Refused` | the store refused, and the change is known not to be applied | `.not_applied` |
 | `OutcomeUnknown` | the request may have arrived, and its outcome is unknown | `.unknown` |
-| `Corrupt` | a record of the store does not read, maybe one the call changed, as a claim that took it | `.unknown` |
-| `OutOfMemory` | | `.unknown` |
+| `Corrupt` | a record of the store does not read, damaged or of another format; the call may have changed the store all the same, as a claim that took a record and could not read it | `.unknown` |
+| `OutOfMemory` | the memory ran out, maybe after the store applied the change | `.unknown` |
 | `Contended` | the client lost 8 races of changes in a row | `.not_applied` |
 
 ## Logs and statistics
@@ -3219,7 +3226,13 @@ The header of [Store.zig](../Store.zig) has them in full:
    one claimer.
 7. An outcome the store is not sure of is `OutcomeUnknown`, never a
    definite answer: it reads the record again by the mark the write left,
-   where it can.
+   where it can, and sends again only a write on the same condition. The
+   insert of a `create` whose reading again finds neither its record nor
+   a live one of the key is none: a claim may have run that life
+   meanwhile, and its finish removed it. It goes again only while the job
+   is due a minute or more after the deadline of the call, by the store's
+   clock; a cancel between the two inserts answered true, and the job is
+   there again.
 8. A definite success survives a restart of the store; `MemoryStore` is
    the exception, and says so.
 9. The store never retries but to resolve an unknown outcome: retries are
