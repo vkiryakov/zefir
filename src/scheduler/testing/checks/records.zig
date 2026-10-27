@@ -370,6 +370,12 @@ pub fn s19(r: *Runner) Error!void {
         .conflict => |rec| try expectOwned(r, &fences[2], rec, "a conflict"),
         else => return r.fail("update on another revision answered {t}, not conflict", .{conflict}),
     }
+    // An update that applies keeps a copy of its plan.
+    const replan: Store.UpdateRequest = .{ .ref = .{ .job = job, .key = lend(&borrowed, 0, "k1") }, .expect = .{ .life = kept.life, .revision = kept.revision, .state = .pending }, .set = .{ .plan = lend(&borrowed, 2, "every 8s") }, .tag = r.newTag() };
+    const replanned = try r.need(r.store().update(r.io, r.ctx(), &replan, r.call()), "update");
+    @memset(&borrowed, 0x55);
+    try r.expect(replanned == .updated, "update on the revision and state of the record answered {t}, not updated", .{replanned});
+    try r.expect(std.mem.eql(u8, (try r.fetch(job, "k1")).plan, "every 8s"), "the plan changed with the memory of the update after it returned", .{});
     const first = try r.claim(lend(&borrowed, 0, owner), &.{job}, &.{}, 1, r.ms(1000));
     @memset(&borrowed, 0x55);
     try r.expect(first.claimed.len == 1, "a claim of a due record took {d}", .{first.claimed.len});
@@ -399,7 +405,13 @@ pub fn s19(r: *Runner) Error!void {
         .changed => |rec| try expectOwned(r, &fences[4], rec, "a finish that answered changed"),
         else => return r.fail("finish on an old revision answered {t}, not changed", .{changed}),
     }
-    try r.finished(r.finishOf(moved, owner, .{ .done = .{ .state = .succeeded, .keep = .forever } }));
+    // A finish that applies keeps a copy of the error of its last run.
+    var failed = r.finishOf(moved, owner, .{ .done = .{ .state = .failed, .keep = .forever } });
+    failed.last = Runner.lastOf(moved, .failed, lend(&borrowed, 0, "DeclinedByBank"));
+    try r.finished(failed);
+    @memset(&borrowed, 0x55);
+    const last = (try r.fetch(job, "k1")).last orelse return r.fail("a finish with a last run left none", .{});
+    try r.expect(std.mem.eql(u8, last.error_name orelse "", "DeclinedByBank"), "the error of the last run changed with the memory of the finish after it returned", .{});
     const renew = try r.need(r.store().renew(r.io, r.ctx(), &.{ .ref = Runner.refOf(run), .life = run.life, .owner = owner, .fence = run.fence, .lease = r.ms(1000) }, .{ .allocator = fences[5].allocator() }), "renew");
     fences[5].close();
     try r.expect(renew != .renewed, "renew of a finished claim answered renewed", .{});

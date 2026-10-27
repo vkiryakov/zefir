@@ -325,6 +325,81 @@ test "S12 fails a store whose abandoned row replaces the owner's" {
     try testing.expectEqualStrings("the row of fence 1 is abandoned of s12-w1, not the owner's succeeded one", try failedWhy(report.outcome(.s12)));
 }
 
+/// A MemoryStore that keeps one string of its requests by reference, as a
+/// store that does not copy it would: the plan of an update that applies,
+/// or the error of the last run of a finish that does. Its get reads the
+/// string where the caller had it.
+const ByReferenceHarness = struct {
+    kept: enum { plan, error_name },
+    memory: MemoryStore = undefined,
+    vtable: Store.VTable = undefined,
+    slice: ?[]const u8 = null,
+
+    pub fn setUp(h: *ByReferenceHarness, io: Io, gpa: Allocator) !conformance.Setup {
+        h.memory = .init(gpa, io, .{});
+        h.vtable = h.memory.store().vtable.*;
+        h.vtable.name = "by-reference";
+        h.vtable.get = get;
+        h.vtable.update = update;
+        h.vtable.finish = finish;
+        h.slice = null;
+        return .{ .store = .{ .ptr = &h.memory, .vtable = &h.vtable }, .expiry_lag = .zero };
+    }
+
+    pub fn tearDown(h: *ByReferenceHarness, io: Io, setup: conformance.Setup) void {
+        _ = io;
+        _ = setup;
+        h.memory.deinit();
+    }
+
+    fn of(ptr: *anyopaque) *ByReferenceHarness {
+        return @fieldParentPtr("memory", memoryOf(ptr));
+    }
+
+    fn get(ptr: *anyopaque, io: Io, ctx: core.Context, ref: *const scheduler.Ref, options: Store.CallOptions) scheduler.StoreError!?scheduler.Record {
+        var rec = (try memoryOf(ptr).get(io, ctx, ref, options)) orelse return null;
+        const slice = of(ptr).slice orelse return rec;
+        switch (of(ptr).kept) {
+            .plan => rec.plan = slice,
+            .error_name => if (rec.last) |*last| {
+                last.error_name = slice;
+            },
+        }
+        return rec;
+    }
+
+    fn update(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.UpdateRequest, options: Store.CallOptions) scheduler.StoreError!Store.UpdateResult {
+        const result = try memoryOf(ptr).update(io, ctx, request, options);
+        if (of(ptr).kept == .plan and result == .updated) {
+            if (request.set.plan) |plan| of(ptr).slice = plan;
+        }
+        return result;
+    }
+
+    fn finish(ptr: *anyopaque, io: Io, ctx: core.Context, request: *const Store.FinishRequest, options: Store.CallOptions) scheduler.StoreError!Store.FinishResult {
+        const result = try memoryOf(ptr).finish(io, ctx, request, options);
+        if (of(ptr).kept == .error_name and result == .done) {
+            if (request.last) |last| if (last.error_name) |name| {
+                of(ptr).slice = name;
+            };
+        }
+        return result;
+    }
+};
+
+test "S19 fails a store that keeps the plan of an update or the error of a finish by reference" {
+    const cases = .{
+        .{ .plan, "the plan changed with the memory of the update after it returned" },
+        .{ .error_name, "the error of the last run changed with the memory of the finish after it returned" },
+    };
+    inline for (cases) |case| {
+        var harness: ByReferenceHarness = .{ .kept = case[0] };
+        var report = try conformance.run(testing.io, testing.allocator, &harness, .{ .only = &.{.s19} });
+        defer report.deinit();
+        try testing.expectEqualStrings(case[1], try failedWhy(report.outcome(.s19)));
+    }
+}
+
 /// A get that sleeps 10 s first: S3, which starts with one, cannot end in
 /// time.
 fn sleepyGet(vtable: *Store.VTable) void {
