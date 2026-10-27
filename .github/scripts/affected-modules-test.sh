@@ -258,7 +258,7 @@ edit examples/other/main.zig                    | core log confy validator rpc r
 edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
 edit src/confy/examples/README.md               | confy rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
 edit README.md src/validator/root.zig           | validator rpc rpc-nats odm scheduler mongo http security openapi zefir
-edit README.md                                  | rpc rpc-nats http security openapi zefir
+edit README.md                                  | rpc rpc-nats scheduler mongo http security openapi zefir
 edit docs/plan.md docs/notes.txt                |
 edit build.zig                                  | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
 edit build.zig.zon                              | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir

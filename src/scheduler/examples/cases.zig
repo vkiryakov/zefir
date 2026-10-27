@@ -22,5 +22,9 @@ pub const tests = [_][]const u8{ "jobs_test", "conformance_test" };
 /// application that the tests of the guide test.
 pub const files = [_][]const u8{"Invoices"};
 
+/// The programs that README.md at the root of the repository shows too, as
+/// they are and with a run of each: its "scheduler in a minute".
+pub const root_readme = [_][]const u8{"quick_start"};
+
 /// The command README.md shows for a run of a program.
 pub const command = "$ zig build run";

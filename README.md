@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server with OpenAPI documents built from its types, an async MongoDB driver and a typed ODM over it, a Redis client, JSON Web Tokens and an application container today.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server with OpenAPI documents built from its types, an async MongoDB driver and a typed ODM over it, a Redis client, JSON Web Tokens, a scheduler of jobs and an application container today.
 </p>
 
 <p align="center">
@@ -75,7 +75,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-otel`                       | OpenTelemetry exporters                                                                                                                                                                                                       | 📋 Planned                                                                                                                                                        |
 | `zefir-health`                     | Liveness, readiness, startup health checks                                                                                                                                                                                    | 📋 Planned                                                                                                                                                        |
 | **Background Processing**          |                                                                                                                                                                                                                               |                                                                                                                                                                  |
-| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                                                                                                                                      | 🚧 In progress                                                                                                                                                    |
+| `zefir-scheduler`                  | Jobs on a time for the instances of a service: one-shot and repeating, schedules and cron checked at compile time, leases, retries, history; in memory or MongoDB, or any store that passes its conformance suite             | ✅ Done · [docs](src/scheduler/examples/README.md)                                                                                                                |
 | **Developer Experience & Tooling** |                                                                                                                                                                                                                               |                                                                                                                                                                  |
 | `zefir-openapi`                    | OpenAPI 3.1 and 3.2 documents of zefir-http services, built by the compiler from their routes, DTOs, errors and middleware                                                                                                    | ✅ Done · [docs](src/openapi/examples/README.md)                                                                                                                  |
 | `zefir-cli`                        | Project scaffolding, code generation                                                                                                                                                                                          | 📋 Planned                                                                                                                                                        |
@@ -403,6 +403,87 @@ The compiler checks the routes and the handlers when it builds the server, `ctx.
 
 On a shared GitHub runner, 4 vCPUs of an AMD EPYC 7763, a server on zio with four executors, loaded by clients in the same process, answers plain text at about 11 800 requests per second over one connection kept alive and 122 000 over 64, JSON out at 11 700 and 120 000, a JSON body in and JSON out at 11 800 and 116 000; the [guide's benchmark](src/http/examples/README.md#benchmark) shows the whole run, the spread across runs, and why one connection is faster on one executor.
 
+## scheduler in a minute
+
+Declare a job, put it on its time, and let a worker run it. Here the jobs live in memory, in `scheduler.MemoryStore`, so the program needs no server:
+
+```zig
+//! The quick start of the guide: a shop sends the invoice of an order a
+//! second after the order. The jobs live in `scheduler.MemoryStore`, so
+//! the program needs no server: it starts a worker, puts the invoice of
+//! order 42 on its time, waits for the run, and stops the worker. `zig
+//! build test-scheduler` runs it.
+
+const std = @import("std");
+const log = @import("log");
+const scheduler = @import("scheduler");
+
+/// The worker logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// The job: the invoice of an order. Its fields are what it needs, the
+/// data of one run is its Payload, and `run` does the work.
+const SendInvoice = struct {
+    app: log.Logger,
+    sent: std.atomic.Value(u32) = .init(0),
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
+
+    pub const Payload = struct { order_id: u64, amount_cents: u64 };
+
+    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+        self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
+        _ = self.sent.fetchAdd(1, .release);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+
+    // The store keeps the jobs: the client puts them on their time, the
+    // worker runs them.
+    var memory: scheduler.MemoryStore = .init(gpa, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(gpa, io, memory.store(), .{});
+    var invoices: SendInvoice = .{ .app = app };
+    var worker: scheduler.Worker(struct { invoices: *SendInvoice }) = try .init(gpa, io, memory.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
+    defer worker.deinit(io);
+    try worker.start(io);
+
+    // The invoice of order 42, a second from now. The key names the job,
+    // so the same request again changes nothing.
+    const request: scheduler.Client.Request(SendInvoice) = .{
+        .key = "order-42",
+        .when = .{ .after = .fromSeconds(1) },
+        .payload = .{ .order_id = 42, .amount_cents = 1999 },
+    };
+    app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+    app.info("Scheduled again", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+
+    // Wait for the run, then stop: the worker takes no more jobs and
+    // waits for the runs to end, here for 5 s at most.
+    while (invoices.sent.load(.acquire) == 0) try io.sleep(.fromMilliseconds(50), .awake);
+    try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }));
+}
+```
+
+```text
+$ zig build run
+2026-10-27T14:23:35.038Z INFO  [scheduler] 1 job type, 10 workers, instance shop/064b88f629b1fe986fb32016b4e1c67e
+2026-10-27T14:23:35.038Z INFO  [app] Scheduled result=created
+2026-10-27T14:23:35.039Z INFO  [app] Scheduled again result=existing
+2026-10-27T14:23:36.046Z INFO  [app] Invoice sent order=42 amount_cents=1999 attempt=1
+2026-10-27T14:23:36.082Z INFO  [scheduler] stopping
+2026-10-27T14:23:36.082Z INFO  [scheduler] stopped
+```
+
+The compiler checks the job and the payload of every request, and a key names one job, so the same request again changes nothing. On MongoDB, `mongo.SchedulerStore` takes the place of the store in memory, and the instances of a service share their jobs: each due job goes to one of them, a lease keeps it while it runs, and the jobs of an instance that dies go to the others. Schedules such as `.dailyAt(11, 0, 0, .pm)` and cron, checked when the program compiles, retries, missed runs, history, a graceful stop and tests without a server are in the guide. **[Read the scheduler guide →](src/scheduler/examples/README.md)**
+
 ## Installation
 
 Requires **Zig 0.17.0**. Add the dependency to your `build.zig.zon`. This is the `dev` branch, the next version in progress, so the command fetches its latest commit:
@@ -457,7 +538,7 @@ zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
-CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute" and "http in a minute" are programs that the tests of rpc and of http check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute", "http in a minute" and "scheduler in a minute" are programs that the tests of rpc, of http and of scheduler check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
 
 The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
 
@@ -520,6 +601,19 @@ zig build down       # stop the servers
 ```
 
 The package stands on odm and on mongo, whose `OdmDriver` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 9.0; a change to `tests/odm/` or to `docker-compose.yml` counts as a change to odm.
+
+The end-to-end tests of scheduler, its stress tests and the programs of its guide that need mongod are a package of the same kind in `tests/scheduler`, against mongo-plain, mongo-stall and mongo-restart of the same profile:
+
+```sh
+cd tests/scheduler
+zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
+zig build examples   # only the programs of the guide and their check
+zig build stress     # the stress tests, in Debug and in ReleaseSafe
+zig build check      # build all of it without running it; no servers needed
+zig build down       # stop the servers
+```
+
+`MONGO_VERSION` picks the image, as in tests/mongo. The package stands on scheduler and on mongo, whose `SchedulerStore` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 7.0 and 9.0; a change to `tests/scheduler/` or to `docker-compose.yml` counts as a change to scheduler.
 
 The end-to-end tests of redis, with the programs of its guide, are a package of the same kind in `tests/redis`, against the Redis and Valkey servers of the profile `redis` of the same `docker-compose.yml`:
 

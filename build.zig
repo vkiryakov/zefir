@@ -1740,6 +1740,9 @@ fn addSchedulerGuide(
             }) },
         },
     });
+    // "scheduler in a minute" of the repository's README.md is a program
+    // of the guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
     for (scheduler_guide.programs) |name| {
         const exe = b.addExecutable(.{
             .name = b.fmt("scheduler-guide-{s}", .{name}),

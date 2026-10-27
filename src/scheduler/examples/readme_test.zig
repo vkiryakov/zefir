@@ -5,9 +5,10 @@
 //! a file that changes without its copy in README.md, a program that
 //! prints something else, or a message of the scheduler that changes,
 //! fails this test. build.zig embeds what each program printed in this
-//! build as `<name>.out`, and the compile checks of the scheduler as
-//! `scheduler-cases`. tests/scheduler checks the runs of the programs that
-//! need mongod.
+//! build as `<name>.out`, the compile checks of the scheduler as
+//! `scheduler-cases`, and README.md of the repository, whose "scheduler in
+//! a minute" is the quick start, as `root_readme`. tests/scheduler checks
+//! the runs of the programs that need mongod.
 
 const std = @import("std");
 const cases = @import("cases.zig");
@@ -51,6 +52,14 @@ test "every compile error of the scheduler that README.md quotes is one that a c
 
 test "every Zig block of README.md but those of build.zig is a part of an example" {
     try check.expectZigFromExamples("README.md", guide, example_files);
+}
+
+test "README.md of the repository shows scheduler in a minute and its run" {
+    const root = @embedFile("root_readme");
+    inline for (cases.root_readme) |name| {
+        try check.expectFile("README.md of the repository", root, "zig", @embedFile(name ++ ".zig"));
+        try check.expectRun("README.md of the repository", root, @embedFile(name ++ ".zig"), cases.command, @embedFile(name ++ ".out"));
+    }
 }
 
 test {
