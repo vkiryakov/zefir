@@ -12,8 +12,8 @@ unix_ms: i64,
 
 /// No moment: what `fromUtc` gives for values known only at run time that
 /// are no moment of the years 1970–9999 or no hour of their clock. A call
-/// that takes it answers `error.InvalidArgument`; `format` writes
-/// "invalid".
+/// that takes it answers `error.InvalidArgument`, and `Schedule.next`
+/// null; `format` writes "invalid".
 pub const invalid: Instant = .{ .unix_ms = std.math.minInt(i64) };
 
 const ms_per_day = 24 * 60 * 60 * 1000;

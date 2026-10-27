@@ -189,7 +189,10 @@ test "values known at run time are checked by check" {
 test "next stays within the years 1970-9999" {
     // Moments before the epoch count from it.
     try expectNexts(.everySeconds(1), .fromUnixMs(-5000), &.{"1970-01-01T00:00:00.000Z"});
-    try expectNexts(.dailyAt(3, 30, 0, .am), .invalid, &.{"1970-01-01T03:30:00.000Z"});
+    try expectNexts(.dailyAt(3, 30, 0, .am), .fromUnixMs(std.math.minInt(i64) + 1), &.{"1970-01-01T03:30:00.000Z"});
+    // No moment, which a refused fromUtc gives, has no next one.
+    for ([_]Schedule{ .everySeconds(1), .dailyAt(3, 30, 0, .am), .weeklyOn(.monday, 9, 0, 0, .am), .monthlyOn(1, 0, 0, 0, .h24), .cron("0 30 2 * * *") }) |s|
+        try testing.expectEqual(@as(?Instant, null), s.next(.invalid));
     // The last moment of 9999 ends every schedule.
     const late: Instant = .fromUtc(9999, 12, 31, 23, 0, 0, .h24);
     try expectNexts(.dailyAt(11, 30, 0, .pm), late, &.{"9999-12-31T23:30:00.000Z"});

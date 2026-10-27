@@ -145,8 +145,10 @@ fn cronOf(expression: []const u8) Schedule {
 /// The first moment of the schedule strictly after `after`. Moments run
 /// from the epoch to the end of 9999, and cron looks at most 9 years
 /// ahead: null when no moment is left in them, and always for
-/// `fixedDelay`, whose time the store counts, and for an invalid schedule.
+/// `fixedDelay`, whose time the store counts, for an invalid schedule and
+/// for `Instant.invalid`.
 pub fn next(s: Schedule, after: Instant) ?Instant {
+    if (after.unix_ms == Instant.invalid.unix_ms) return null;
     // A moment before the epoch counts from it.
     const from = @max(after.unix_ms, -1);
     if (from >= last_ms) return null;
