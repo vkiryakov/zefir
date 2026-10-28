@@ -429,8 +429,7 @@ the runtime, starts the service on the network, and runs it until Ctrl+C:
 //!                        call the API; http://localhost:5173 by default
 //!
 //! The objects of the service, its server and its OpenAPI document are
-//! built in Service.zig, for `main` and the tests alike. In tests/http,
-//! `zig build examples` runs it and sends it the requests of the guide.
+//! built in Service.zig, for `main` and the tests alike.
 
 const std = @import("std");
 const confy = @import("confy");
