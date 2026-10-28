@@ -104,8 +104,8 @@ strings: []u8,
 /// The copy of `options.reply_prefixes`.
 reply_prefixes: [][]const u8,
 pending: rpc.transport.Pending,
-/// The `std.Io` the transport was first used with; Debug checks that every
-/// call brings the same.
+/// The `std.Io` the transport was first used with; safe builds (Debug and
+/// ReleaseSafe) check that every call brings the same.
 io_vtable: std.atomic.Value(?*const std.Io.VTable) = .init(null),
 counts: std.EnumArray(shared.Counter, std.atomic.Value(u64)) = .initFill(.init(0)),
 /// Held by the server side's `start` from its first SUB to the flush that
