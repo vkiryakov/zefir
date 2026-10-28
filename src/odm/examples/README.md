@@ -285,9 +285,6 @@ and counts the adults again:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/odm, `zig build example-quick_start` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1446,9 +1443,6 @@ flowchart LR
 //!                         mongodb://admin@127.0.0.1:27018
 //!   APP_BIG_PASSWORD      that user's password
 //!   APP_BIG_DATABASE      the database of big-co; bigco by default
-//!
-//! In tests/odm, `zig build example-tenants` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1798,9 +1792,6 @@ four tasks serve requests through it:
 //!   APP_ADMIN_URI        a user who may make users, for the secrets
 //!                        system, such as mongodb://admin@127.0.0.1:27017
 //!   APP_ADMIN_PASSWORD   that user's password
-//!
-//! In tests/odm, `zig build example-rotation` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -2141,9 +2132,6 @@ the duplicate key, so log it where such values may go.
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/odm, `zig build example-errors` runs it against the servers of
-//! the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

@@ -16,9 +16,6 @@
 //!                         mongodb://admin@127.0.0.1:27018
 //!   APP_BIG_PASSWORD      that user's password
 //!   APP_BIG_DATABASE      the database of big-co; bigco by default
-//!
-//! In tests/odm, `zig build example-tenants` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
