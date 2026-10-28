@@ -110,6 +110,13 @@ jobs:
         shell: bash
         working-directory: tests/odm
         run: zig build check --summary all
+      # The same for tests/scheduler, the end-to-end tests of
+      # zefir-scheduler on mongo.SchedulerStore, which need mongod in
+      # Docker.
+      - if: contains(format(' {0} ', env.MODULES), ' scheduler ')
+        shell: bash
+        working-directory: tests/scheduler
+        run: zig build check --summary all
       # The same for tests/redis, the end-to-end tests of zefir-redis, which
       # need Redis and Valkey in Docker.
       - if: contains(format(' {0} ', env.MODULES), ' redis ')
@@ -187,6 +194,7 @@ jobs:
           --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg
           --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg
           --exclude tests/odm/zig-pkg --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg
+          --exclude tests/scheduler/zig-pkg
           --exclude examples/rpc-custom-transport/zig-pkg
           --exclude examples/rpc-custom-transport/consumer/zig-pkg
 
@@ -287,6 +295,47 @@ jobs:
       - name: Show the logs of the mongod servers
         if: failure()
         run: docker compose --profile mongo logs --no-color --tail 200 mongo-plain mongo-auth
+      - name: Stop the mongod servers
+        if: always()
+        run: docker compose --profile mongo down
+
+  # The end-to-end tests of zefir-scheduler against mongod in Docker: the
+  # conformance suite on mongo.SchedulerStore, also through a proxy that
+  # loses replies, the plan of a claim, and workers in several instances,
+  # one of them killed, through faults of the network and of the servers.
+  # On mongod 7.0.45, where the $expr with $$NOW of a claim takes no index,
+  # and 9.0.4, through MONGO_VERSION; ubuntu only, as mongo-e2e. It is not
+  # a required check. It runs when scheduler is among the modules to test,
+  # and tests/scheduler stands on mongo too: affected-modules.sh ties them,
+  # so it runs on every change to either. The stress tests of
+  # tests/scheduler run on a developer's machine only.
+  scheduler-e2e:
+    name: scheduler-e2e (${{ matrix.mongo }})
+    needs: changes
+    if: contains(format(' {0} ', needs.changes.outputs.modules), ' scheduler ')
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mongo: ["7.0.45", "9.0.4"]
+    runs-on: ubuntu-latest
+    env:
+      MONGO_VERSION: ${{ matrix.mongo }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      # The three services of the tests only.
+      - name: Start the mongod servers
+        run: docker compose --profile mongo up --detach --wait mongo-plain mongo-stall mongo-restart
+      - name: Run the end-to-end tests
+        working-directory: tests/scheduler
+        timeout-minutes: 20
+        run: zig build e2e --summary all
+      # Why a server did not start or a test failed: what mongod said.
+      # After the tests, so that it runs when either step fails.
+      - name: Show the logs of the mongod servers
+        if: failure()
+        run: docker compose --profile mongo logs --no-color --tail 200 mongo-plain mongo-stall mongo-restart
       - name: Stop the mongod servers
         if: always()
         run: docker compose --profile mongo down

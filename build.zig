@@ -16,6 +16,8 @@ const openapi_guide = @import("src/openapi/examples/cases.zig");
 const mongo_guide = @import("src/mongo/examples/cases.zig");
 const odm_cases = @import("src/odm/tests/cases.zig");
 const odm_guide = @import("src/odm/examples/cases.zig");
+const scheduler_cases = @import("src/scheduler/tests/cases.zig");
+const scheduler_guide = @import("src/scheduler/examples/cases.zig");
 const redis_guide = @import("src/redis/examples/cases.zig");
 
 pub fn build(b: *std.Build) void {
@@ -125,9 +127,23 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Jobs that an application puts on a time and that several instances
+    // of a service run: schedules, the client, the worker. It reaches a
+    // store only through its store contract, so it imports no database.
+    const scheduler = b.addModule("zefir-scheduler", .{
+        .root_source_file = b.path("src/scheduler/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
+    });
+
     // MongoDB for zefir applications: the client and the collection API,
-    // on the BSON of mongo-bson, and the reference driver of zefir-odm,
-    // which implements odm's driver contract.
+    // on the BSON of mongo-bson, the reference driver of zefir-odm, which
+    // implements odm's driver contract, and the store of zefir-scheduler,
+    // which implements its store contract.
     const mongo = b.addModule("zefir-mongo", .{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -137,6 +153,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = core },
             .{ .name = "mongo-bson", .module = mongo_bson },
             .{ .name = "odm", .module = odm },
+            .{ .name = "scheduler", .module = scheduler },
         },
     });
     mongo.addImport("build_options", build_options);
@@ -191,7 +208,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .mongo, .redis, .nats, .http, .security, .openapi
+    // Umbrella module: @import("zefir").core, .log, .confy, .validator, .rpc, .rpc_nats, .mongo_bson, .odm, .scheduler, .mongo, .redis, .nats, .http, .security, .openapi
     const zefir = b.addModule("zefir", .{
         .root_source_file = b.path("src/zefir.zig"),
         .target = target,
@@ -206,6 +223,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "rpc-nats", .module = rpc_nats },
             .{ .name = "mongo-bson", .module = mongo_bson },
             .{ .name = "odm", .module = odm },
+            .{ .name = "scheduler", .module = scheduler },
             .{ .name = "mongo", .module = mongo },
             .{ .name = "redis", .module = redis },
             .{ .name = "nats", .module = nats },
@@ -228,6 +246,7 @@ pub fn build(b: *std.Build) void {
     const test_rpc_nats = addModuleTestStep(b, test_step, "rpc-nats");
     const test_mongo_bson = addModuleTestStep(b, test_step, "mongo-bson");
     const test_odm = addModuleTestStep(b, test_step, "odm");
+    const test_scheduler = addModuleTestStep(b, test_step, "scheduler");
     const test_mongo = addModuleTestStep(b, test_step, "mongo");
     const test_redis = addModuleTestStep(b, test_step, "redis");
     const test_nats = addModuleTestStep(b, test_step, "nats");
@@ -240,8 +259,8 @@ pub fn build(b: *std.Build) void {
     // where usize has 32 bits.
     const validator_compile_step = b.step("compile-validator-tests", "Build the validator's test binaries for -Dtarget without running them");
     for (
-        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, mongo, redis, nats, http, security, openapi, zefir },
-        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_mongo, test_redis, test_nats, test_http, test_security, test_openapi, test_zefir },
+        [_]*std.Build.Module{ core, log, confy, validator, rpc, rpc_nats, mongo_bson, odm, scheduler, mongo, redis, nats, http, security, openapi, zefir },
+        [_]*std.Build.Step{ test_core, test_log, test_confy, test_validator, test_rpc, test_rpc_nats, test_mongo_bson, test_odm, test_scheduler, test_mongo, test_redis, test_nats, test_http, test_security, test_openapi, test_zefir },
     ) |module, module_test_step| {
         const tests = b.addTest(.{ .root_module = module });
         module_test_step.dependOn(&addRun(b, tests, tsan).step);
@@ -250,6 +269,11 @@ pub fn build(b: *std.Build) void {
 
     addValidatorTests(b, test_validator, validator_compile_step, validator, log, target, optimize, tsan);
     addAppCompileChecks(b, test_core, core, target, optimize);
+    addSchedulerCompileChecks(b, test_scheduler, &.{
+        .{ .name = "scheduler", .module = scheduler },
+        .{ .name = "core", .module = core },
+    }, target, optimize);
+    addSchedulerGuide(b, test_scheduler, .{ .core = core, .log = log, .confy = confy, .scheduler = scheduler }, target, optimize, tsan);
     const openapi_app = addHttpCompileChecks(b, test_http, http, validator, target, optimize);
     // `zig build openapi` rewrites every OpenAPI document of zefir's tests
     // and guides from the code: the tests that compare them with their
@@ -498,8 +522,8 @@ pub fn build(b: *std.Build) void {
     // Client.deinit() with cursors left panic in safe builds. Each program
     // must print the panic message and end in its own panic handler, which
     // exits with code 3 instead of aborting. They get their own Debug copies
-    // of mongo and the modules it imports, odm's below among them, whatever
-    // -Doptimize says.
+    // of mongo and the modules it imports, odm's and scheduler's below among
+    // them, whatever -Doptimize says.
     const panic_mongo_bson = b.createModule(.{
         .root_source_file = b.path("src/mongo-bson/root.zig"),
         .target = target,
@@ -520,6 +544,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "validator", .module = panic_validator },
         },
     });
+    const panic_scheduler = b.createModule(.{
+        .root_source_file = b.path("src/scheduler/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .imports = &.{
+            .{ .name = "core", .module = panic_core },
+        },
+    });
     const panic_mongo = b.createModule(.{
         .root_source_file = b.path("src/mongo/root.zig"),
         .target = target,
@@ -528,6 +560,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "core", .module = panic_core },
             .{ .name = "mongo-bson", .module = panic_mongo_bson },
             .{ .name = "odm", .module = panic_odm },
+            .{ .name = "scheduler", .module = panic_scheduler },
         },
     });
     panic_mongo.addOptions("build_options", version_options);
@@ -617,6 +650,38 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(exe);
         run.expectExitCode(0);
         test_odm.dependOn(&run.step);
+    }
+
+    // scheduler panic programs: a call of a MemoryStore or a Worker on
+    // another std.Io, a call on a Worker moved after start(), and a
+    // Worker.deinit() while another task waits in it panic in safe builds.
+    // Each program must print the panic message and end in its own panic
+    // handler, which exits with code 3 instead of aborting. They get the
+    // Debug copy of scheduler made above, next to those of odm and mongo,
+    // whatever -Doptimize says.
+    for ([_][2][]const u8{
+        .{ "memory_another_io", "panic: zefir-scheduler: a call on another std.Io than the store's: pass the io of MemoryStore.init" },
+        .{ "worker_another_io", "panic: zefir-scheduler: a call on another std.Io than the worker's: pass the io of Worker.init" },
+        .{ "worker_moved", "panic: zefir-scheduler: Worker moved after start(): keep it where start() ran" },
+        .{ "worker_deinit_while_waiting", "panic: zefir-scheduler: Worker.deinit() while a task is in wait, run or shutdown: let it return first" },
+    }) |case| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("scheduler-panic-{s}", .{case[0]}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("src/scheduler/testdata/panic/{s}.zig", .{case[0]})),
+                .target = target,
+                .optimize = .Debug,
+                .imports = &.{
+                    .{ .name = "scheduler", .module = panic_scheduler },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(exe);
+        run.expectStdErrMatch(case[1]);
+        // expectStdErrMatch accepts any exit: only the panic handler exits
+        // with 3, so a program that printed the text and returned fails.
+        run.expectExitCode(3);
+        test_scheduler.dependOn(&run.step);
     }
 
     // redis panic programs: a client moved after connect(), a call on
@@ -1633,6 +1698,99 @@ fn addOdmGuide(
     test_odm.dependOn(&addRun(b, b.addTest(.{ .name = "odm-guide-readme", .root_module = readme }), tsan).step);
 }
 
+/// The modules that the examples of the scheduler guide import here.
+/// zefir-mongo is not among them: what `test-scheduler` builds never
+/// imports it, and the programs that need mongod build in tests/scheduler.
+const SchedulerGuideModules = struct {
+    core: *std.Build.Module,
+    log: *std.Build.Module,
+    confy: *std.Build.Module,
+    scheduler: *std.Build.Module,
+};
+
+/// The examples of src/scheduler/examples/README.md, the guide of
+/// zefir-scheduler, as cases.zig there lists them: the tests on
+/// scheduler.MemoryStore, and the programs that need no server, each
+/// through example_main.zig, which exits with code 3 on a panic instead of
+/// aborting and with code 4 past its time limit; it must exit with 0.
+/// readme_test.zig then checks that README.md shows every file as it is,
+/// every run of those programs as it printed, and only the compile errors
+/// that the compile checks of the scheduler give. The programs that need
+/// mongod import zio and zefir-mongo: only tests/scheduler builds and runs
+/// them.
+fn addSchedulerGuide(
+    b: *std.Build,
+    test_scheduler: *std.Build.Step,
+    m: SchedulerGuideModules,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    tsan: bool,
+) void {
+    const dir = "src/scheduler/examples/";
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = m.core },
+        .{ .name = "log", .module = m.log },
+        .{ .name = "confy", .module = m.confy },
+        .{ .name = "scheduler", .module = m.scheduler },
+    };
+    for (scheduler_guide.tests) |name| {
+        const tests = b.addTest(.{
+            .name = b.fmt("scheduler-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = imports,
+            }),
+        });
+        test_scheduler.dependOn(&addRun(b, tests, tsan).step);
+    }
+
+    const readme = b.createModule(.{
+        .root_source_file = b.path(dir ++ "readme_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = tsan,
+        .imports = &.{
+            // The compile checks of the scheduler, with the errors that
+            // README.md quotes: a file of another directory of src/, which
+            // a module reaches only as a module.
+            .{ .name = "scheduler-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/scheduler/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
+    });
+    // "scheduler in a minute" of the repository's README.md is a program
+    // of the guide too.
+    readme.addAnonymousImport("root_readme", .{ .root_source_file = b.path("README.md") });
+    for (scheduler_guide.programs) |name| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("scheduler-guide-{s}", .{name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(dir ++ "example_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+                .imports = &.{.{ .name = "example", .module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt(dir ++ "{s}.zig", .{name})),
+                    .target = target,
+                    .optimize = optimize,
+                    .sanitize_thread = tsan,
+                    .imports = imports,
+                }) }},
+            }),
+        });
+        const run = addRun(b, exe, tsan);
+        run.expectExitCode(0);
+        readme.addAnonymousImport(b.fmt("{s}.out", .{name}), .{ .root_source_file = run.captureStdOut(.{}) });
+    }
+    test_scheduler.dependOn(&addRun(b, b.addTest(.{ .name = "scheduler-guide-readme", .root_module = readme }), tsan).step);
+}
+
 /// The modules that the examples of the redis guide import here.
 const RedisGuideModules = struct {
     core: *std.Build.Module,
@@ -2179,6 +2337,32 @@ fn addAppGuide(
         readme.addAnonymousImport(b.fmt("fixture-{s}", .{name}), .{ .root_source_file = b.path(b.fmt("src/core/app/tests/compile_errors/{s}.zig", .{name})) });
     }
     test_zefir.dependOn(&addRun(b, b.addTest(.{ .name = "app-guide-readme", .root_module = readme }), tsan).step);
+}
+
+/// zefir-scheduler compile errors: each fixture of
+/// src/scheduler/tests/cases.zig is compiled, never run, and passes only
+/// when the compilation fails with an error whose message is `expect`, as
+/// in addAppCompileChecks. `imports` are what a fixture may import.
+fn addSchedulerCompileChecks(
+    b: *std.Build,
+    test_scheduler: *std.Build.Step,
+    imports: []const std.Build.Module.Import,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) void {
+    for (scheduler_cases.compile_errors) |fixture| {
+        const t = b.addTest(.{
+            .name = std.fs.path.stem(fixture.file),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.file),
+                .target = target,
+                .optimize = optimize,
+                .imports = imports,
+            }),
+        });
+        t.expect_errors = .{ .contains = b.fmt("error: {s}", .{fixture.expect}) };
+        test_scheduler.dependOn(&t.step);
+    }
 }
 
 /// The compile checks of zefir.App, from the list in

@@ -10,11 +10,11 @@ zig build bench                                                                 
 zig fmt --check build.zig build.zig.zon src tests examples \
   --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
   --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg --exclude tests/odm/zig-pkg \
-  --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg \
+  --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg --exclude tests/scheduler/zig-pkg \
   --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
 ```
 
-CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/`, `tests/` and `examples/` runs none, except README.md at the root: its "confy in a minute", "core in a minute", "log in a minute", "nats in a minute", "rpc in a minute" and "http in a minute" are programs that the tests of confy, core, log, nats, rpc and http check, and since core is among them, an edit of README.md runs every module but mongo-bson. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`, and the folder of its guide into `folders` of `context7.json`, with its name in the rule that lists the modules, so that Context7 indexes the guide.
+CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/`, `tests/` and `examples/` runs none, except README.md at the root: its "confy in a minute", "core in a minute", "log in a minute", "nats in a minute", "rpc in a minute", "http in a minute" and "scheduler in a minute" are programs that the tests of confy, core, log, nats, rpc, http and scheduler check, and since core is among them, an edit of README.md runs every module but mongo-bson. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`, and the folder of its guide into `folders` of `context7.json`, with its name in the rule that lists the modules, so that Context7 indexes the guide.
 
 Each guide in `src/<module>/examples` is checked by the tests of its module, and the App guide in `src/core/examples/app` by those of `zefir`: a file it shows whole must be as it is, any other Zig block a part of a file that the build compiles (but for `// build.zig` blocks and, in the guides of log and the validator, code marked `// compile error:`), and the run of a program that needs neither a server nor zio as the program prints it, apart from what changes from run to run, such as timestamps and ids. A file and its copy in a guide therefore change in the same commit.
 
@@ -81,6 +81,19 @@ zig build down       # stop the servers
 ```
 
 The package stands on odm and on mongo, whose `OdmDriver` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 9.0; a change to `tests/odm/` or to `docker-compose.yml` counts as a change to odm.
+
+The end-to-end tests of scheduler, its stress tests and the programs of its guide that need mongod are a package of the same kind in `tests/scheduler`, against mongo-plain, mongo-stall and mongo-restart of the same profile:
+
+```sh
+cd tests/scheduler
+zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
+zig build examples   # only the programs of the guide and their check
+zig build stress     # the stress tests, in Debug and in ReleaseSafe
+zig build check      # build all of it without running it; no servers needed
+zig build down       # stop the servers
+```
+
+`MONGO_VERSION` picks the image, as in tests/mongo. The package stands on scheduler and on mongo, whose `SchedulerStore` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 7.0 and 9.0; a change to `tests/scheduler/` or to `docker-compose.yml` counts as a change to scheduler.
 
 The end-to-end tests of redis, with the programs of its guide, are a package of the same kind in `tests/redis`, against the Redis and Valkey servers of the profile `redis` of the same `docker-compose.yml`:
 

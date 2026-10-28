@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A modular framework for building services in Zig.</strong><br>
-  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server with OpenAPI documents built from its types, an async MongoDB driver and a typed ODM over it, a Redis client, JSON Web Tokens and an application container today.
+  Web servers, web services and APIs, built from modules you pick: typed configuration, request deadlines, cancellation, tracing, structured logging, validation, a NATS client, RPC, an HTTP server with OpenAPI documents built from its types, an async MongoDB driver and a typed ODM over it, a Redis client, JSON Web Tokens, a scheduler of jobs and an application container today.
 </p>
 
 <p align="center">
@@ -75,7 +75,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-otel`                       | OpenTelemetry exporters                                                                                                                                                                                                       | 📋 Planned                                                                                                                                                        |
 | `zefir-health`                     | Liveness, readiness, startup health checks                                                                                                                                                                                    | 📋 Planned                                                                                                                                                        |
 | **Background Processing**          |                                                                                                                                                                                                                               |                                                                                                                                                                  |
-| `zefir-scheduler`                  | Scheduled jobs, cron expressions, timers                                                                                                                                                                                      | 🚧 In progress                                                                                                                                                    |
+| `zefir-scheduler`                  | Jobs on a time for the instances of a service: one-shot and repeating, schedules and cron checked at compile time, leases, retries, history; in memory or MongoDB, or any store that passes its conformance suite             | ✅ Done · [docs](src/scheduler/examples/README.md)                                                                                                                |
 | **Developer Experience & Tooling** |                                                                                                                                                                                                                               |                                                                                                                                                                  |
 | `zefir-openapi`                    | OpenAPI 3.1 and 3.2 documents of zefir-http services, built by the compiler from their routes, DTOs, errors and middleware                                                                                                    | ✅ Done · [docs](src/openapi/examples/README.md)                                                                                                                  |
 | `zefir-cli`                        | Project scaffolding, code generation                                                                                                                                                                                          | 📋 Planned                                                                                                                                                        |
@@ -445,6 +445,86 @@ GET /api/v1/todos
 ```
 
 The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `.listen = .{ .port = 8080 }` puts `http.native.Backend` on zio in the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
+
+## scheduler in a minute
+
+Declare a job, put it on its time, and let a worker run it. Here the jobs live in memory, in `scheduler.MemoryStore`, so the program needs no server:
+
+```zig
+//! The quick start of the guide: a shop sends the invoice of an order a
+//! second after the order. The jobs live in `scheduler.MemoryStore`, so
+//! the program needs no server: it starts a worker, puts the invoice of
+//! order 42 on its time, waits for the run, and stops the worker.
+
+const std = @import("std");
+const log = @import("log");
+const scheduler = @import("scheduler");
+
+/// The worker logs through std.log; this sends its records to the logger.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// The job: the invoice of an order. Its fields are what it needs, the
+/// data of one run is its Payload, and `run` does the work.
+const SendInvoiceJob = struct {
+    app: log.Logger,
+    sent: std.atomic.Value(u32) = .init(0),
+
+    pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
+
+    pub const Payload = struct { order_id: u64, amount_cents: u64 };
+
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
+        self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
+        _ = self.sent.fetchAdd(1, .release);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    const logger: log.Logger = try .init(gpa, io, .{ .format = .text });
+    defer logger.deinit();
+    logger.installStdLog();
+    const app = logger.scoped("app");
+
+    // The store keeps the jobs: the client puts them on their time, the
+    // worker runs them.
+    var memory: scheduler.MemoryStore = .init(gpa, io, .{});
+    defer memory.deinit();
+    const client: scheduler.Client = .init(gpa, io, memory.store(), .{});
+    var invoices: SendInvoiceJob = .{ .app = app };
+    var worker: scheduler.Worker(struct { invoices: *SendInvoiceJob }) = try .init(gpa, io, memory.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
+    defer worker.deinit(io);
+    try worker.start(io);
+
+    // The invoice of order 42, a second from now. The key names the job,
+    // so the same request again changes nothing.
+    const request: scheduler.Client.Request(SendInvoiceJob) = .{
+        .key = "order-42",
+        .when = .{ .after = .fromSeconds(1) },
+        .payload = .{ .order_id = 42, .amount_cents = 1999 },
+    };
+    app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoiceJob, request, .{}) });
+    app.info("Scheduled again", .{ .result = try client.schedule(io, .root, SendInvoiceJob, request, .{}) });
+
+    // Wait for the run, then stop: the worker takes no more jobs and
+    // waits for the runs to end, here for 5 s at most.
+    while (invoices.sent.load(.acquire) == 0) try io.sleep(.fromMilliseconds(50), .awake);
+    try worker.shutdown(io, .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }));
+}
+```
+
+```text
+$ zig build run
+2026-10-27T14:23:35.038Z INFO  [scheduler] 1 job type, 10 workers, instance shop/064b88f629b1fe986fb32016b4e1c67e
+2026-10-27T14:23:35.038Z INFO  [app] Scheduled result=created
+2026-10-27T14:23:35.039Z INFO  [app] Scheduled again result=existing
+2026-10-27T14:23:36.046Z INFO  [app] Invoice sent order=42 amount_cents=1999 attempt=1
+2026-10-27T14:23:36.082Z INFO  [scheduler] stopping
+2026-10-27T14:23:36.082Z INFO  [scheduler] stopped
+```
+
+The compiler checks the job and the payload of every request, and a key names one job, so the same request again changes nothing. On MongoDB, `mongo.SchedulerStore` takes the place of the store in memory, and the instances of a service share their jobs: each due job goes to one of them, a lease keeps it while it runs, and the jobs of an instance that dies go to the others. Schedules such as `.dailyAt(11, 0, 0, .pm)` and cron, checked when the program compiles, retries, missed runs, history, a graceful stop and tests without a server are in the guide. **[Read the scheduler guide →](src/scheduler/examples/README.md)**
 
 ## Installation
 

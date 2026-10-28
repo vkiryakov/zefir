@@ -272,7 +272,7 @@ pub const Uri = struct {
                 return fail(d, error.Unsupported, "loadBalanced=true: v0.1 connects to a standalone mongod, not through a load balancer", .{});
             },
             .replicaSet, .readPreference, .readPreferenceTags, .maxStalenessSeconds => return fail(d, error.Unsupported, "{s}: " ++ standalone_only, .{name}),
-            .w, .journal, .wTimeoutMS => return fail(d, error.Unsupported, "{s}: v0.1 takes no write concern from the connection string: put writeConcern in the command, or leave the server's default", .{name}),
+            .w, .journal, .wTimeoutMS => return fail(d, error.Unsupported, "{s}: v0.1 takes no write concern from the connection string: put write_concern in the options of the operation", .{name}),
             .readConcernLevel => return fail(d, error.Unsupported, "readConcernLevel: v0.1 takes no read concern from the connection string: put readConcern in the command, or leave the server's default", .{}),
             .socketTimeoutMS => return fail(d, error.Unsupported, "socketTimeoutMS: v0.1 bounds operations by their deadline; use timeoutMS for a default one", .{}),
             .waitQueueTimeoutMS => return fail(d, error.Unsupported, "waitQueueTimeoutMS: v0.1 bounds the wait for a connection by the deadline of the operation and serverSelectionTimeoutMS; use timeoutMS for a default deadline", .{}),

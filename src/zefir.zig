@@ -12,6 +12,7 @@ pub const rpc = @import("rpc");
 pub const rpc_nats = @import("rpc-nats");
 pub const mongo_bson = @import("mongo-bson");
 pub const odm = @import("odm");
+pub const scheduler = @import("scheduler");
 pub const mongo = @import("mongo");
 pub const redis = @import("redis");
 pub const nats = @import("nats");
@@ -153,4 +154,96 @@ test "odm.Registry is a bean of zefir.App: the stop drains it within the deadlin
     try testing.expectEqual(@as(usize, 1), counts.opened);
     try testing.expectEqual(@as(usize, 1), counts.closed);
     try testing.expectEqual(@as(usize, 1), counts.freed);
+}
+
+test "scheduler.Worker and its store are beans of zefir.App: the worker gives its job back before the store stops" {
+    const std = @import("std");
+    const testing = std.testing;
+    const io = testing.io;
+    // A job type is a provider: App fills its fields, here the client it
+    // would schedule other jobs with. Its run sleeps until it is cancelled.
+    const Sleeper = struct {
+        client: *scheduler.Client,
+        started: std.atomic.Value(bool) = .init(false),
+
+        pub const scheduler_job: scheduler.Job = .{ .name = "sleeper" };
+
+        pub fn run(self: *@This(), ctx: *scheduler.Context) !void {
+            self.started.store(true, .release);
+            try ctx.io().sleep(.fromSeconds(60), .awake);
+        }
+    };
+    // The store of the jobs, with a stop as a real one has (the client of
+    // mongo.SchedulerStore): a MemoryStore behind a FaultyStore, whose
+    // every call fails once App stopped it.
+    const JobStore = struct {
+        gpa: std.mem.Allocator,
+        memory: *scheduler.MemoryStore,
+        faulty: scheduler.testing.FaultyStore,
+        stopped: std.atomic.Value(bool) = .init(false),
+
+        pub fn shutdown(store: *@This(), task_io: std.Io, deadline: std.Io.Clock.Timestamp) !void {
+            _ = deadline;
+            for (std.enums.values(scheduler.testing.Op)) |op| store.faulty.failNext(task_io, op, error.Unavailable, std.math.maxInt(u32));
+            store.stopped.store(true, .release);
+        }
+
+        pub fn deinit(store: *@This()) void {
+            store.memory.deinit();
+            store.gpa.destroy(store.memory);
+        }
+    };
+    const Jobs = struct { sleeper: *Sleeper };
+    const Worker = scheduler.Worker(Jobs);
+    const Root = struct {
+        pub const module: app.Module = .{
+            .providers = &.{Sleeper},
+            .factories = &.{Scheduling},
+        };
+
+        pub const Scheduling = struct {
+            pub fn jobStore(gpa: std.mem.Allocator, task_io: std.Io) !JobStore {
+                const memory = try gpa.create(scheduler.MemoryStore);
+                memory.* = .init(gpa, task_io, .{});
+                return .{ .gpa = gpa, .memory = memory, .faulty = .init(memory.store()) };
+            }
+            pub fn schedulerClient(gpa: std.mem.Allocator, task_io: std.Io, store: *JobStore) scheduler.Client {
+                return .init(gpa, task_io, store.faulty.store(), .{});
+            }
+            /// A worker has requestStop: App stops it with the servers, before
+            /// the store it takes.
+            pub fn jobWorker(gpa: std.mem.Allocator, task_io: std.Io, store: *JobStore, jobs: Jobs) !Worker {
+                return .init(gpa, task_io, store.faulty.store(), jobs, .{ .shutdown_grace = .fromMilliseconds(300), .poll_every = .fromMilliseconds(100) });
+            }
+        };
+    };
+    var application = try App(Root).init(testing.allocator, io, .{}, .{ .shutdown_timeout = .fromSeconds(10) });
+    defer application.deinit();
+    try application.start();
+    const client: *scheduler.Client = application.get(scheduler.Client);
+    _ = try client.schedule(io, .root, Sleeper, .{ .key = "nap", .when = .{ .after = .zero } }, .{});
+    const sleeper: *Sleeper = application.get(Sleeper);
+    const give_up = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(10));
+    while (!sleeper.started.load(.acquire)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= give_up.nanoseconds) return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    application.requestStop();
+    try application.wait();
+
+    try testing.expectEqual(app.State.stopped, application.state());
+    try testing.expectEqual(null, application.failure());
+    try testing.expectEqual(Worker.State.stopped, application.get(Worker).state());
+    // The worker gave the job back before App stopped the store: a return
+    // after it would have failed and left the job running. The store is
+    // read past the stop of its wrapper.
+    const store: *JobStore = application.get(JobStore);
+    try testing.expect(store.stopped.load(.acquire));
+    try testing.expectEqual(@as(u32, 1), store.faulty.calls(io, .finish));
+    const reader: scheduler.Client = .init(testing.allocator, io, store.memory.store(), .{});
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const r = (try reader.get(io, .root, .of(Sleeper, "nap"), arena.allocator(), .{})) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(scheduler.State.pending, r.state);
+    try testing.expectEqual(@as(u32, 0), r.attempt);
 }

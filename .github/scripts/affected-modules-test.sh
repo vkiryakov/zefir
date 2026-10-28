@@ -96,22 +96,36 @@ odm_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/odm" --include='*
     sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|validator|mongo-bson)$|\.zig$' | sort -u)
 expect "the code of zefir-odm imports only std, builtin, core, validator and mongo-bson" "" "$(echo $odm_foreign)"
 
+# zefir-scheduler reaches a store only through its contract, so it imports
+# no database: build.zig gives it core alone, and its code imports nothing
+# else. src/scheduler/tests/, src/scheduler/testdata/ and
+# src/scheduler/examples/ hold programs with imports of their own.
+scheduler_imports=$(awk '
+    /b\.addModule\("zefir-scheduler",/ { inside = 1; next }
+    inside && /^    }\);/ { exit }
+    inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
+' "$here/../../build.zig" | sort)
+expect "zefir-scheduler imports only core" "core" "$(echo $scheduler_imports)"
+scheduler_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/scheduler" --include='*.zig' --exclude-dir=tests --exclude-dir=testdata --exclude-dir=examples |
+    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core)$|\.zig$' | sort -u)
+expect "the code of zefir-scheduler imports only std, builtin and core" "" "$(echo $scheduler_foreign)"
+
 # An acceptance criterion of zefir-mongo: it stands on core, the BSON of
-# zefir-mongo-bson and the driver contract of zefir-odm alone, so
-# build.zig gives it only those three.
+# zefir-mongo-bson, the driver contract of zefir-odm and the store
+# contract of zefir-scheduler alone, so build.zig gives it only those four.
 mongo_imports=$(awk '
     /b\.addModule\("zefir-mongo",/ { inside = 1; next }
     inside && /^    }\);/ { exit }
     inside && match($0, /\.name = "[^"]*"/) { print substr($0, RSTART + 9, RLENGTH - 10) }
 ' "$here/../../build.zig" | sort)
-expect "zefir-mongo imports only core, mongo-bson and odm" "core mongo-bson odm" "$(echo $mongo_imports)"
+expect "zefir-mongo imports only core, mongo-bson, odm and scheduler" "core mongo-bson odm scheduler" "$(echo $mongo_imports)"
 # The same in its code: only std, builtin, core, build_options, which holds
-# the version it sends in hello, mongo-bson, odm and the module's own
-# files. src/mongo/tests/, src/mongo/testdata/ and src/mongo/examples/
-# hold programs with imports of their own.
+# the version it sends in hello, mongo-bson, odm, scheduler and the
+# module's own files. src/mongo/tests/, src/mongo/testdata/ and
+# src/mongo/examples/ hold programs with imports of their own.
 mongo_foreign=$(grep -rhoE '@import\("[^"]*"\)' "$here/../../src/mongo" --include='*.zig' --exclude-dir=tests --exclude-dir=testdata --exclude-dir=examples |
-    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|build_options|mongo-bson|odm)$|\.zig$' | sort -u)
-expect "the code of zefir-mongo imports only std, builtin, core, build_options, mongo-bson and odm" "" "$(echo $mongo_foreign)"
+    sed 's/@import("\(.*\)")/\1/' | grep -vE '^(std|builtin|core|build_options|mongo-bson|odm|scheduler)$|\.zig$' | sort -u)
+expect "the code of zefir-mongo imports only std, builtin, core, build_options, mongo-bson, odm and scheduler" "" "$(echo $mongo_foreign)"
 
 # The same for zefir-redis: it stands on core alone, and its code imports
 # only std, builtin, core, build_options, which holds the version it sends
@@ -203,33 +217,35 @@ while IFS='|' read -r change modules <&3; do
     git commit -q -m "$change"
     expect "$(echo $change)" "$(echo $modules)" "$(sh "$script" "$base" HEAD)"
 done 3<<'EOF'
-edit src/core/Context.zig                       | core log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
-edit src/log/Logger.zig                         | log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
-edit src/confy/root.zig                         | confy rpc rpc-nats odm mongo redis nats http security openapi zefir
-edit src/validator/strings.zig                  | validator rpc rpc-nats odm mongo http security openapi zefir
+edit src/core/Context.zig                       | core log confy validator rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
+edit src/log/Logger.zig                         | log confy validator rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
+edit src/confy/root.zig                         | confy rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
+edit src/validator/strings.zig                  | validator rpc rpc-nats odm scheduler mongo http security openapi zefir
 edit src/rpc/root.zig                           | rpc rpc-nats security zefir
-edit src/odm/root.zig                           | odm mongo zefir
-edit src/rpc/root.zig src/odm/root.zig          | rpc rpc-nats odm mongo security zefir
-edit src/mongo-bson/root.zig                    | mongo-bson odm mongo zefir
-edit src/mongo-bson/RawDocument.zig             | mongo-bson odm mongo zefir
-edit src/odm/root.zig src/mongo/root.zig        | odm mongo zefir
-edit src/odm/Registry.zig                       | odm mongo zefir
-edit src/mongo/Client.zig                       | mongo zefir
-edit src/mongo/engine/Connection.zig            | mongo zefir
+edit src/odm/root.zig                           | odm scheduler mongo zefir
+edit src/rpc/root.zig src/odm/root.zig          | rpc rpc-nats odm scheduler mongo security zefir
+edit src/mongo-bson/root.zig                    | mongo-bson odm scheduler mongo zefir
+edit src/mongo-bson/RawDocument.zig             | mongo-bson odm scheduler mongo zefir
+edit src/odm/root.zig src/mongo/root.zig        | odm scheduler mongo zefir
+edit src/odm/Registry.zig                       | odm scheduler mongo zefir
+edit src/scheduler/root.zig                     | scheduler mongo zefir
+edit src/mongo/Client.zig                       | scheduler mongo zefir
+edit src/mongo/engine/Connection.zig            | scheduler mongo zefir
 edit src/redis/root.zig                         | redis zefir
 edit src/redis/resp/Reader.zig                  | redis zefir
 edit src/rpc-nats/Transport.zig                 | rpc-nats zefir
 edit src/nats/Client.zig                        | rpc-nats nats zefir
 edit tests/nats/e2e/pubsub.zig                  | rpc-nats nats zefir
 edit tests/nats/README.md                       | rpc-nats nats zefir
-edit docker-compose.yml                         | rpc-nats odm mongo redis nats zefir
+edit docker-compose.yml                         | rpc-nats odm scheduler mongo redis nats zefir
 edit tests/rpc-nats/e2e/root.zig                | rpc-nats zefir
 edit tests/rpc-nats/conf/acl.conf               | rpc-nats zefir
 edit tests/http/build.zig                       | http security openapi zefir
-edit tests/mongo/e2e/crud.zig                   | mongo zefir
-edit tests/mongo/build.zig.zon                  | mongo zefir
-edit tests/mongo/stress/storm.zig               | mongo zefir
-edit tests/odm/e2e/root.zig                     | odm mongo zefir
+edit tests/mongo/e2e/crud.zig                   | scheduler mongo zefir
+edit tests/mongo/build.zig.zon                  | scheduler mongo zefir
+edit tests/mongo/stress/storm.zig               | scheduler mongo zefir
+edit tests/odm/e2e/root.zig                     | odm scheduler mongo zefir
+edit tests/scheduler/e2e/root.zig               | scheduler mongo zefir
 edit tests/redis/e2e/root.zig                   | redis zefir
 edit tests/redis/conf/users.acl                 | redis zefir
 edit tests/openapi/build.zig                    | http security openapi zefir
@@ -238,18 +254,18 @@ edit tests/app/build.zig                        | zefir
 edit examples/rpc-custom-transport/src/root.zig | rpc rpc-nats security zefir
 edit examples/rpc-custom-transport/consumer/build.zig | rpc rpc-nats security zefir
 edit examples/rpc-custom-transport/README.md    | rpc rpc-nats security zefir
-edit examples/other/main.zig                    | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
-edit src/confy/examples/README.md               | confy rpc rpc-nats odm mongo redis nats http security openapi zefir
-edit README.md src/mongo-bson/root.zig          | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit README.md                                  | core log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
+edit examples/other/main.zig                    | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit src/core/root.zig src/nats/root.zig        | core log confy validator rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
+edit src/confy/examples/README.md               | confy rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
+edit README.md src/mongo-bson/root.zig          | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit README.md                                  | core log confy validator rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
 edit CONTRIBUTING.md                            |
 edit context7.json                              |
 edit docs/plan.md docs/notes.txt                |
-edit build.zig                                  | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit build.zig.zon                              | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit src/zefir.zig                              | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit .github/workflows/ci.yml                   | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
+edit build.zig                                  | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit build.zig.zon                              | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit src/zefir.zig                              | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit .github/workflows/ci.yml                   | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
 edit src/http/root.zig                          | http security openapi zefir
 edit src/security/jwt/Verifier.zig              | security zefir
 edit src/security/examples/README.md            | security zefir
@@ -258,13 +274,13 @@ edit src/openapi/examples/README.md             | http security openapi zefir
 edit src/http/examples/dto.zig                  | http security openapi zefir
 edit src/security/jwt/Verifier.zig src/openapi/schema.zig | http security openapi zefir
 edit src/redis/root.zig src/openapi/schema.zig  | redis http security openapi zefir
-edit src/ws/root.zig                            | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit src/helpers.zig                            | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit src/notes.md                               | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit tests/other/main.zig                       | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-edit LICENSE                                    | core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir
-git rm -q src/log/root.zig                      | log confy validator rpc rpc-nats odm mongo redis nats http security openapi zefir
-git mv src/odm/root.zig src/rpc/odm.zig         | rpc rpc-nats odm mongo security zefir
+edit src/ws/root.zig                            | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit src/helpers.zig                            | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit src/notes.md                               | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit tests/other/main.zig                       | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+edit LICENSE                                    | core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir
+git rm -q src/log/root.zig                      | log confy validator rpc rpc-nats odm scheduler mongo redis nats http security openapi zefir
+git mv src/odm/root.zig src/rpc/odm.zig         | rpc rpc-nats odm scheduler mongo security zefir
 EOF
 
 # Only the changes on HEAD's side count: here the base moved on with a
@@ -276,9 +292,9 @@ later=$(git rev-parse HEAD)
 git checkout -q --detach "$base"
 edit src/validator/root.zig
 git commit -q -am "head"
-expect "a later base" "validator rpc rpc-nats odm mongo http security openapi zefir" "$(sh "$script" "$later" HEAD)"
+expect "a later base" "validator rpc rpc-nats odm scheduler mongo http security openapi zefir" "$(sh "$script" "$later" HEAD)"
 
-expect "--all" "core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir" "$(sh "$script" --all)"
+expect "--all" "core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir" "$(sh "$script" --all)"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures failed"

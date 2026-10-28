@@ -8,13 +8,14 @@
 # A file under src/<module>/ affects that module and every module whose
 # tests import it, directly or through other modules; zefir imports them
 # all. tests/nats/, tests/rpc-nats/, tests/http/, tests/mongo/,
-# tests/odm/ and tests/redis/, the end-to-end tests of nats, of rpc-nats,
-# of http, of mongo, of odm and of redis, count as their modules;
-# tests/app/, the end-to-end tests of zefir.App, which import the umbrella
-# module, counts as zefir. tests/openapi/, the checks of the JSON Schema
-# that zefir-openapi and the validator write, counts as openapi, which
-# imports the validator. docker-compose.yml, the servers of nats,
-# rpc-nats, mongo, odm and redis, counts as all five.
+# tests/odm/, tests/scheduler/ and tests/redis/, the end-to-end tests of
+# nats, of rpc-nats, of http, of mongo, of odm, of scheduler and of redis,
+# count as their modules; tests/app/, the end-to-end tests of zefir.App,
+# which import the umbrella module, counts as zefir. tests/openapi/, the
+# checks of the JSON Schema that zefir-openapi and the validator write,
+# counts as openapi, which imports the validator. docker-compose.yml, the
+# servers of nats, rpc-nats, mongo, odm, scheduler and redis, counts as
+# all six.
 # examples/rpc-custom-transport/, a transport outside zefir that CI runs
 # against rpc, counts as rpc. build.zig, build.zig.zon, src/zefir.zig,
 # .github/ and any other path the script does not know affect every
@@ -23,16 +24,16 @@
 # CONTRIBUTING.md among them, and docs/) affects none, and neither does
 # context7.json, which says what Context7 indexes of the guides. README.md
 # at the root does: its "confy in a minute", "core in a minute", "log in a
-# minute", "nats in a minute", "rpc in a minute" and "http in a minute"
-# are programs of the guides of those modules, which their tests check, so
-# it counts as all six; with core among them, it affects every module but
-# mongo-bson.
+# minute", "nats in a minute", "rpc in a minute", "http in a minute" and
+# "scheduler in a minute" are programs of the guides of those modules,
+# which their tests check, so it counts as all seven; with core among
+# them, it affects every module but mongo-bson.
 set -eu
 
 # The modules and what the tests of each one import. Keep this in sync with
 # build.zig: the `.imports` of each module and of the programs that its
 # test-<module> step builds. CI tests only the modules listed here.
-modules="core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi zefir"
+modules="core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi zefir"
 imports() {
     case $1 in
     core) ;;
@@ -57,10 +58,14 @@ imports() {
     # odm imports mongo-bson, core and validator; the programs of its guide
     # read settings with confy and log with log.
     odm) echo mongo-bson core validator confy log ;;
-    # mongo imports mongo-bson, core and odm, and the examples of its guide
-    # and its end-to-end tests read their settings with confy and log with
-    # log.
-    mongo) echo mongo-bson core odm confy log ;;
+    # scheduler imports core; the programs of its guide read settings with
+    # confy and log with log, and tests/scheduler builds its store of
+    # MongoDB and the guide's programs that need mongod with mongo.
+    scheduler) echo core confy log mongo mongo-bson odm ;;
+    # mongo imports mongo-bson, core, odm and scheduler, and the examples of
+    # its guide and its end-to-end tests read their settings with confy and
+    # log with log.
+    mongo) echo mongo-bson core odm scheduler confy log ;;
     # redis imports core, and the examples of its guide and its end-to-end
     # tests read their settings with confy and log with log.
     redis) echo core confy log ;;
@@ -75,7 +80,7 @@ imports() {
     # openapi reads the server through http and the rules through the
     # validator.
     openapi) echo http validator ;;
-    zefir) echo core log confy validator rpc rpc-nats mongo-bson odm mongo redis nats http security openapi ;;
+    zefir) echo core log confy validator rpc rpc-nats mongo-bson odm scheduler mongo redis nats http security openapi ;;
     esac
 }
 
@@ -127,12 +132,13 @@ elif [ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ]; then
         tests/http/*) changed="$changed http" ;;
         tests/mongo/*) changed="$changed mongo" ;;
         tests/odm/*) changed="$changed odm" ;;
+        tests/scheduler/*) changed="$changed scheduler" ;;
         tests/redis/*) changed="$changed redis" ;;
         tests/openapi/*) changed="$changed openapi" ;;
         tests/app/*) changed="$changed zefir" ;;
         examples/rpc-custom-transport/*) changed="$changed rpc" ;;
-        docker-compose.yml) changed="$changed nats rpc-nats mongo odm redis" ;;
-        README.md) changed="$changed rpc http core log confy nats" ;;
+        docker-compose.yml) changed="$changed nats rpc-nats mongo odm scheduler redis" ;;
+        README.md) changed="$changed rpc http core log confy nats scheduler" ;;
         docs/* | *.md) ;;
         *) all=true ;;
         esac

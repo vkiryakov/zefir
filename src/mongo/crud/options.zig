@@ -6,9 +6,9 @@
 //! what is there.
 //!
 //! There is no `maxTimeMS`: the deadline comes from the context only, and
-//! the client writes it. There is no `writeConcern` or `readConcern`
-//! either: a standalone server writes with `w: 1`; who needs them puts
-//! them in the body of `mongo.Client.write` or `runCommand`.
+//! the client writes it. There is no `readConcern` either: who needs one
+//! puts it in the body of `runCommand`. The writes and the `findOneAnd*`
+//! take `write_concern`, which goes out as `writeConcern`.
 
 const std = @import("std");
 const bson = @import("mongo-bson");
@@ -16,12 +16,35 @@ const errors = @import("../errors.zig");
 const results = @import("results.zig");
 const Diagnostics = errors.Diagnostics;
 
+/// When the server acknowledges one write: `mongo.WriteConcern`, the
+/// `write_concern` of the options of the writes and of the `findOneAnd*`,
+/// sent as `writeConcern: {w: 1 | "majority", j: true}`. Without one, a
+/// standalone mongod acknowledges a write once it holds it in memory, and
+/// writes its journal to disk every 100 ms: a hard crash in between loses
+/// a write it acknowledged.
+///
+/// There is no `wtimeout`, which a standalone server never applies, and
+/// no `w: 0`: the client waits for the reply of every write.
+pub const WriteConcern = struct {
+    /// Who acknowledges the write: the server, or a majority of the
+    /// servers. A standalone mongod is a majority of one: it acknowledges
+    /// `.majority` once the write is in its journal on disk.
+    w: W = .one,
+    /// Acknowledge once the write is in the journal on disk: `j: true`.
+    journal: bool = false,
+
+    pub const W = enum { one, majority };
+};
+
 pub const InsertOneOptions = struct {
     /// The memory of the result, and of the call's scratch, which is
     /// freed before the call returns.
     allocator: std.mem.Allocator,
     /// Let the document past the collection's validator.
     bypass_document_validation: bool = false,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     /// Sent with the command, for the server's logs and profiler.
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
@@ -45,6 +68,9 @@ pub const InsertManyOptions = struct {
     ordered: bool = true,
     /// Let the documents past the collection's validator.
     bypass_document_validation: bool = false,
+    /// When the server acknowledges each batch, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     /// Sent with each batch, for the server's logs and profiler.
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
@@ -88,6 +114,9 @@ pub const UpdateOptions = struct {
     let: ?bson.RawDocument = null,
     /// Let the changed documents past the collection's validator.
     bypass_document_validation: bool = false,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     /// Sent with the command, for the server's logs and profiler.
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
@@ -118,6 +147,9 @@ pub const ReplaceOptions = struct {
     let: ?bson.RawDocument = null,
     /// Let the replacement past the collection's validator.
     bypass_document_validation: bool = false,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
@@ -139,6 +171,9 @@ pub const DeleteOptions = struct {
     hint: ?Hint = null,
     /// Variables that the filter reads as `$$name`.
     let: ?bson.RawDocument = null,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, or `Timeout` by code 50, the whole reply of
@@ -177,6 +212,9 @@ pub const FindOneAndUpdateOptions = struct {
     hint: ?Hint = null,
     let: ?bson.RawDocument = null,
     bypass_document_validation: bool = false,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
@@ -200,6 +238,9 @@ pub const FindOneAndReplaceOptions = struct {
     hint: ?Hint = null,
     let: ?bson.RawDocument = null,
     bypass_document_validation: bool = false,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
@@ -221,6 +262,9 @@ pub const FindOneAndDeleteOptions = struct {
     collation: ?bson.RawDocument = null,
     hint: ?Hint = null,
     let: ?bson.RawDocument = null,
+    /// When the server acknowledges the write, sent as `writeConcern`;
+    /// null sends none, and the server's default holds.
+    write_concern: ?WriteConcern = null,
     comment: ?bson.Value = null,
     diagnostics: ?*Diagnostics = null,
     /// After `CommandFailed`, `Timeout` by code 50 or `WriteFailed`, the
