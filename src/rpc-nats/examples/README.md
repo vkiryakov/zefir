@@ -201,9 +201,6 @@ calls it through the broker:
 //!   APP_NATS_URL        the NATS server; nats://127.0.0.1:4222 by default
 //!   APP_SERVE_SECONDS   how long it goes on serving after its calls, for
 //!                       the NATS CLI; 0 by default
-//!
-//! In tests/rpc-nats, `zig build example-getting_started` runs it against
-//! the servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -402,9 +399,6 @@ parameters of every factory by their types:
 //! Settings, from the environment:
 //!
 //!   APP_NATS_URL   the NATS server; nats://127.0.0.1:4222 by default
-//!
-//! In tests/rpc-nats, `zig build example-app` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -642,9 +636,6 @@ Two services on such a server, each as its own NATS user:
 //!   APP_NATS_URL               the NATS server; nats://127.0.0.1:4222 by default
 //!   APP_USERS_NATS_PASSWORD    the password of the NATS user "users"
 //!   APP_ORDERS_NATS_PASSWORD   the password of the NATS user "orders"
-//!
-//! In tests/rpc-nats, `zig build example-two_services` runs it against the
-//! server of tests/rpc-nats/conf/acl.conf.
 
 const std = @import("std");
 const confy = @import("confy");

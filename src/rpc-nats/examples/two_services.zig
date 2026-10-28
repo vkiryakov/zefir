@@ -10,9 +10,6 @@
 //!   APP_NATS_URL               the NATS server; nats://127.0.0.1:4222 by default
 //!   APP_USERS_NATS_PASSWORD    the password of the NATS user "users"
 //!   APP_ORDERS_NATS_PASSWORD   the password of the NATS user "orders"
-//!
-//! In tests/rpc-nats, `zig build example-two_services` runs it against the
-//! server of tests/rpc-nats/conf/acl.conf.
 
 const std = @import("std");
 const confy = @import("confy");
