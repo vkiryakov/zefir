@@ -1,17 +1,20 @@
 //! README.md shows every file of the examples as it is, a run of every
 //! program as it printed, after the program, no Zig code that is not a
-//! part of these files, and of an error of zefir's checks at compile time
-//! only a message that a probe of zefir-http expects: a file that changes
+//! part of these files, of an error of zefir's checks at compile time only
+//! a message that a probe of zefir-http expects, and of the Debug check
+//! only a line that a test of its check.zig makes: a file that changes
 //! without its copy in README.md, a program that prints something else, or
-//! a message that changes, fails this test. build.zig embeds what each
-//! program printed in this build as `<name>.out`, and README.md of the
-//! repository as `root_readme`, and gives the list of probes of zefir-http
-//! as `http-cases`.
+//! a message or a line that changes, fails this test. build.zig embeds
+//! what each program printed in this build as `<name>.out`, and README.md
+//! of the repository as `root_readme`, and gives the list of probes of
+//! zefir-http as `http-cases` and the lines of its Debug check as
+//! `http-check-lines`.
 
 const std = @import("std");
 const cases = @import("cases.zig");
 const check = @import("guide_check.zig");
 const http_cases = @import("http-cases");
+const check_lines = @import("http-check-lines");
 
 const testing = std.testing;
 const guide = @embedFile("README.md");
@@ -61,6 +64,29 @@ test "every error of zefir's checks that README.md shows is the message of a pro
 fn isProbed(message: []const u8) bool {
     for (http_cases.compile_errors) |probe| {
         if (std.mem.eql(u8, probe.expect, message)) return true;
+    }
+    return false;
+}
+
+test "every line of the Debug check that README.md shows is one that a test of check.zig makes" {
+    var shown: usize = 0;
+    var lines = std.mem.splitScalar(u8, guide, '\n');
+    while (lines.next()) |raw| {
+        // Git may check files out with CRLF on Windows.
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (!std.mem.startsWith(u8, line, "zefir.http: ")) continue;
+        shown += 1;
+        if (isCheckLine(line)) continue;
+        std.debug.print("README.md shows a line of the Debug check that src/http/tests/check_lines.zig does not hold, so no test of check.zig makes it:\n{s}\n", .{line});
+        return error.TestLineNotChecked;
+    }
+    try testing.expect(shown > 0);
+}
+
+/// Whether `line` is one of the lines that a test of check.zig makes.
+fn isCheckLine(line: []const u8) bool {
+    for (check_lines.lines) |made| {
+        if (std.mem.eql(u8, made.text, line)) return true;
     }
     return false;
 }

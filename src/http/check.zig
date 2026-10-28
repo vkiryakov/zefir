@@ -842,6 +842,58 @@ const PlainV1Controller = struct {
     }
 };
 
+/// The lines of the check that the guides of zefir-http and zefir-openapi
+/// show, each with the request that makes it.
+const check_lines = @import("tests/check_lines.zig");
+
+/// The service of the guides of zefir-http and zefir-openapi, as far as the
+/// lines of the check they show need it: its TodosV1Controller, whose
+/// routes make the mistakes the guides tell of. Inside this namespace the
+/// name TodosV1Controller is ambiguous, since the file has one too, so its
+/// handlers take `*@This()`.
+const guide = struct {
+    const ListTodosQuery = struct { done: ?bool = null, page: u32 = 1 };
+
+    /// A middleware of the application that limits the streams of a user
+    /// and answers 429 itself past the limit, a status that the route does
+    /// not declare: it has no `openapi`. Here every user is past it.
+    const StreamLimit = struct {
+        pub fn run(ctx: *Context) !mw.MiddlewareResult {
+            _ = ctx.response.status(429);
+            return .handled;
+        }
+    };
+
+    const TodosV1Controller = struct {
+        pub const openapi = .{};
+
+        pub const http_routes = routes.routes(.{
+            .prefix = "/v1/todos",
+            .methods = .{
+                .list = routes.get("", .{ .query = ListTodosQuery }),
+                .create = routes.post("", .{ .body = CreateTodo, .responses = .{ .created = .{}, .ok = .{} } }),
+                .events = sse.get("/events", .{ .events = ItemEvent, .middleware = .{StreamLimit} }),
+            },
+        });
+
+        /// Reads the query as ListQuery, not as the ListTodosQuery that its
+        /// route declares.
+        pub fn list(_: *@This(), ctx: *Context) !Json(Item) {
+            _ = try ctx.query(ListQuery);
+            return .{ .value = .{ .id = 1, .title = "Buy milk" } };
+        }
+
+        /// Answers 202, which its .responses do not list.
+        pub fn create(_: *@This(), ctx: *Context) !Json(Item) {
+            const body = try ctx.json(CreateTodo);
+            return .{ .value = .{ .id = 2, .title = body.title }, .status = 202 };
+        }
+
+        /// StreamLimit answers before it runs.
+        pub fn events(_: *@This(), _: *sse.Context) !void {}
+    };
+};
+
 /// Maps the errors of the controllers; `handle` answers in HTML, or with
 /// another status, when `x-mode` asks, and reads a typed header of its own
 /// to choose its answer.
@@ -863,13 +915,14 @@ const ItemErrors = struct {
     }
 };
 
-/// A server of both controllers, under "/api"; it stays where `start` put
-/// it.
+/// A server of the controllers above, under "/api"; it stays where `start`
+/// put it.
 const CheckFixture = struct {
     live: sse.Manager(ItemEvent) = undefined,
     other: sse.Manager(OtherEvent) = undefined,
     items: ItemsV1Controller = undefined,
     plain: PlainV1Controller = .{},
+    todos: guide.TodosV1Controller = .{},
     token_check: TokenCheck = .{},
     item_errors: ItemErrors = .{},
     backend: TestingBackend = undefined,
@@ -887,7 +940,7 @@ const CheckFixture = struct {
         f.backend = .init(testing.allocator);
         errdefer f.backend.deinit();
         f.server = try Server.init(testing.allocator, .{
-            .controllers = .{ &f.items, &f.plain },
+            .controllers = .{ &f.items, &f.plain, &f.todos },
             .middleware = .{&f.token_check},
             .error_handler = &f.item_errors,
         }, .{
@@ -1122,4 +1175,18 @@ test "check: the routes of a controller without openapi are not checked" {
 
     try f.expectPassed(.GET, "/api/v1/plain", "", 200);
     try f.expectPassed(.GET, "/api/v1/plain/1", "", 201);
+}
+
+test "check: the lines that the guides of zefir-http and zefir-openapi show, as they show them" {
+    if (!enabled) return error.SkipZigTest;
+    var f: CheckFixture = .{};
+    try f.start();
+    defer f.stop();
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
+    // The readme tests of both guides check the lines they show against the
+    // same list.
+    for (check_lines.lines) |line| try f.expectRefused(line.method, line.target, "", line.text);
 }

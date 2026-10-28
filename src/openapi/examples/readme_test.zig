@@ -1,20 +1,23 @@
 //! README.md, the guide of zefir-openapi, against what it shows: every file
 //! of the small application as it is, and its openapi.json; Zig code only
 //! from those files and from the service of the guide of zefir-http; JSON
-//! only from their documents and from the golden documents of the tests;
-//! and of an error of the compiler, only a message that a probe of
-//! zefir-openapi or zefir-http expects. A file, a document or a message that
-//! changes without its copy in README.md fails this test. build.zig gives
-//! what lives elsewhere as modules: the files of the http guide as
-//! `http-<name>`, its document as `http-openapi.json`, the golden documents
-//! as `golden-<name>`, the lists of probes as `openapi-cases` and
-//! `http-cases`, and the checks of the http guide as `guide-check`.
+//! only from their documents and from the golden documents of the tests; of
+//! an error of the compiler, only a message that a probe of zefir-openapi or
+//! zefir-http expects; and of the Debug check of zefir-http, only a line
+//! that a test of its check.zig makes. A file, a document, a message or a
+//! line that changes without its copy in README.md fails this test.
+//! build.zig gives what lives elsewhere as modules: the files of the http
+//! guide as `http-<name>`, its document as `http-openapi.json`, the golden
+//! documents as `golden-<name>`, the lists of probes as `openapi-cases` and
+//! `http-cases`, the lines of the Debug check as `http-check-lines`, and the
+//! checks of the http guide as `guide-check`.
 
 const std = @import("std");
 const cases = @import("cases.zig");
 const check = @import("guide-check");
 const openapi_cases = @import("openapi-cases");
 const http_cases = @import("http-cases");
+const check_lines = @import("http-check-lines");
 
 const testing = std.testing;
 const guide = @embedFile("README.md");
@@ -107,6 +110,30 @@ fn isProbed(message: []const u8) bool {
     }
     for (http_cases.compile_errors) |probe| {
         if (std.mem.eql(u8, probe.expect, message)) return true;
+    }
+    return false;
+}
+
+test "every line of the Debug check that README.md shows is one that a test of zefir-http's check.zig makes" {
+    const text = try unixLines(guide);
+    defer testing.allocator.free(text);
+    var shown: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "zefir.http: ")) continue;
+        shown += 1;
+        if (isCheckLine(line)) continue;
+        std.debug.print("README.md shows a line of the Debug check that src/http/tests/check_lines.zig does not hold, so no test of zefir-http's check.zig makes it:\n{s}\n", .{line});
+        return error.TestLineNotChecked;
+    }
+    try testing.expect(shown > 0);
+}
+
+/// Whether `line` is one of the lines that a test of zefir-http's check.zig
+/// makes.
+fn isCheckLine(line: []const u8) bool {
+    for (check_lines.lines) |made| {
+        if (std.mem.eql(u8, made.text, line)) return true;
     }
     return false;
 }
