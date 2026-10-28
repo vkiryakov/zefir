@@ -353,7 +353,12 @@ fn over(input: Input, d: *Decision, claimed_at: Instant, how: enum { succeeded, 
         return done(.failed, p.when_done.failed);
     };
     // A run that came after the next moment of its plan stood for it too.
+    // An abandoned last attempt runs nothing here, so it stands for none.
     const first = s.next(input.claimed.scheduled_at);
-    d.event = if (how == .skipped) .skipped else if (first != null and first.?.unix_ms <= claimed_at.unix_ms) .coalesced else .none;
+    d.event = switch (how) {
+        .skipped => .skipped,
+        .abandoned => .none,
+        .succeeded, .failed => if (first != null and first.?.unix_ms <= claimed_at.unix_ms) .coalesced else .none,
+    };
     return .{ .wait = .{ .state = .pending, .run_at = moment, .scheduled_at = null, .attempt = 0 } };
 }

@@ -377,6 +377,25 @@ test "the abandoned attempt was the last: one-shot done(failed), recurring next 
     try testing.expect(d.event == .none);
 }
 
+test "the abandoned last attempt of a frequent plan: its next moment, and no run that stood for the missed ones" {
+    // A takeover comes once the lease of the abandoned attempt has ended, a
+    // minute after its claim by default: a plan of every 15 or 60 s has
+    // moments in between, and no run stood for them.
+    const prior: Store.TookOver = .{ .owner = previous, .claimed_at = scheduled, .attempt = 1, .scheduled_at = scheduled };
+    const taken_over_at = scheduled.add(.fromSeconds(61));
+    for ([_]struct { plan: []const u8, next: Instant }{
+        .{ .plan = "every 15s", .next = scheduled.add(.fromSeconds(75)) },
+        .{ .plan = "every 60s", .next = scheduled.add(.fromSeconds(120)) },
+    }) |case| {
+        var r = claimAt(case.plan, 2);
+        r.claimed_at = taken_over_at;
+        const d = decide(&r, .abandoned_last, .{ .took_over = prior });
+        try testing.expectEqual(nextRun(.{ .at = case.next }), d.next);
+        try testing.expectEqualDeep(@as(?LastRun, .{ .outcome = .abandoned, .error_name = null, .attempt = 1, .started_at = scheduled, .finished_at = taken_over_at }), d.last);
+        try testing.expect(d.event == .none);
+    }
+}
+
 test "skipped: a skipped row, last skipped, the next moment after the claim" {
     var skipping = base;
     skipping.misfire = .{ .skip = .fromSeconds(15 * 60) };
