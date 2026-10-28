@@ -11,9 +11,6 @@
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-checkout` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

@@ -9,9 +9,6 @@
 //!   APP_REDIS_URL        the server, and the user unless it is default,
 //!                        such as redis://app@127.0.0.1:6379
 //!   APP_REDIS_PASSWORD   the user's password
-//!
-//! In tests/redis, `zig build example-connect` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
