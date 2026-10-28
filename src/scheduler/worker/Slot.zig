@@ -98,9 +98,13 @@ fn check(s: *Slot, entry: *const Engine.Entry, claimed: *const Store.Claimed, se
     const claimed_at = r.claimed_at orelse r.scheduled_at;
     if (claimed.took_over != null) {
         // A change of the client during the abandoned attempt wins over it,
-        // as over the outcome of a run. Only a move makes the moment of a
-        // running record later than its claim; a move to a moment already
-        // past runs now, its attempts counted from 0.
+        // as over the outcome of a run: a move even when that attempt was
+        // the last, a pause only when it was not, as a pause that kept the
+        // last attempt would give a claim past `attempts` after `unpause`
+        // (after the last, a repeating record pauses at its next moment).
+        // Only a move makes the moment of a running record later than its
+        // claim; a move to a moment already past runs now, its attempts
+        // counted from 0.
         if (r.scheduled_at.unix_ms > claimed_at.unix_ms) return .abandoned_moved;
         if (r.attempt > attempts) return .abandoned_last;
         if (r.pause_requested) return .abandoned_paused;

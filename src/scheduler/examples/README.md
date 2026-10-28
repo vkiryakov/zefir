@@ -903,7 +903,7 @@ calls that change a job take one:
 |---|---|---|
 | `schedule(io, ctx, J, request, options)` | makes the job of the key, unless one is there | `.created`; `.existing`, which changed nothing |
 | `cancel(io, ctx, ref, options)` | removes the job, in any state | `true`, or `false` when there was none |
-| `pause(io, ctx, ref, options)` | a pending job waits until `unpause`; a running one pauses when its run ends, or without a run when its instance was lost and another takes it over | `Changed` |
+| `pause(io, ctx, ref, options)` | a pending job waits until `unpause`; a running one pauses when its run ends, or without a run when its instance was lost and another takes it over, unless that run was its last attempt, see [Claims and leases](#claims-and-leases) | `Changed` |
 | `unpause(io, ctx, ref, options)` | the job waits again for its time; a time already past runs at once | `Changed` |
 | `reschedule(io, ctx, ref, when, options)` | moves the job, or changes its schedule | `Changed` |
 | `retry(io, ctx, ref, options)` | gives a failed job all its attempts again, see [Failures and retries](#failures-and-retries) | `Changed` |
@@ -1088,9 +1088,14 @@ $ zig build run
   time for `unpause`; a second pause is `.unchanged`. A running job
   pauses when its run ends; when the instance of the run was lost, the
   worker that takes the job over pauses it without a run, for the same
-  run. `unpause` lets it wait for its time again: a time that passed
-  meanwhile runs at once, and a repeating job's runs that passed go by
-  its misfire policy, see [Missed runs](#missed-runs).
+  run, while the job has attempts left. When the lost run was its last
+  attempt, a one-shot job ends `failed`, as after a last failure, and a
+  repeating one pauses at its next time. The report of acme has one
+  attempt, as every repeating job unless `.retry.attempts` says more: it
+  would pause until the next Monday, and the report of the lost week
+  would not come. `unpause` lets it wait for its time again: a time that
+  passed meanwhile runs at once, and a repeating job's runs that passed
+  go by its misfire policy, see [Missed runs](#missed-runs).
 - **`list`** gives the records of a filter of job, tenant and state, any
   of them null, two to a page here: `next` of a page is where the next one
   starts, and null after the last. The records of a job come together,
@@ -1137,7 +1142,7 @@ writes its outcome. A change of the client meets that run so:
 | Change | What happens |
 |---|---|
 | `cancel` | the record goes at once; the owner learns it at its next renewal, within `renew_every`, cancels the run and writes a row `interrupted`, `Cancelled`, if the job keeps a history. A job scheduled again with the key meanwhile is another life, which the old run never touches |
-| `pause` | the run goes on to its end; then the job pauses instead of waiting for its next time. When the instance of the run is lost, the worker that takes the job over pauses it without a run |
+| `pause` | the run goes on to its end; then the job pauses instead of waiting for its next time. When the instance of the run is lost, the worker that takes the job over pauses it without a run, for the same run; when that run was its last attempt, a one-shot job ends `failed`, and a repeating one pauses at its next time |
 | `unpause` | a pause asked during the run is taken back |
 | `reschedule` | the run goes on; then the job waits for the new time, `attempt` 0, and the outcome of the run shows only in `last` and the history. When the instance of the run is lost, the worker that takes the job over does not run it before the new time |
 | `retry` | `.unchanged`: the job is not failed |
@@ -1411,12 +1416,15 @@ that was lost. The worker that took the job over runs it again while it
 has attempts left. When the lost attempt was the last, it runs nothing: a
 one-shot job ends `failed`, and a repeating job, which has one attempt
 unless `.retry.attempts` says more, goes on at its next time, so the run
-that was lost is skipped. A reschedule or a pause that came during the
-lost run wins over it, as over the outcome of a run: the job waits for
-its new time, and runs as its first attempt once that time has come, or
-pauses without a run. A worker that lives but cannot reach the store
-stops its run first, and a claim that takes the job over counts its
-attempt all the same:
+that was lost is skipped. A reschedule that came during the lost run
+wins over it, as over the outcome of a run, even when the lost run was
+the last attempt: the job waits for its new time, and runs as its first
+attempt once that time has come. A pause that came during the lost run
+pauses the job without a run, for the same run, while the job has
+attempts left; after the last, the job ends as above, and a repeating
+one pauses at its next time instead of waiting for it. A worker that
+lives but cannot reach the store stops its run first, and a claim that
+takes the job over counts its attempt all the same:
 
 ```mermaid
 sequenceDiagram

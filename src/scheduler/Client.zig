@@ -148,7 +148,9 @@ pub fn cancel(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, opti
 
 /// A pending job pauses; a running one pauses when its run ends, or, when
 /// the instance of the run was lost, when another takes it over, without a
-/// run.
+/// run, for the same run. When that lost run was its last attempt, the job
+/// ends as after a last attempt: a one-shot job is failed, and a repeating
+/// one pauses at its next run.
 pub fn pause(c: *const Client, io: Io, ctx: core.Context, ref: record.Ref, options: CallOptions) Error!Changed {
     var arena: std.heap.ArenaAllocator = .init(c.gpa);
     defer arena.deinit();

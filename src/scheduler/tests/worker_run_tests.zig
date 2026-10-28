@@ -359,6 +359,45 @@ test "a takeover of an attempt whose pause the client asked for runs nothing and
     try testing.expectEqual(ran.attempt + 1, probe.attempt.load(.acquire));
 }
 
+test "a pause asked during an abandoned last attempt: a one-shot job ends failed, a repeating one pauses at its next moment" {
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var once_probe: Probe = .{};
+    var ghostly: Ghostly = .{ .probe = &probe };
+    var once: GhostlyOnce = .{ .probe = &once_probe };
+    // A repeating job, one attempt by default, due now; a one-shot job of
+    // one attempt.
+    const repeating: scheduler.Ref = .of(Ghostly, "r");
+    const one_shot: scheduler.Ref = .of(GhostlyOnce, "x");
+    _ = try f.memory.store().create(io, .root, &.{ .job = repeating.job, .key = repeating.key, .life = @splat(5), .plan = "every 3600s", .payload = "{}", .run_at = .{ .after = .zero } }, .{ .allocator = f.arena.allocator() });
+    try f.schedule(GhostlyOnce, "x", .{ .after = .zero });
+    const claim: Store.ClaimRequest = .{ .owner = "ghost", .any_key = &.{}, .keyed_only = &.{ "ghostly", "ghostly-once" }, .max = 2, .lease = .fromSeconds(1), .tag = @splat(1) };
+    const ghost = (try f.memory.store().claim(io, .root, &claim, .{ .allocator = f.arena.allocator() })).claimed;
+    if (ghost.len != 2) return error.TestUnexpectedResult;
+    const ran = if (std.mem.eql(u8, ghost[0].record.job, repeating.job)) ghost[0].record else ghost[1].record;
+    for ([_]scheduler.Ref{ repeating, one_shot }) |ref| {
+        try testing.expectEqual(scheduler.Client.Changed.changed, try f.client.pause(io, .root, ref, .{}));
+    }
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    var w: scheduler.Worker(struct { ghostly: *Ghostly, once: *GhostlyOnce }) = try .init(testing.allocator, io, f.store(), .{ .ghostly = &ghostly, .once = &once }, quick);
+    defer w.deinit(io);
+    try w.start(io);
+    // The last attempt wins over the pause: the one-shot job ends as after
+    // its last attempt, and the repeating one pauses at its next moment,
+    // not for the run that was lost.
+    const failed = (try f.until(one_shot, .failed, 5)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(scheduler.RunOutcome.abandoned, (failed.last orelse return error.TestUnexpectedResult).outcome);
+    const paused = (try f.until(repeating, .paused, 5)) orelse return error.TestUnexpectedResult;
+    try testing.expect(paused.scheduled_at.unix_ms > ran.scheduled_at.unix_ms);
+    try testing.expectEqual(@as(u32, 0), paused.attempt);
+    try testing.expectEqual(scheduler.RunOutcome.abandoned, (paused.last orelse return error.TestUnexpectedResult).outcome);
+    try testing.expectEqual(@as(u32, 0), probe.runs.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), once_probe.runs.load(.acquire));
+}
+
 test "a takeover of the last attempt of a job whose plan does not read here runs nothing" {
     var f: Fixture = undefined;
     f.init();

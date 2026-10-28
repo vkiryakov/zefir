@@ -19,10 +19,12 @@
 //!   counted. Taken over or removed: the store refuses the transition, and
 //!   only the row goes in.
 //! - The abandoned attempt this claim took over was the last: no run; a
-//!   one-shot record is failed, a repeating one goes on to its next moment.
+//!   one-shot record is failed, a repeating one goes on to its next moment,
+//!   paused there when the client asked for a pause during that attempt.
 //! - During the abandoned attempt this claim took over, the client moved
 //!   the record (`reschedule`) to a moment still to come: no run, the
-//!   record waits for it, attempt 0. Or it asked for a pause: no run, the
+//!   record waits for it, attempt 0, even after the last attempt. Or it
+//!   asked for a pause, and that attempt was not the last: no run, the
 //!   record pauses for the same run, the attempt of this claim not counted.
 //! - A repeating run later than its `.skip` threshold: no run, the next
 //!   moment after the claim.
