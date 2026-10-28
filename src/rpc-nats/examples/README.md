@@ -742,7 +742,7 @@ fn getUser(client: *rpc.Client, io: std.Io, orders_log: log.Logger, inbox: []con
 }
 ```
 
-With the server of this configuration on port 4222:
+With this configuration saved as `acl.conf`, and its server on port 4222:
 
 ```sh
 docker run --rm -p 4222:4222 -v "$PWD/acl.conf:/acl.conf:ro" nats:2.15.0-alpine --config /acl.conf
