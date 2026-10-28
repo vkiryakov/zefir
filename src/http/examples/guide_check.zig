@@ -433,7 +433,8 @@ test "a session shows how its log begins, and once all of it, ^C aside" {
     try expectSession("doc", doc, "zig build run", log);
     // Only the beginning, or a block that is not how the log begins: what
     // expectSession fails on, without the message it prints.
-    try testing.expectEqual(.not_whole, try sessionShown(doc[0..std.mem.find(u8, doc, "Later").?], "zig build run", log));
+    const later = std.mem.find(u8, doc, "Later") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(.not_whole, try sessionShown(doc[0..later], "zig build run", log));
     try testing.expectEqual(.not_whole, try sessionShown("No run here.\n", "zig build run", log));
     try testing.expectEqual(.other_start, try sessionShown("```text\n$ zig build run\nINFO  [app] Stopped\n```\n", "zig build run", log));
 }
