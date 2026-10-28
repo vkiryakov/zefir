@@ -54,19 +54,19 @@ pub const Subscription = struct {
     context: ?*anyopaque = null,
     /// Runs on the subscriber's own thread, one record at a time, so it
     /// may take its time: a network call, with its own timeout. That thread
-    /// is the logger's, not a task of the application's `io`: under an
-    /// evented `io`, make the handler's calls through an `Io` that serves
-    /// any thread, such as a `std.Io.Threaded` of its own (deinit it after
-    /// `unsubscribe`). An error is counted in `stats().alert_failures`; the
-    /// record is not retried. It may log through the logger: what it logs
-    /// on its own thread goes to the output only, never to subscribers (in
-    /// sync mode under an application Io that is not a `std.Io.Threaded` it
-    /// is dropped, see `stats().hook_errors`). Threads and Io tasks it hands
-    /// work to (`io.async`, `io.concurrent`, a worker of the application's)
-    /// log like any caller, so their error records reach the subscribers
-    /// again and can loop: log such a failure from the handler after
-    /// `await`, or return it. It must not call `unsubscribe`, `flush` or
-    /// `shutdown`: that panics in safe builds.
+    /// is the logger's, not a task of your zio runtime: make the handler's
+    /// calls through `init.io`, the `io` that `main(init: std.process.Init)`
+    /// gets, which serves any thread. An error is counted in
+    /// `stats().alert_failures`; the record is not retried. It may log
+    /// through the logger: what it logs on its own thread goes to the output
+    /// only, never to subscribers (in sync mode, when the logger has another
+    /// `io` than `init.io`, such as `rt.io()`, it is dropped, see
+    /// `stats().hook_errors`). Threads and Io tasks it hands work to
+    /// (`io.async`, `io.concurrent`, a worker of the application's) log like
+    /// any caller, so their error records reach the subscribers again and
+    /// can loop: log such a failure from the handler after `await`, or
+    /// return it. It must not call `unsubscribe`, `flush` or `shutdown`:
+    /// that panics in safe builds.
     handler: Handler,
 };
 

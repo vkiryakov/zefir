@@ -2129,8 +2129,12 @@ const HttpGuideModules = struct {
 /// programs that run on the backend in memory, each through
 /// example_main.zig, which exits with code 3 on a panic instead of
 /// aborting and with code 4 past its time limit; it must exit with 0.
-/// readme_test.zig then checks that README.md shows every file as it is
-/// and every run as it printed. The service, main.zig, imports zio: only
+/// readme_test.zig then checks that README.md shows every file as it is,
+/// every run as it printed, of an error of the compiler only a message
+/// that a probe of src/http/tests/cases.zig expects, which it gets as
+/// `http-cases`, and of the Debug check only a line that a test of
+/// check.zig makes, from src/http/tests/check_lines.zig, which it gets as
+/// `http-check-lines`. The service, main.zig, imports zio: only
 /// tests/http builds and runs it. The tests of the app find its page and
 /// its OpenAPI document by their absolute paths, `paths`, and run where
 /// every test runs (see addOpenapiGoldens); openapi.json is an input of
@@ -2182,6 +2186,20 @@ fn addHttpGuide(
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
+        .imports = &.{
+            .{ .name = "http-cases", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "http-check-lines", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/tests/check_lines.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+        },
     });
     // "http in a minute" of the repository's README.md is a program of the
     // guide too.
@@ -2552,8 +2570,9 @@ fn addOpenapiGoldens(
 /// `update_step`, runs it with ZEFIR_OPENAPI_UPDATE=1, every time, which
 /// rewrites the file. readme_test.zig checks README.md against the files of
 /// the application, the service of the http guide and its document, the
-/// golden documents and the probes. The application's main.zig imports zio:
-/// only tests/http builds it.
+/// golden documents, the probes, and the lines of zefir-http's Debug check
+/// that a test of its check.zig makes. The application's main.zig imports
+/// zio: only tests/http builds it.
 fn addOpenapiGuide(
     b: *std.Build,
     test_openapi: *std.Build.Step,
@@ -2606,6 +2625,12 @@ fn addOpenapiGuide(
             }) },
             .{ .name = "http-cases", .module = b.createModule(.{
                 .root_source_file = b.path("src/http/tests/cases.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }) },
+            .{ .name = "http-check-lines", .module = b.createModule(.{
+                .root_source_file = b.path("src/http/tests/check_lines.zig"),
                 .target = target,
                 .optimize = optimize,
                 .sanitize_thread = tsan,

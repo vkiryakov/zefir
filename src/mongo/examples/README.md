@@ -297,9 +297,6 @@ adults, gives one a birthday, lets one go, and counts the adults again:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-quick_start` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -574,9 +571,6 @@ that is not there, and connection strings that the client refuses:
 //!   APP_MONGO_URI        the server and the user, such as
 //!                        mongodb://admin@127.0.0.1:27017
 //!   APP_MONGO_PASSWORD   the user's password
-//!
-//! In tests/mongo, `zig build example-connect` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -741,9 +735,6 @@ operations that write documents and read them back:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-orders` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -949,9 +940,6 @@ it, and makes a collection with a command of the server:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-reports` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1453,9 +1441,6 @@ duplicate key, so log it where such values may go.
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-errors` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1689,9 +1674,10 @@ test "an import cut at its third batch is IncompleteWrite, and partial says how 
     // The write stopped at the batch that begins with the seventh
     // customer, index 6, as its connection was lost: that batch went out
     // and may be in. The last one never went.
-    try testing.expectEqual(@as(usize, 6), d.batch_offset.?);
-    try testing.expectEqual(error.ConnectionLost, d.reason.?);
-    try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(d.reason.?));
+    try testing.expectEqual(@as(?usize, 6), d.batch_offset);
+    const reason = d.reason orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(error.ConnectionLost, reason);
+    try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(reason));
     try testing.expectEqual(@as(usize, 3), script.count(io, "insert"));
     // The _ids of all ten were made before the first batch: the customers
     // after `answered` can be looked up by them before they are sent again.
@@ -1926,7 +1912,8 @@ test "a reply that comes after the deadline is Timeout: the command went out, wi
     try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(error.Timeout));
     // With it went maxTimeMS, the time left: the server gives up then too.
     const sent = try script.entry(io, 0);
-    const max_time_ms = try (try sent.body.get("maxTimeMS")).?.asI64();
+    const max_time = try sent.body.get("maxTimeMS") orelse return error.TestUnexpectedResult;
+    const max_time_ms = try max_time.asI64();
     try testing.expect(max_time_ms >= 1 and max_time_ms <= 200);
 }
 
@@ -2107,9 +2094,6 @@ built by their `init`, whose parameters App passes by their types:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-app` runs it against the servers of
-//! the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -2412,6 +2396,40 @@ const testing = std.testing;
 const FakeServer = mongo.testing.FakeServer;
 const Script = mongo.testing.Script;
 
+// These tests check each optional and the tag of each union before they
+// take the value inside: `.?` or a field of a union of another tag would
+// stop a test with a panic, where a regression has to fail it.
+
+/// The string `value` of a document; the test fails on anything else.
+fn stringOf(value: ?bson.Value) ![]const u8 {
+    return switch (value orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+/// The ObjectId `value` of a document; the test fails on anything else.
+fn objectIdOf(value: ?bson.Value) !bson.ObjectId {
+    return switch (value orelse return error.TestUnexpectedResult) {
+        .object_id => |id| id,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+/// The boolean `value` of a document; the test fails on anything else.
+fn boolOf(value: ?bson.Value) !bool {
+    return switch (value orelse return error.TestUnexpectedResult) {
+        .boolean => |flag| flag,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+/// The integer `value` of a document, an int32, an int64 or a double
+/// without a fraction; the test fails on anything else.
+fn i64Of(value: ?bson.Value) !i64 {
+    return (value orelse return error.TestUnexpectedResult).asI64();
+}
+
 test "a sign-up is one insert of one document, with the _id made first" {
     const io = testing.io;
     // The script: answer each insert as mongod does, {n: 1, ok: 1}.
@@ -2440,16 +2458,17 @@ test "a sign-up is one insert of one document, with the _id made first" {
     const insert = try script.entry(io, 0);
     try testing.expectEqualStrings("insert", insert.name);
     try testing.expectEqualStrings("shop", insert.database);
-    try testing.expectEqualStrings("users", (try insert.body.get("insert")).?.string);
+    try testing.expectEqualStrings("users", try stringOf(try insert.body.get("insert")));
     // Its documents go in a section of their own: here, one.
-    var documents = insert.sequence.?.documents();
-    const sent = documents.next().?;
+    const sequence = insert.sequence orelse return error.TestUnexpectedResult;
+    var documents = sequence.documents();
+    const sent = documents.next() orelse return error.TestUnexpectedResult;
     try testing.expect(documents.next() == null);
     // The _id that the insert made comes first, and signUp returned it.
-    const first = (try sent.first()).?;
+    const first = try sent.first() orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("_id", first.key);
-    try testing.expectEqualSlices(u8, &id.bytes, &first.value.object_id.bytes);
-    try testing.expectEqualStrings("ann@example.com", (try sent.get("email")).?.string);
+    try testing.expectEqualSlices(u8, &id.bytes, &(try objectIdOf(first.value)).bytes);
+    try testing.expectEqualStrings("ann@example.com", try stringOf(try sent.get("email")));
 }
 
 test "a second sign-up with the same e-mail is EmailTaken, and nothing is sent again" {
@@ -2498,16 +2517,16 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
 
-    const ann = (try users.byEmail(io, .of(.root), arena.allocator(), "ann@example.com")).?;
+    const ann = try users.byEmail(io, .of(.root), arena.allocator(), "ann@example.com") orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Ann", ann.name);
     try testing.expect(ann._id == null);
 
     // findOne is a find of the e-mail, for one document in one batch.
     const find = try script.entry(io, 0);
     try testing.expectEqualStrings("find", find.name);
-    try testing.expectEqualStrings("ann@example.com", (try find.body.getPath("filter.email")).?.string);
-    try testing.expectEqual(@as(i64, 1), try (try find.body.get("limit")).?.asI64());
-    try testing.expect((try find.body.get("singleBatch")).?.boolean);
+    try testing.expectEqualStrings("ann@example.com", try stringOf(try find.body.getPath("filter.email")));
+    try testing.expectEqual(@as(i64, 1), try i64Of(try find.body.get("limit")));
+    try testing.expect(try boolOf(try find.body.get("singleBatch")));
 }
 ```
 

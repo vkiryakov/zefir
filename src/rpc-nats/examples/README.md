@@ -201,9 +201,6 @@ calls it through the broker:
 //!   APP_NATS_URL        the NATS server; nats://127.0.0.1:4222 by default
 //!   APP_SERVE_SECONDS   how long it goes on serving after its calls, for
 //!                       the NATS CLI; 0 by default
-//!
-//! In tests/rpc-nats, `zig build example-getting_started` runs it against
-//! the servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -402,9 +399,6 @@ parameters of every factory by their types:
 //! Settings, from the environment:
 //!
 //!   APP_NATS_URL   the NATS server; nats://127.0.0.1:4222 by default
-//!
-//! In tests/rpc-nats, `zig build example-app` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -640,11 +634,10 @@ Two services on such a server, each as its own NATS user:
 //! Settings, from the environment:
 //!
 //!   APP_NATS_URL               the NATS server; nats://127.0.0.1:4222 by default
-//!   APP_USERS_NATS_PASSWORD    the password of the NATS user "users"
-//!   APP_ORDERS_NATS_PASSWORD   the password of the NATS user "orders"
-//!
-//! In tests/rpc-nats, `zig build example-two_services` runs it against the
-//! server of tests/rpc-nats/conf/acl.conf.
+//!   APP_USERS_NATS_USER        the NATS user of users; "users" by default
+//!   APP_USERS_NATS_PASSWORD    that user's password
+//!   APP_ORDERS_NATS_USER       the NATS user of orders; "orders" by default
+//!   APP_ORDERS_NATS_PASSWORD   that user's password
 
 const std = @import("std");
 const confy = @import("confy");
@@ -749,7 +742,7 @@ fn getUser(client: *rpc.Client, io: std.Io, orders_log: log.Logger, inbox: []con
 }
 ```
 
-With the server of this configuration on port 4222:
+With this configuration saved as `acl.conf`, and its server on port 4222:
 
 ```sh
 docker run --rm -p 4222:4222 -v "$PWD/acl.conf:/acl.conf:ro" nats:2.15.0-alpine --config /acl.conf

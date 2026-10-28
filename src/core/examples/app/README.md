@@ -161,7 +161,7 @@ Kubernetes asks `/readyz` whether the shop takes work. It has two servers,
 HTTP for the users and rpc for the other services, and two stores, one for
 the users and one for the orders. It keeps everything in memory, so that it
 runs alone: no database and no NATS are needed. A shop of the same shape
-against NATS and MongoDB is in `tests/app/shop/` of the repository.
+against NATS and MongoDB is [in the repository on GitHub](https://github.com/vkiryakov/zefir/tree/dev/tests/app/shop).
 
 The shop is three modules. `AppModule` is the root: the module that `main`
 gives to App, which reaches the others through its imports.
@@ -668,8 +668,12 @@ starts or frees), connects the signals and runs App until it stops.
 //! runtime, and App, which builds the rest out of the modules. Ctrl+C or
 //! SIGTERM stops it gracefully.
 //!
-//! In tests/app, `zig build examples` runs it and sends it the requests of
-//! the guide.
+//! It keeps everything in memory and runs alone: it needs no database and
+//! no NATS.
+//!
+//! Settings, from the environment:
+//!
+//!   SHOP_PORT   the port of the HTTP server; 8080 by default
 
 const std = @import("std");
 const zio = @import("zio");

@@ -13,7 +13,7 @@
 //!     _ = try self.live.subscribe(ctx, owner(ctx)); // returns at once; the stream lives on
 //! }
 //!
-//! // Once the stream has ended: the client left, close(key), the queue overflowed or the server stopped.
+//! // Once the stream has ended: the client left, close(io, key), the queue overflowed or the server stopped.
 //! pub fn eventsClosed(self: *TodosV1Controller, ctx: *http.sse.Context) void { ... }
 //! ```
 //!

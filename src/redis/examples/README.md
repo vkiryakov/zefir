@@ -319,9 +319,6 @@ customer's profile in a hash, and signs the customer out:
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-quick_start` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -584,9 +581,6 @@ zefir.App](#under-zefirapp):
 //!   APP_REDIS_URL        the server, and the user unless it is default,
 //!                        such as redis://app@127.0.0.1:6379
 //!   APP_REDIS_PASSWORD   the user's password
-//!
-//! In tests/redis, `zig build example-connect` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -985,9 +979,6 @@ customer out everywhere by walking the keys with SCAN:
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-leaders` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1338,9 +1329,6 @@ orders:
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-checkout` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1621,9 +1609,6 @@ nothing ran.
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-limits` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1777,9 +1762,6 @@ flowchart LR
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-orders` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1957,9 +1939,6 @@ stream or a list.
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-notifications` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -2184,9 +2163,6 @@ the code, with `diagnostics.isCode("EXECABORT")` and the others.
 //!   APP_REDIS_URL        the server; redis://127.0.0.1:6379 by default
 //!   APP_REDIS_PASSWORD   the password of the user of the URL, or of the
 //!                        user default, if the server wants one
-//!
-//! In tests/redis, `zig build example-errors` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

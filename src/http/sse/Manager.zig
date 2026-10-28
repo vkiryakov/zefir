@@ -87,8 +87,8 @@ pub fn Manager(comptime Events: type) type {
         }
 
         /// Opens the stream of the request under `key` and returns at once;
-        /// the stream lives on until the client leaves, `close(key)`, its
-        /// queue overflows or the server stops, and then the route's
+        /// the stream lives on until the client leaves, `close(io, key)`,
+        /// its queue overflows or the server stops, and then the route's
         /// `.on_close` runs. It sends the head of the stream: 200,
         /// `Content-Type: text/event-stream`, `Cache-Control: no-cache` and
         /// `X-Accel-Buffering: no`, with the fields the middleware set. From

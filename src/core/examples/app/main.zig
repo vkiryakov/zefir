@@ -2,8 +2,12 @@
 //! runtime, and App, which builds the rest out of the modules. Ctrl+C or
 //! SIGTERM stops it gracefully.
 //!
-//! In tests/app, `zig build examples` runs it and sends it the requests of
-//! the guide.
+//! It keeps everything in memory and runs alone: it needs no database and
+//! no NATS.
+//!
+//! Settings, from the environment:
+//!
+//!   SHOP_PORT   the port of the HTTP server; 8080 by default
 
 const std = @import("std");
 const zio = @import("zio");

@@ -98,8 +98,8 @@ pub const Stats = struct {
     /// Handler calls that returned an error.
     alert_failures: u64,
     /// Records dropped because a hook logged them: from an interceptor,
-    /// or, in sync mode under an Io other than `std.Io.Threaded`, from a
-    /// subscriber's handler.
+    /// or, in sync mode when the logger has another `io` than `init.io`,
+    /// such as `rt.io()`, from a subscriber's handler.
     hook_errors: u64,
     /// Records an interceptor dropped on purpose: not a loss.
     filtered: u64,

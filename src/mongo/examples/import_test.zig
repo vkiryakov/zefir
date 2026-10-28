@@ -61,9 +61,10 @@ test "an import cut at its third batch is IncompleteWrite, and partial says how 
     // The write stopped at the batch that begins with the seventh
     // customer, index 6, as its connection was lost: that batch went out
     // and may be in. The last one never went.
-    try testing.expectEqual(@as(usize, 6), d.batch_offset.?);
-    try testing.expectEqual(error.ConnectionLost, d.reason.?);
-    try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(d.reason.?));
+    try testing.expectEqual(@as(?usize, 6), d.batch_offset);
+    const reason = d.reason orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(error.ConnectionLost, reason);
+    try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(reason));
     try testing.expectEqual(@as(usize, 3), script.count(io, "insert"));
     // The _ids of all ten were made before the first batch: the customers
     // after `answered` can be looked up by them before they are sent again.

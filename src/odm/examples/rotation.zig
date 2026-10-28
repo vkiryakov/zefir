@@ -14,9 +14,6 @@
 //!   APP_ADMIN_URI        a user who may make users, for the secrets
 //!                        system, such as mongodb://admin@127.0.0.1:27017
 //!   APP_ADMIN_PASSWORD   that user's password
-//!
-//! In tests/odm, `zig build example-rotation` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

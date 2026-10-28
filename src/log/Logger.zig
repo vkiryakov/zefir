@@ -37,8 +37,10 @@ pub const InitError = Engine.InitError;
 /// loggers on one stdout do not coordinate their writes.
 ///
 /// Records read the clock through `io` and, in sync mode, are written
-/// through it, so log only from threads or tasks of that `io` (under
-/// `std.Io.Threaded`, any thread).
+/// through it, so log only from threads or tasks that `io` serves. Pass
+/// `init.io`, the `io` that `main(init: std.process.Init)` gets: any thread
+/// may log through it, `main`, the tasks of your zio runtime and threads of
+/// your own, so the logger can start before the runtime and stop after it.
 pub fn init(gpa: std.mem.Allocator, io: std.Io, opts: options.Options) InitError!Logger {
     const engine = try Engine.create(gpa, io, opts);
     return .{ .engine = engine, .scope = &engine.scope_table.root };

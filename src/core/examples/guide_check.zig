@@ -232,7 +232,7 @@ test "a guide passes when it shows the file, the run and only parts of the file"
     try expectFile("doc", doc, "zig", file);
     try expectRun("doc", doc, file, "$ zig build run", "2026-10-22T08:15:42.003Z INFO  Token verified subject=user-7\n");
     try expectZigFromExamples("doc", doc, &.{file});
-    const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})).?;
+    const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(foreign);
     try testing.expectEqualStrings("const x = 1;\nconst y = 2;\n", foreign);
 }

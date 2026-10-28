@@ -20,7 +20,7 @@ pub const EncodeOptions = struct {
 /// | Zig | BSON |
 /// |---|---|
 /// | `bool` | boolean |
-/// | `i8`–`i32`, `u8`–`u16` (every integer type whose values fit int32) | int32 |
+/// | `i8`–`i32`, `u8`–`u31` (every integer type whose values fit int32) | int32 |
 /// | `i33`–`i64`, `u32`–`u63` | int64 |
 /// | `f32`, `f64` | double, NaN and the infinities included |
 /// | `[]const u8` | string, which must be UTF-8 |
@@ -28,7 +28,7 @@ pub const EncodeOptions = struct {
 /// | `?T` | BSON null, or the value; `.skip_nulls` leaves null fields out |
 /// | a struct | document, with the fields in their order |
 /// | `[]const T`, `[N]T` | array |
-/// | `bson.RawDocument`, `bson.OwnedDocument`, `bson.Value` and the special types | as they are |
+/// | `bson.ObjectId`, `bson.DateTime`, `bson.Timestamp`, `bson.Binary`, `bson.Decimal128`, `bson.Regex`, `bson.Null`, `bson.MinKey`, `bson.MaxKey`, `bson.Value`, `bson.RawDocument`, `bson.OwnedDocument` | as they are |
 ///
 /// Anonymous literals are written too, for filters, updates and commands:
 /// `.{ .age = .{ .@"$gte" = 18 }, .status = .active }`. In them an integer
@@ -42,7 +42,9 @@ pub const EncodeOptions = struct {
 /// which is checked and copied. Every other type stops the build with the
 /// path of the field: `u64`, `usize`, `isize` and the C integers, floats
 /// other than f32 and f64, non-exhaustive enums, unions, pointers other
-/// than slices and lists, `??T`, and types that hold themselves.
+/// than slices and lists, `??T`, types that hold themselves, and the
+/// deprecated `bson.DbPointer` and `bson.JavaScriptWithScope`, which are
+/// read, never written.
 ///
 /// `error.InvalidBson`: a string is not UTF-8, a document in a field fails
 /// `RawDocument.validate`, a `Value` is of a deprecated type, a regular
