@@ -20,8 +20,9 @@
 //! 2. Waiting suspends the task through `io`, never the OS thread. `io` is
 //!    the instance the transport was created with, and the one the library
 //!    under it runs on: otherwise canceling the task would not end a wait
-//!    inside the library. In Debug the transport checks it by comparing
-//!    `io.vtable` with that of its own instance.
+//!    inside the library. In safe builds (Debug and ReleaseSafe) the
+//!    transport checks it by comparing `io.vtable` with that of its own
+//!    instance.
 //! 3. Deadline. With less than 1 ms left until `request.ctx.deadline`,
 //!    `call` returns `error.Timeout` without sending. Otherwise it sends the
 //!    budget left, measured right before sending, and waits for the response
@@ -36,8 +37,9 @@
 //!    memory and none of its tasks touches it. When the request has already
 //!    left and `info().propagates_cancellation` is set, the transport tells
 //!    the server that the call was canceled. After `Canceled` the engine
-//!    calls `io.recancel()`, which in Debug checks that a cancelation really
-//!    came: a false `Canceled` panics there.
+//!    calls `io.recancel()`, which in safe builds (Debug and ReleaseSafe)
+//!    checks that a cancelation really came: a false `Canceled` panics
+//!    there.
 //! 5. Memory. `request` and its slices are borrowed until `call` returns.
 //!    Everything the returned `Response` points to comes from
 //!    `options.allocator`, allocated during the call only: the transport
