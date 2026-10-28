@@ -43,7 +43,7 @@ pub const Quotes = struct {
 };
 
 /// A shared job: the invoice of an order.
-pub const SendInvoice = struct {
+pub const SendInvoiceJob = struct {
     logger: log.Logger,
     sent: std.atomic.Value(u32) = .init(0),
 
@@ -51,11 +51,11 @@ pub const SendInvoice = struct {
     pub const Payload = struct { order_id: u64 };
 
     /// App builds it by its `init`, whose params are what it takes.
-    pub fn init(logger: *const log.Logger) SendInvoice {
+    pub fn init(logger: *const log.Logger) SendInvoiceJob {
         return .{ .logger = logger.scoped("invoices") };
     }
 
-    pub fn run(self: *SendInvoice, _: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, _: *scheduler.Context, payload: Payload) !void {
         self.logger.info("Invoice sent", .{ .order = payload.order_id });
         _ = self.sent.fetchAdd(1, .release);
     }
@@ -77,12 +77,12 @@ pub const ExpireQuote = struct {
 };
 
 /// The jobs of each worker: App fills these structs of pointers by type.
-pub const SharedJobs = struct { invoices: *SendInvoice };
+pub const SharedJobs = struct { invoices: *SendInvoiceJob };
 pub const LocalJobs = struct { quotes: *ExpireQuote };
 
 pub const ShopModule = struct {
     pub const module: core.app.Module = .{
-        .providers = &.{ Quotes, SendInvoice, ExpireQuote },
+        .providers = &.{ Quotes, SendInvoiceJob, ExpireQuote },
         .factories = &.{Scheduling},
         // Ready objects from main: App hands them out, and never starts or
         // frees them.
@@ -134,8 +134,8 @@ pub fn main(init: std.process.Init) !void {
     // What a handler of an order does: the invoice is a shared job, by
     // the key of the order.
     const shared: *SharedClient = app.get(SharedClient);
-    _ = try shared.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42 } }, .{});
-    try waitFor(io, &app.get(SendInvoice).sent, 1);
+    _ = try shared.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42 } }, .{});
+    try waitFor(io, &app.get(SendInvoiceJob).sent, 1);
 
     // A quote for customer 7, held by this instance: a local job drops it,
     // here at once, in a shop 15 minutes on.

@@ -37,7 +37,7 @@ const Config = struct {
 
 /// The job: the invoice of an order. What it needs is in its fields: here
 /// the logger, in a shop the client of its billing service.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     app: log.Logger,
     /// How many invoices went out: main waits for the first.
     sent: std.atomic.Value(u32) = .init(0),
@@ -51,7 +51,7 @@ const SendInvoice = struct {
     /// The data of one run: the store keeps it as JSON.
     pub const Payload = struct { order_id: u64, amount_cents: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
         _ = self.sent.fetchAdd(1, .release);
     }
@@ -101,17 +101,17 @@ pub fn main(init: std.process.Init) !void {
 
     // The client puts jobs on their time; the worker runs them.
     const client: scheduler.Client = .init(init.gpa, io, store.store(), .{});
-    var invoices: SendInvoice = .{ .app = app };
-    var worker: scheduler.Worker(struct { invoices: *SendInvoice }) = try .init(init.gpa, io, store.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
+    var invoices: SendInvoiceJob = .{ .app = app };
+    var worker: scheduler.Worker(struct { invoices: *SendInvoiceJob }) = try .init(init.gpa, io, store.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
     defer worker.deinit(io);
     try worker.start(io);
 
-    const scheduled = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoice, .{
+    const scheduled = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoiceJob, .{
         .key = "order-42",
         .when = .{ .after = .fromSeconds(1) },
         .payload = .{ .order_id = 42, .amount_cents = 1999 },
     }, .{});
-    app.info("Scheduled", .{ .job = SendInvoice.scheduler_job.name, .key = "order-42", .result = scheduled });
+    app.info("Scheduled", .{ .job = SendInvoiceJob.scheduler_job.name, .key = "order-42", .result = scheduled });
 
     // The invoice goes out about a second from now: wait for it, for 10 s
     // at most.
@@ -129,9 +129,9 @@ pub fn main(init: std.process.Init) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const ctx = within(io, .fromSeconds(5));
-    const record = try client.get(io, ctx, .of(SendInvoice, "order-42"), arena, .{});
+    const record = try client.get(io, ctx, .of(SendInvoiceJob, "order-42"), arena, .{});
     app.info("Record", .{ .found = record != null });
-    const history = try client.history(io, ctx, .{ .job = SendInvoice.scheduler_job.name, .key = "order-42" }, .{}, arena, .{});
+    const history = try client.history(io, ctx, .{ .job = SendInvoiceJob.scheduler_job.name, .key = "order-42" }, .{}, arena, .{});
     for (history.runs) |run| app.info("Run", .{
         .outcome = run.outcome,
         .attempt = run.attempt,

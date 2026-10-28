@@ -4,7 +4,7 @@
 //! `run`:
 //!
 //! ```zig
-//! const SendInvoice = struct {
+//! const SendInvoiceJob = struct {
 //!     billing: *Billing,
 //!
 //!     pub const scheduler_job: scheduler.Job = .{
@@ -16,7 +16,7 @@
 //!     /// The data of one run: the store keeps it as JSON.
 //!     pub const Payload = struct { order_id: u64, amount_cents: u64, note: ?[]const u8 = null };
 //!
-//!     pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+//!     pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
 //!         try self.billing.send(ctx.operation(), ctx.io(), payload.order_id, ctx.info().run_key);
 //!     }
 //! };
@@ -221,8 +221,8 @@ fn described(comptime T: type) []const u8 {
     return if (anonymous) "an anonymous struct" else "a " ++ signature.shortName(T);
 }
 
-/// The name of a type as a job name, for the hint: "SendInvoice" is
-/// "send-invoice", "HTTPPoller" is "http-poller".
+/// The name of a type as a job name, for the hint: "SendInvoiceJob" is
+/// "send-invoice-job", "HTTPPoller" is "http-poller".
 fn kebab(comptime name: []const u8) []const u8 {
     var out: []const u8 = "";
     for (name, 0..) |c, i| {

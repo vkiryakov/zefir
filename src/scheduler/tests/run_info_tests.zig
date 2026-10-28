@@ -152,7 +152,7 @@ test "operation has the deadline of timeout and the token" {
 }
 
 /// A job that tells what its context gave it.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     buffer: [128]u8 = undefined,
     said: []const u8 = "",
     deadline: bool = true,
@@ -161,7 +161,7 @@ const SendInvoice = struct {
     pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice", .retry = .{ .give_up_on = &.{error.OrderGone} } };
     pub const Payload = struct { order_id: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         if (payload.order_id == 0) return error.OrderGone;
         const info = ctx.info();
         // The memory of the run, freed after it: a copy stays in the job.
@@ -193,7 +193,7 @@ test "testing.call runs a job with an arena and the given info" {
     r.attempt = 2;
     const info = try run_info.runInfo(arena.allocator(), &r, 5, 0, owner);
 
-    var invoices: SendInvoice = .{};
+    var invoices: SendInvoiceJob = .{};
     try scheduler.testing.call(io, testing.allocator, &invoices, .{ .order_id = 42 }, info);
     try testing.expectEqualStrings("order 42, attempt 2 of 5, send-invoice/order-42/1792812600000", invoices.said);
     try testing.expect(!invoices.deadline);

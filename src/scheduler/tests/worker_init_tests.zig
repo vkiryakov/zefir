@@ -8,11 +8,11 @@ const scheduler = @import("../root.zig");
 
 const io = testing.io;
 
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
     pub const Payload = struct { order_id: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         _ = self;
         _ = ctx;
         _ = payload;
@@ -28,13 +28,13 @@ const NightlyCleanup = struct {
     }
 };
 
-const Jobs = struct { invoices: *SendInvoice, cleanup: *NightlyCleanup };
+const Jobs = struct { invoices: *SendInvoiceJob, cleanup: *NightlyCleanup };
 const Worker = scheduler.Worker(Jobs);
 
 test "init refuses settings that cannot work, with a text" {
     var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
     defer memory.deinit();
-    var invoices: SendInvoice = .{};
+    var invoices: SendInvoiceJob = .{};
     var cleanup: NightlyCleanup = .{};
     const jobs: Jobs = .{ .invoices = &invoices, .cleanup = &cleanup };
     const long: [65]u8 = @splat('w');
@@ -74,7 +74,7 @@ test "init does no I/O" {
     var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
     defer memory.deinit();
     var faulty: scheduler.testing.FaultyStore = .init(memory.store());
-    var invoices: SendInvoice = .{};
+    var invoices: SendInvoiceJob = .{};
     var cleanup: NightlyCleanup = .{};
     var w: Worker = try .init(testing.allocator, io, faulty.store(), .{ .invoices = &invoices, .cleanup = &cleanup }, .{});
     defer w.deinit(io);
@@ -84,7 +84,7 @@ test "init does no I/O" {
 test "a new worker is configured, not ready, with zero stats" {
     var memory: scheduler.MemoryStore = .init(testing.allocator, io, .{});
     defer memory.deinit();
-    var invoices: SendInvoice = .{};
+    var invoices: SendInvoiceJob = .{};
     var cleanup: NightlyCleanup = .{};
     var w: Worker = try .init(testing.allocator, io, memory.store(), .{ .invoices = &invoices, .cleanup = &cleanup }, .{ .workers = 3 });
     defer w.deinit(io);

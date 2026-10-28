@@ -12,7 +12,7 @@ const context = @import("../Context.zig");
 const io = testing.io;
 
 /// A one-shot job with a payload, as an application declares it.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     sent: u32 = 0,
 
     pub const scheduler_job: scheduler.Job = .{
@@ -28,7 +28,7 @@ const SendInvoice = struct {
         note: ?[]const u8 = null,
     };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         if (payload.order_id == 0) return error.OrderGone;
         if (ctx.info().attempt == 0) return error.NoAttempt;
         self.sent += 1;
@@ -63,14 +63,14 @@ const Digest = struct {
 
 test "a job type with and without Payload passes its checks" {
     comptime {
-        Job.assertJob(SendInvoice);
+        Job.assertJob(SendInvoiceJob);
         Job.assertJob(NightlyCleanup);
         Job.assertJob(Digest);
     }
-    try testing.expect(Job.PayloadOf(SendInvoice) == SendInvoice.Payload);
+    try testing.expect(Job.PayloadOf(SendInvoiceJob) == SendInvoiceJob.Payload);
     try testing.expect(Job.PayloadOf(NightlyCleanup) == void);
     try testing.expect(Job.RunResult(Digest) == error{TooMany}!void);
-    try testing.expect(@typeInfo(Job.RunResult(SendInvoice)).error_union.payload == void);
+    try testing.expect(@typeInfo(Job.RunResult(SendInvoiceJob)).error_union.payload == void);
     try testing.expect(@typeInfo(Job.RunResult(NightlyCleanup)).error_union.payload == void);
 
     // The defaults of a declaration.
@@ -89,7 +89,7 @@ test "a job type with and without Payload passes its checks" {
 }
 
 test "Ref.of and Ref.declared name the job" {
-    const ref: scheduler.Ref = .of(SendInvoice, "order-42");
+    const ref: scheduler.Ref = .of(SendInvoiceJob, "order-42");
     try testing.expectEqualStrings("send-invoice", ref.job);
     try testing.expectEqualStrings("order-42", ref.key);
     const declared: scheduler.Ref = .declared(NightlyCleanup);
@@ -97,7 +97,7 @@ test "Ref.of and Ref.declared name the job" {
     try testing.expectEqualStrings("", declared.key);
     // A type without .repeat names its declared record too: the way to
     // remove the parked record of a declaration that left the code.
-    const parked: scheduler.Ref = .declared(SendInvoice);
+    const parked: scheduler.Ref = .declared(SendInvoiceJob);
     try testing.expectEqualStrings("send-invoice", parked.job);
     try testing.expectEqualStrings("", parked.key);
 }
@@ -148,7 +148,7 @@ test "Context gives the io, the operation, the arena and the info of its state" 
     try testing.expectEqualStrings("shop/00112233445566778899aabbccddeeff", info.instance);
 
     // A handler gets the context as it is.
-    var invoices: SendInvoice = .{};
+    var invoices: SendInvoiceJob = .{};
     try invoices.run(ctx, .{ .order_id = 42, .amount_cents = 1999 });
     try testing.expectEqual(@as(u32, 1), invoices.sent);
     try testing.expectError(error.OrderGone, invoices.run(ctx, .{ .order_id = 0, .amount_cents = 1 }));

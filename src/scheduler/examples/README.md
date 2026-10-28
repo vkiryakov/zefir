@@ -53,7 +53,7 @@ on its time.
 ```zig
 /// The job: the invoice of an order. Its fields are what it needs, the
 /// data of one run is its Payload, and `run` does the work.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     app: log.Logger,
     sent: std.atomic.Value(u32) = .init(0),
 
@@ -61,7 +61,7 @@ const SendInvoice = struct {
 
     pub const Payload = struct { order_id: u64, amount_cents: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
         _ = self.sent.fetchAdd(1, .release);
     }
@@ -71,12 +71,12 @@ const SendInvoice = struct {
 ```zig
 // The invoice of order 42, a second from now. The key names the job,
 // so the same request again changes nothing.
-const request: scheduler.Client.Request(SendInvoice) = .{
+const request: scheduler.Client.Request(SendInvoiceJob) = .{
     .key = "order-42",
     .when = .{ .after = .fromSeconds(1) },
     .payload = .{ .order_id = 42, .amount_cents = 1999 },
 };
-app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoiceJob, request, .{}) });
 ```
 
 - **Jobs are types.** A struct with what it needs as its fields, the data
@@ -151,11 +151,11 @@ flowchart LR
     client --> store[("the store:<br/>MemoryStore or<br/>mongo.SchedulerStore")]
     w1["scheduler.Worker<br/>of instance 1"] -->|"claim, renew,<br/>finish"| store
     w2["scheduler.Worker<br/>of instance 2"] -->|"claim, renew,<br/>finish"| store
-    w1 -->|"run"| j1["SendInvoice.run"]
-    w2 -->|"run"| j2["SendInvoice.run"]
+    w1 -->|"run"| j1["SendInvoiceJob.run"]
+    w2 -->|"run"| j2["SendInvoiceJob.run"]
 ```
 
-- **A job** is a type of yours: `SendInvoice`, with what it needs as its
+- **A job** is a type of yours: `SendInvoiceJob`, with what it needs as its
   fields, the declaration `scheduler_job`, the data of one run as its
   `Payload`, and the method `run`. A job *of* that type is one piece of
   work, such as the invoice of order 42.
@@ -314,7 +314,7 @@ pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 
 /// The job: the invoice of an order. Its fields are what it needs, the
 /// data of one run is its Payload, and `run` does the work.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     app: log.Logger,
     sent: std.atomic.Value(u32) = .init(0),
 
@@ -322,7 +322,7 @@ const SendInvoice = struct {
 
     pub const Payload = struct { order_id: u64, amount_cents: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
         _ = self.sent.fetchAdd(1, .release);
     }
@@ -341,20 +341,20 @@ pub fn main(init: std.process.Init) !void {
     var memory: scheduler.MemoryStore = .init(gpa, io, .{});
     defer memory.deinit();
     const client: scheduler.Client = .init(gpa, io, memory.store(), .{});
-    var invoices: SendInvoice = .{ .app = app };
-    var worker: scheduler.Worker(struct { invoices: *SendInvoice }) = try .init(gpa, io, memory.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
+    var invoices: SendInvoiceJob = .{ .app = app };
+    var worker: scheduler.Worker(struct { invoices: *SendInvoiceJob }) = try .init(gpa, io, memory.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
     defer worker.deinit(io);
     try worker.start(io);
 
     // The invoice of order 42, a second from now. The key names the job,
     // so the same request again changes nothing.
-    const request: scheduler.Client.Request(SendInvoice) = .{
+    const request: scheduler.Client.Request(SendInvoiceJob) = .{
         .key = "order-42",
         .when = .{ .after = .fromSeconds(1) },
         .payload = .{ .order_id = 42, .amount_cents = 1999 },
     };
-    app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
-    app.info("Scheduled again", .{ .result = try client.schedule(io, .root, SendInvoice, request, .{}) });
+    app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoiceJob, request, .{}) });
+    app.info("Scheduled again", .{ .result = try client.schedule(io, .root, SendInvoiceJob, request, .{}) });
 
     // Wait for the run, then stop: the worker takes no more jobs and
     // waits for the runs to end, here for 5 s at most.
@@ -375,7 +375,7 @@ $ zig build run
 
 What happens, from the top:
 
-- **The job.** `SendInvoice` is a plain struct. `scheduler_job` declares
+- **The job.** `SendInvoiceJob` is a plain struct. `scheduler_job` declares
   it a job, under the name `send-invoice` that the store keeps its records
   by, with the default policy: no time limit, five attempts, and nothing
   kept once it succeeded. `Payload` is the data of one run, which the
@@ -388,8 +388,8 @@ What happens, from the top:
   its place, and the rest stays as it is.
 - **The client.** `scheduler.Client.init` makes a value without
   resources: copy it and share it between tasks. `schedule` puts a job of
-  `SendInvoice` on its time; its request is `Client.Request(SendInvoice)`,
-  which the compiler checks against `SendInvoice.Payload`, so a missing
+  `SendInvoiceJob` on its time; its request is `Client.Request(SendInvoiceJob)`,
+  which the compiler checks against `SendInvoiceJob.Payload`, so a missing
   field or a string where a number goes stops the build. `.after =
   .fromSeconds(1)` is a second after the store took the job, by the
   store's clock.
@@ -422,7 +422,7 @@ the shop's tests, from [Invoices.zig](#tests-of-your-jobs):
 
 ```zig
 /// The invoice of an order: a job for each order, by its key.
-pub const SendInvoice = struct {
+pub const SendInvoiceJob = struct {
     billing: *Billing,
 
     pub const scheduler_job: scheduler.Job = .{
@@ -444,7 +444,7 @@ pub const SendInvoice = struct {
         note: ?[]const u8 = null,
     };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         // The run key is the same for every attempt of this run: the key
         // of idempotency for the billing service.
         try self.billing.send(ctx.io(), ctx.info().run_key, payload.order_id);
@@ -496,7 +496,7 @@ version wrote it, gives the job back for another instance, see
 
 ### `run` and its context
 
-`pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload:
+`pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload:
 Payload) !void` does the work. It returns any error it likes: an error is
 a failed attempt, and its name goes to the history and to `last`. `ctx` is
 borrowed for this run only:
@@ -534,13 +534,13 @@ program compiles. Each error starts with `scheduler: `, names the type,
 and says what to write:
 
 ```text
-error: scheduler: SendInvoice has no scheduler_job: declare pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
-error: scheduler: SendInvoice: the name "Send": a name is 1–64 bytes of a-z, 0-9, '-', '_' and '.', starting with a letter or a digit
-error: scheduler: SendInvoice: expected pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: SendInvoice.Payload) !void
+error: scheduler: SendInvoiceJob has no scheduler_job: declare pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice-job" };
+error: scheduler: SendInvoiceJob: the name "Send": a name is 1–64 bytes of a-z, 0-9, '-', '_' and '.', starting with a letter or a digit
+error: scheduler: SendInvoiceJob: expected pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: SendInvoiceJob.Payload) !void
 error: scheduler: NightlyCleanup: the declared record of a repeat gets Payload{}: give every field of Payload a default, or drop .repeat
-error: scheduler: SendInvoice: retry.attempts is 0: write 1 or more, or null for the default
-error: scheduler: Worker(Jobs): a field of Jobs points to a job: invoices: *SendInvoice
-error: scheduler: Worker(Jobs): SendInvoice and Reminder share the name "send-invoice"
+error: scheduler: SendInvoiceJob: retry.attempts is 0: write 1 or more, or null for the default
+error: scheduler: Worker(Jobs): a field of Jobs points to a job: invoices: *SendInvoiceJob
+error: scheduler: Worker(Jobs): SendInvoiceJob and Reminder share the name "send-invoice"
 ```
 
 The request of `schedule` is `Client.Request(J)`: its field `payload` is
@@ -1852,7 +1852,7 @@ const Config = struct {
 
 /// The job: the invoice of an order. What it needs is in its fields: here
 /// the logger, in a shop the client of its billing service.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     app: log.Logger,
     /// How many invoices went out: main waits for the first.
     sent: std.atomic.Value(u32) = .init(0),
@@ -1866,7 +1866,7 @@ const SendInvoice = struct {
     /// The data of one run: the store keeps it as JSON.
     pub const Payload = struct { order_id: u64, amount_cents: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         self.app.info("Invoice sent", .{ .order = payload.order_id, .amount_cents = payload.amount_cents, .attempt = ctx.info().attempt });
         _ = self.sent.fetchAdd(1, .release);
     }
@@ -1916,17 +1916,17 @@ pub fn main(init: std.process.Init) !void {
 
     // The client puts jobs on their time; the worker runs them.
     const client: scheduler.Client = .init(init.gpa, io, store.store(), .{});
-    var invoices: SendInvoice = .{ .app = app };
-    var worker: scheduler.Worker(struct { invoices: *SendInvoice }) = try .init(init.gpa, io, store.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
+    var invoices: SendInvoiceJob = .{ .app = app };
+    var worker: scheduler.Worker(struct { invoices: *SendInvoiceJob }) = try .init(init.gpa, io, store.store(), .{ .invoices = &invoices }, .{ .instance = "shop" });
     defer worker.deinit(io);
     try worker.start(io);
 
-    const scheduled = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoice, .{
+    const scheduled = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoiceJob, .{
         .key = "order-42",
         .when = .{ .after = .fromSeconds(1) },
         .payload = .{ .order_id = 42, .amount_cents = 1999 },
     }, .{});
-    app.info("Scheduled", .{ .job = SendInvoice.scheduler_job.name, .key = "order-42", .result = scheduled });
+    app.info("Scheduled", .{ .job = SendInvoiceJob.scheduler_job.name, .key = "order-42", .result = scheduled });
 
     // The invoice goes out about a second from now: wait for it, for 10 s
     // at most.
@@ -1944,9 +1944,9 @@ pub fn main(init: std.process.Init) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const ctx = within(io, .fromSeconds(5));
-    const record = try client.get(io, ctx, .of(SendInvoice, "order-42"), arena, .{});
+    const record = try client.get(io, ctx, .of(SendInvoiceJob, "order-42"), arena, .{});
     app.info("Record", .{ .found = record != null });
-    const history = try client.history(io, ctx, .{ .job = SendInvoice.scheduler_job.name, .key = "order-42" }, .{}, arena, .{});
+    const history = try client.history(io, ctx, .{ .job = SendInvoiceJob.scheduler_job.name, .key = "order-42" }, .{}, arena, .{});
     for (history.runs) |run| app.info("Run", .{
         .outcome = run.outcome,
         .attempt = run.attempt,
@@ -2162,7 +2162,7 @@ const Billing = struct {
 };
 
 /// The job: the invoice of an order, sent to the billing service.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     billing: *Billing,
 
     pub const scheduler_job: scheduler.Job = .{
@@ -2173,12 +2173,12 @@ const SendInvoice = struct {
 
     pub const Payload = struct { order_id: u32, amount_cents: u64 };
 
-    pub fn run(self: *SendInvoice, _: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, _: *scheduler.Context, payload: Payload) !void {
         try self.billing.send(payload.order_id);
     }
 };
 
-const Jobs = struct { invoices: *SendInvoice };
+const Jobs = struct { invoices: *SendInvoiceJob };
 
 pub fn main(init: std.process.Init) !void {
     var config: Config = undefined;
@@ -2220,7 +2220,7 @@ pub fn main(init: std.process.Init) !void {
     // worker adds 32 random hex digits to the name, so that the logs and
     // the history tell them apart.
     var billing: Billing = .{};
-    var invoices: [instances]SendInvoice = @splat(.{ .billing = &billing });
+    var invoices: [instances]SendInvoiceJob = @splat(.{ .billing = &billing });
     var workers: [instances]scheduler.Worker(Jobs) = undefined;
     var made: usize = 0;
     defer for (workers[0..made]) |*w| w.deinit(io);
@@ -2232,7 +2232,7 @@ pub fn main(init: std.process.Init) !void {
 
     for (1..orders + 1) |order| {
         var key: [16]u8 = undefined;
-        _ = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoice, .{
+        _ = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoiceJob, .{
             .key = try std.fmt.bufPrint(&key, "order-{d}", .{order}),
             .when = .{ .after = .fromSeconds(1) },
             .payload = .{ .order_id = @intCast(order), .amount_cents = 1000 + order },
@@ -2269,7 +2269,7 @@ pub fn main(init: std.process.Init) !void {
     // The history of all the instances in one place: a row for each run.
     var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena_state.deinit();
-    const history = try client.history(io, within(io, .fromSeconds(5)), .{ .job = SendInvoice.scheduler_job.name }, .{}, arena_state.allocator(), .{});
+    const history = try client.history(io, within(io, .fromSeconds(5)), .{ .job = SendInvoiceJob.scheduler_job.name }, .{}, arena_state.allocator(), .{});
     var good: u32 = 0;
     for (history.runs) |run| {
         if (run.outcome == .succeeded) good += 1;
@@ -2408,7 +2408,7 @@ pub const Quotes = struct {
 };
 
 /// A shared job: the invoice of an order.
-pub const SendInvoice = struct {
+pub const SendInvoiceJob = struct {
     logger: log.Logger,
     sent: std.atomic.Value(u32) = .init(0),
 
@@ -2416,11 +2416,11 @@ pub const SendInvoice = struct {
     pub const Payload = struct { order_id: u64 };
 
     /// App builds it by its `init`, whose params are what it takes.
-    pub fn init(logger: *const log.Logger) SendInvoice {
+    pub fn init(logger: *const log.Logger) SendInvoiceJob {
         return .{ .logger = logger.scoped("invoices") };
     }
 
-    pub fn run(self: *SendInvoice, _: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, _: *scheduler.Context, payload: Payload) !void {
         self.logger.info("Invoice sent", .{ .order = payload.order_id });
         _ = self.sent.fetchAdd(1, .release);
     }
@@ -2442,12 +2442,12 @@ pub const ExpireQuote = struct {
 };
 
 /// The jobs of each worker: App fills these structs of pointers by type.
-pub const SharedJobs = struct { invoices: *SendInvoice };
+pub const SharedJobs = struct { invoices: *SendInvoiceJob };
 pub const LocalJobs = struct { quotes: *ExpireQuote };
 
 pub const ShopModule = struct {
     pub const module: core.app.Module = .{
-        .providers = &.{ Quotes, SendInvoice, ExpireQuote },
+        .providers = &.{ Quotes, SendInvoiceJob, ExpireQuote },
         .factories = &.{Scheduling},
         // Ready objects from main: App hands them out, and never starts or
         // frees them.
@@ -2499,8 +2499,8 @@ pub fn main(init: std.process.Init) !void {
     // What a handler of an order does: the invoice is a shared job, by
     // the key of the order.
     const shared: *SharedClient = app.get(SharedClient);
-    _ = try shared.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42 } }, .{});
-    try waitFor(io, &app.get(SendInvoice).sent, 1);
+    _ = try shared.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42 } }, .{});
+    try waitFor(io, &app.get(SendInvoiceJob).sent, 1);
 
     // A quote for customer 7, held by this instance: a local job drops it,
     // here at once, in a shop 15 minutes on.
@@ -2547,11 +2547,11 @@ $ zig build run
   `start`, here the two workers, and logs each.
 - **The logger** is a value of the module: `main` makes it before the
   runtime and hands it to App, which gives `*const log.Logger` to the
-  beans that take it, `SendInvoice.init` and the field of `ExpireQuote`.
+  beans that take it, `SendInvoiceJob.init` and the field of `ExpireQuote`.
   The lines of the workers go to the scope `scheduler`, which the logger
   keeps at warnings here: the start and the stop of a worker are in
   [the quick start](#quick-start).
-- **The two schedulers.** `SendInvoice` goes through the shared client by
+- **The two schedulers.** `SendInvoiceJob` goes through the shared client by
   the key of its order, and any instance runs it. `ExpireQuote` goes
   through the local client, since the quote it drops is in the memory of
   this instance: only this instance can run it.
@@ -2812,7 +2812,7 @@ pub const Billing = struct {
 };
 
 /// The invoice of an order: a job for each order, by its key.
-pub const SendInvoice = struct {
+pub const SendInvoiceJob = struct {
     billing: *Billing,
 
     pub const scheduler_job: scheduler.Job = .{
@@ -2834,7 +2834,7 @@ pub const SendInvoice = struct {
         note: ?[]const u8 = null,
     };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         // The run key is the same for every attempt of this run: the key
         // of idempotency for the billing service.
         try self.billing.send(ctx.io(), ctx.info().run_key, payload.order_id);
@@ -2938,7 +2938,7 @@ const scheduler = @import("scheduler");
 const Invoices = @import("Invoices.zig");
 
 const io = testing.io;
-const Worker = scheduler.Worker(struct { invoices: *Invoices.SendInvoice });
+const Worker = scheduler.Worker(struct { invoices: *Invoices.SendInvoiceJob });
 
 /// What the worker would give the first attempt of the claim `fence` of
 /// the record of `life`: `testing.call` hands it to `run` as `ctx.info()`.
@@ -2979,8 +2979,8 @@ fn waitForInvoices(billing: *Invoices.Billing, n: usize) !void {
 test "an invoice goes out once for each run key" {
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
-    const payload: Invoices.SendInvoice.Payload = .{ .order_id = 42, .amount_cents = 1999 };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
+    const payload: Invoices.SendInvoiceJob.Payload = .{ .order_id = 42, .amount_cents = 1999 };
     const first = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793091600000", @splat(1), 1);
     try scheduler.testing.call(io, testing.allocator, &invoices, payload, first);
     // The same run again, as after a crash of the instance that ran it
@@ -3001,7 +3001,7 @@ test "the invoice of an order that is gone fails with an error of give_up_on" {
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
     billing.gone = &.{42};
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
     const info = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793091600000", @splat(1), 1);
     try testing.expectError(error.OrderGone, scheduler.testing.call(io, testing.allocator, &invoices, .{ .order_id = 42, .amount_cents = 1999 }, info));
     try testing.expectEqual(0, billing.count(io));
@@ -3049,19 +3049,19 @@ test "a worker sends the invoice when it is due, and the job goes" {
     const client: scheduler.Client = .init(testing.allocator, io, memory.store(), .{});
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
     var worker: Worker = try .init(testing.allocator, io, memory.store(), .{ .invoices = &invoices }, .{ .poll_every = .fromMilliseconds(100) });
     defer worker.deinit(io);
     try worker.start(io);
 
-    _ = try client.schedule(io, .root, Invoices.SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
+    _ = try client.schedule(io, .root, Invoices.SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
     try waitForInvoices(&billing, 1);
     try worker.shutdown(io, soon());
 
     // A succeeded job leaves no record; its history keeps a row.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expect(try client.get(io, .root, .of(Invoices.SendInvoice, "order-42"), arena.allocator(), .{}) == null);
+    try testing.expect(try client.get(io, .root, .of(Invoices.SendInvoiceJob, "order-42"), arena.allocator(), .{}) == null);
     const history = try client.history(io, .root, .{ .job = "send-invoice", .key = "order-42" }, .{}, arena.allocator(), .{});
     try testing.expectEqual(1, history.runs.len);
     try testing.expectEqual(scheduler.RunOutcome.succeeded, history.runs[0].outcome);
@@ -3078,14 +3078,14 @@ test "the worker waits while its store fails, and runs the job once it answers" 
     const client: scheduler.Client = .init(testing.allocator, io, faulty.store(), .{});
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
     var worker: Worker = try .init(testing.allocator, io, faulty.store(), .{ .invoices = &invoices }, .{ .poll_every = .fromMilliseconds(100) });
     defer worker.deinit(io);
     // The first three claims find the store unreachable.
     faulty.failNext(io, .claim, error.Unavailable, 3);
     try worker.start(io);
 
-    _ = try client.schedule(io, .root, Invoices.SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
+    _ = try client.schedule(io, .root, Invoices.SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
     try waitForInvoices(&billing, 1);
     const stats = worker.stats();
     try testing.expectEqual(3, stats.store_errors);
@@ -3098,7 +3098,7 @@ test "after a lost reply, the same request again tells whether the job was made"
     defer memory.deinit();
     var faulty: scheduler.testing.FaultyStore = .init(memory.store());
     const client: scheduler.Client = .init(testing.allocator, io, faulty.store(), .{});
-    const request: scheduler.Client.Request(Invoices.SendInvoice) = .{
+    const request: scheduler.Client.Request(Invoices.SendInvoiceJob) = .{
         .key = "order-42",
         .when = .{ .after = .fromSeconds(60) },
         .payload = .{ .order_id = 42, .amount_cents = 1999 },
@@ -3107,15 +3107,15 @@ test "after a lost reply, the same request again tells whether the job was made"
     // The store cannot be reached: nothing was done, and the call is safe
     // to make again.
     faulty.failNext(io, .create, error.Unavailable, 1);
-    try testing.expectError(error.Unavailable, client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectError(error.Unavailable, client.schedule(io, .root, Invoices.SendInvoiceJob, request, .{}));
     try testing.expectEqual(scheduler.Outcome.not_applied, scheduler.outcome(error.Unavailable));
     // The store makes the job, and its reply is lost: the outcome is
     // unknown.
     faulty.loseNextReply(io, .create);
-    try testing.expectError(error.OutcomeUnknown, client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectError(error.OutcomeUnknown, client.schedule(io, .root, Invoices.SendInvoiceJob, request, .{}));
     try testing.expectEqual(scheduler.Outcome.unknown, scheduler.outcome(error.OutcomeUnknown));
     // The same request again: the key is taken, so the job was made.
-    try testing.expectEqual(scheduler.Client.Scheduled.existing, try client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectEqual(scheduler.Client.Scheduled.existing, try client.schedule(io, .root, Invoices.SendInvoiceJob, request, .{}));
 }
 
 test "a declaration that left the code is parked until it is removed" {
@@ -3163,7 +3163,7 @@ test "a declaration that left the code is parked until it is removed" {
   run key, the attempt, the life and the fence. The same run twice sends
   one invoice; another run of the key, with a run key of its own, sends
   another. The error of an order that is gone comes back as it is: the
-  `give_up_on` of `SendInvoice` is the worker's business, see
+  `give_up_on` of `SendInvoiceJob` is the worker's business, see
   [Failures and retries](#failures-and-retries).
 - **The ledger** closes the night of a run once, whichever claim posts
   it: the claim that took the job over has the greater fence, and the run

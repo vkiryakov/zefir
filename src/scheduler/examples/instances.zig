@@ -55,7 +55,7 @@ const Billing = struct {
 };
 
 /// The job: the invoice of an order, sent to the billing service.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     billing: *Billing,
 
     pub const scheduler_job: scheduler.Job = .{
@@ -66,12 +66,12 @@ const SendInvoice = struct {
 
     pub const Payload = struct { order_id: u32, amount_cents: u64 };
 
-    pub fn run(self: *SendInvoice, _: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, _: *scheduler.Context, payload: Payload) !void {
         try self.billing.send(payload.order_id);
     }
 };
 
-const Jobs = struct { invoices: *SendInvoice };
+const Jobs = struct { invoices: *SendInvoiceJob };
 
 pub fn main(init: std.process.Init) !void {
     var config: Config = undefined;
@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     // worker adds 32 random hex digits to the name, so that the logs and
     // the history tell them apart.
     var billing: Billing = .{};
-    var invoices: [instances]SendInvoice = @splat(.{ .billing = &billing });
+    var invoices: [instances]SendInvoiceJob = @splat(.{ .billing = &billing });
     var workers: [instances]scheduler.Worker(Jobs) = undefined;
     var made: usize = 0;
     defer for (workers[0..made]) |*w| w.deinit(io);
@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
 
     for (1..orders + 1) |order| {
         var key: [16]u8 = undefined;
-        _ = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoice, .{
+        _ = try client.schedule(io, within(io, .fromSeconds(5)), SendInvoiceJob, .{
             .key = try std.fmt.bufPrint(&key, "order-{d}", .{order}),
             .when = .{ .after = .fromSeconds(1) },
             .payload = .{ .order_id = @intCast(order), .amount_cents = 1000 + order },
@@ -162,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
     // The history of all the instances in one place: a row for each run.
     var arena_state: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena_state.deinit();
-    const history = try client.history(io, within(io, .fromSeconds(5)), .{ .job = SendInvoice.scheduler_job.name }, .{}, arena_state.allocator(), .{});
+    const history = try client.history(io, within(io, .fromSeconds(5)), .{ .job = SendInvoiceJob.scheduler_job.name }, .{}, arena_state.allocator(), .{});
     var good: u32 = 0;
     for (history.runs) |run| {
         if (run.outcome == .succeeded) good += 1;

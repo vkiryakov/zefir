@@ -2,7 +2,7 @@
 //! to job types, in several instances of a service at once.
 //!
 //! ```zig
-//! const Jobs = struct { invoices: *SendInvoice, cleanup: *NightlyCleanup };
+//! const Jobs = struct { invoices: *SendInvoiceJob, cleanup: *NightlyCleanup };
 //! var worker: scheduler.Worker(Jobs) = try .init(gpa, io, store, .{ .invoices = &invoices, .cleanup = &cleanup }, .{ .instance = "shop" });
 //! defer worker.deinit(io);
 //! try worker.start(io);
@@ -42,7 +42,7 @@ const Policy = @import("worker/policy.zig").Policy;
 const declared = @import("worker/declared.zig");
 const Stats = @import("worker/stats.zig").Stats;
 
-/// The worker of the jobs of `Jobs`: `struct { invoices: *SendInvoice,
+/// The worker of the jobs of `Jobs`: `struct { invoices: *SendInvoiceJob,
 /// cleanup: *NightlyCleanup }`. The compiler checks every job type, that
 /// each field points to one, and that no two share a name.
 pub fn Worker(comptime Jobs: type) type {
@@ -155,7 +155,7 @@ fn checkJobs(comptime Jobs: type) void {
     const prefix = "scheduler: Worker(Jobs): ";
     const info = switch (@typeInfo(Jobs)) {
         .@"struct" => |s| s,
-        else => @compileError(prefix ++ "Jobs is a struct of pointers to the jobs of the worker: struct { invoices: *SendInvoice }; got " ++ signature.shortName(Jobs)),
+        else => @compileError(prefix ++ "Jobs is a struct of pointers to the jobs of the worker: struct { invoices: *SendInvoiceJob }; got " ++ signature.shortName(Jobs)),
     };
     for (info.field_names, info.field_types) |name, T| {
         const J: ?type = switch (@typeInfo(T)) {

@@ -10,7 +10,7 @@ const Store = scheduler.Store;
 const io = testing.io;
 
 /// A one-shot job with a payload.
-pub const SendInvoice = struct {
+pub const SendInvoiceJob = struct {
     pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
 
     pub const Payload = struct {
@@ -19,7 +19,7 @@ pub const SendInvoice = struct {
         note: ?[]const u8 = null,
     };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         _ = self;
         _ = ctx;
         _ = payload;
@@ -92,14 +92,14 @@ pub const Fixture = struct {
         }, f.options());
     }
 
-    /// A one-shot record of SendInvoice with `key`, due at once, claimed and
+    /// A one-shot record of SendInvoiceJob with `key`, due at once, claimed and
     /// failed for good: kept always.
     pub fn failed(f: *Fixture, key: []const u8) !scheduler.Record {
-        _ = try f.client.schedule(io, .root, SendInvoice, .{ .key = key, .when = .{ .at = .fromUnixMs(0) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
+        _ = try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = key, .when = .{ .at = .fromUnixMs(0) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
         const claimed = try f.claim("send-invoice");
         if (claimed.len != 1) return error.TestUnexpectedResult;
         const done = try f.finish(claimed[0].record, .{ .done = .{ .state = .failed, .keep = .forever } });
         if (done != .done) return error.TestUnexpectedResult;
-        return f.record(.of(SendInvoice, key));
+        return f.record(.of(SendInvoiceJob, key));
     }
 };

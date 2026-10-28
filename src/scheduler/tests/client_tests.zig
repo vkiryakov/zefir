@@ -9,20 +9,20 @@ const core = @import("core");
 const scheduler = @import("../root.zig");
 const payload = @import("../payload.zig");
 const client_fixture = @import("client_fixture.zig");
-const SendInvoice = client_fixture.SendInvoice;
+const SendInvoiceJob = client_fixture.SendInvoiceJob;
 const WeeklyReport = client_fixture.WeeklyReport;
 const Fixture = client_fixture.Fixture;
 const Instant = scheduler.Instant;
 
 const io = testing.io;
 
-const order: scheduler.Ref = .of(SendInvoice, "order-42");
+const order: scheduler.Ref = .of(SendInvoiceJob, "order-42");
 
 test "schedule creates a record with the payload as JSON" {
     var f: Fixture = undefined;
     f.init(.{});
     defer f.deinit();
-    const scheduled = try f.client.schedule(io, .root, SendInvoice, .{
+    const scheduled = try f.client.schedule(io, .root, SendInvoiceJob, .{
         .key = "order-42",
         .when = .{ .after = .fromSeconds(60) },
         .payload = .{ .order_id = 42, .amount_cents = 1999, .note = "naïve \"quotes\"" },
@@ -38,7 +38,7 @@ test "schedule creates a record with the payload as JSON" {
     try testing.expectEqualStrings("{\"order_id\":42,\"amount_cents\":1999,\"note\":\"naïve \\\"quotes\\\"\"}", r.payload);
     try testing.expectEqual(@as(u32, 0), r.attempt);
     try testing.expectEqual(@as(u64, 0), r.fence);
-    const back = try payload.decode(SendInvoice, f.arena.allocator(), r.payload);
+    const back = try payload.decode(SendInvoiceJob, f.arena.allocator(), r.payload);
     try testing.expectEqual(@as(u64, 42), back.order_id);
     try testing.expectEqual(@as(u64, 1999), back.amount_cents);
     try testing.expectEqualDeep(@as(?[]const u8, "naïve \"quotes\""), back.note);
@@ -52,9 +52,9 @@ test "schedule again with the same key is existing and changes nothing" {
     var f: Fixture = undefined;
     f.init(.{});
     defer f.deinit();
-    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{}));
+    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{}));
     const before = try f.record(order);
-    try testing.expectEqual(.existing, try f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(5) }, .payload = .{ .order_id = 43, .amount_cents = 1 }, .tenant = "acme" }, .{}));
+    try testing.expectEqual(.existing, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(5) }, .payload = .{ .order_id = 43, .amount_cents = 1 }, .tenant = "acme" }, .{}));
     try testing.expectEqualDeep(before, try f.record(order));
     try testing.expectEqual(@as(u32, 2), f.faulty.calls(io, .create));
 }
@@ -65,7 +65,7 @@ test "schedule over a finished record is created with a new life" {
     defer f.deinit();
     const old = try f.failed("order-42");
     try testing.expectEqual(scheduler.State.failed, old.state);
-    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 42, .amount_cents = 5 } }, .{}));
+    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 42, .amount_cents = 5 } }, .{}));
     const r = try f.record(order);
     try testing.expectEqual(scheduler.State.pending, r.state);
     try testing.expect(!std.mem.eql(u8, &old.life, &r.life));
@@ -80,8 +80,8 @@ test "when gives run_at, scheduled_at and plan" {
     f.init(.{});
     defer f.deinit();
     const at: Instant = .fromUtc(2030, 1, 2, 3, 4, 5, .h24);
-    _ = try f.client.schedule(io, .root, SendInvoice, .{ .key = "at", .when = .{ .at = at }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
-    var r = try f.record(.of(SendInvoice, "at"));
+    _ = try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "at", .when = .{ .at = at }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
+    var r = try f.record(.of(SendInvoiceJob, "at"));
     try testing.expectEqual(@as(?Instant, at), r.run_at);
     try testing.expectEqual(at, r.scheduled_at);
     try testing.expectEqualStrings("", r.plan);
@@ -89,9 +89,9 @@ test "when gives run_at, scheduled_at and plan" {
     // .after counts from the store's clock: between its now before the
     // call and after it.
     var from = f.store().now(io);
-    _ = try f.client.schedule(io, .root, SendInvoice, .{ .key = "after", .when = .{ .after = .fromSeconds(2) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
+    _ = try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "after", .when = .{ .after = .fromSeconds(2) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
     var to = f.store().now(io);
-    r = try f.record(.of(SendInvoice, "after"));
+    r = try f.record(.of(SendInvoiceJob, "after"));
     try expectWithin(r.run_at, from.unix_ms + 2000, to.unix_ms + 2000);
     try testing.expectEqual(r.run_at, @as(?Instant, r.scheduled_at));
     try testing.expectEqualStrings("", r.plan);
@@ -129,11 +129,11 @@ fn expectWithin(at: ?Instant, low: i64, high: i64) !void {
     }
 }
 
-/// `schedule` of SendInvoice that must fail with InvalidArgument and a
+/// `schedule` of SendInvoiceJob that must fail with InvalidArgument and a
 /// text that starts with `field`, before any call of the store.
-fn expectRefused(f: *Fixture, field: []const u8, request: scheduler.Client.Request(SendInvoice)) !void {
+fn expectRefused(f: *Fixture, field: []const u8, request: scheduler.Client.Request(SendInvoiceJob)) !void {
     var d: scheduler.Diagnostics = .{};
-    try testing.expectError(error.InvalidArgument, f.client.schedule(io, .root, SendInvoice, request, .{ .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, f.client.schedule(io, .root, SendInvoiceJob, request, .{ .diagnostics = &d }));
     if (!std.mem.startsWith(u8, d.message(), field)) {
         std.debug.print("\"{s}\" does not start with \"{s}\"\n", .{ d.message(), field });
         return error.TestUnexpectedResult;
@@ -146,7 +146,7 @@ test "limits are InvalidArgument before any I/O" {
     f.init(.{});
     defer f.deinit();
     const a = f.arena.allocator();
-    const small: SendInvoice.Payload = .{ .order_id = 1, .amount_cents = 1 };
+    const small: SendInvoiceJob.Payload = .{ .order_id = 1, .amount_cents = 1 };
     const soon: scheduler.When = .{ .after = .fromSeconds(60) };
 
     // Keys and tenants.
@@ -157,7 +157,7 @@ test "limits are InvalidArgument before any I/O" {
     try expectRefused(&f, "tenant: 129 bytes", .{ .key = "order-42", .when = soon, .payload = small, .tenant = &@as([129]u8, @splat('t')) });
 
     // The payload: its JSON is at most 64 KiB, and UTF-8.
-    const overhead = (try payload.encode(SendInvoice, a, .{ .order_id = 1, .amount_cents = 1, .note = "" })).len;
+    const overhead = (try payload.encode(SendInvoiceJob, a, .{ .order_id = 1, .amount_cents = 1, .note = "" })).len;
     const note = try a.alloc(u8, 64 * 1024 + 1 - overhead);
     @memset(note, 'n');
     try expectRefused(&f, "payload: its JSON is 65537 bytes; at most 65536", .{ .key = "order-42", .when = soon, .payload = .{ .order_id = 1, .amount_cents = 1, .note = note } });
@@ -181,16 +181,16 @@ test "limits are InvalidArgument before any I/O" {
     try expectRefused(&f, "when: fixedDelay(0ns)", .{ .key = "order-42", .when = .{ .repeat = .fixedDelay(.zero) }, .payload = small });
 
     // The bounds themselves pass.
-    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoice, .{ .key = "64-kib", .when = soon, .payload = .{ .order_id = 1, .amount_cents = 1, .note = note[1..] } }, .{}));
-    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoice, .{ .key = &@as([256]u8, @splat('k')), .when = .{ .at = .fromUnixMs(253_402_300_799_999) }, .payload = small, .tenant = &@as([128]u8, @splat('t')) }, .{}));
-    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoice, .{ .key = "100-years", .when = .{ .after = .fromSeconds(3_155_760_000) }, .payload = small }, .{}));
+    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "64-kib", .when = soon, .payload = .{ .order_id = 1, .amount_cents = 1, .note = note[1..] } }, .{}));
+    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = &@as([256]u8, @splat('k')), .when = .{ .at = .fromUnixMs(253_402_300_799_999) }, .payload = small, .tenant = &@as([128]u8, @splat('t')) }, .{}));
+    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "100-years", .when = .{ .after = .fromSeconds(3_155_760_000) }, .payload = small }, .{}));
 
     // A client with a smaller limit.
     var tight: Fixture = undefined;
     tight.init(.{ .max_payload_bytes = 1024 });
     defer tight.deinit();
     try expectRefused(&tight, "payload: its JSON is 1025 bytes; at most 1024", .{ .key = "order-42", .when = soon, .payload = .{ .order_id = 1, .amount_cents = 1, .note = note[0 .. 1025 - overhead] } });
-    try testing.expectEqual(.created, try tight.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = soon, .payload = .{ .order_id = 1, .amount_cents = 1, .note = note[0 .. 1024 - overhead] } }, .{}));
+    try testing.expectEqual(.created, try tight.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = soon, .payload = .{ .order_id = 1, .amount_cents = 1, .note = note[0 .. 1024 - overhead] } }, .{}));
 }
 
 test "a string that is not UTF-8 is found at any depth of a payload" {
@@ -222,11 +222,11 @@ test "no text of the client holds the payload" {
     const parts: [64][]const u8 = @splat(marker);
     const big = try std.mem.concat(f.arena.allocator(), u8, &parts);
     var d: scheduler.Diagnostics = .{};
-    try testing.expectError(error.InvalidArgument, f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 1, .amount_cents = 1, .note = big } }, .{ .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 1, .amount_cents = 1, .note = big } }, .{ .diagnostics = &d }));
     try testing.expect(d.message().len > 0);
     try testing.expect(std.mem.find(u8, d.message(), "card") == null);
     d = .{};
-    try testing.expectError(error.InvalidArgument, f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 1, .amount_cents = 1, .note = marker ++ "\xff" } }, .{ .diagnostics = &d }));
+    try testing.expectError(error.InvalidArgument, f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 1, .amount_cents = 1, .note = marker ++ "\xff" } }, .{ .diagnostics = &d }));
     try testing.expect(d.message().len > 0);
     try testing.expect(std.mem.find(u8, d.message(), "card") == null);
 }
@@ -241,10 +241,10 @@ test "schedule keeps the caller's traceparent" {
         .flags = .{ .sampled = true },
         .state = .empty,
     });
-    _ = try f.client.schedule(io, ctx, SendInvoice, .{ .key = "traced", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
-    try testing.expectEqualDeep(@as(?[]const u8, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), (try f.record(.of(SendInvoice, "traced"))).trace);
-    _ = try f.client.schedule(io, .root, SendInvoice, .{ .key = "untraced", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
-    try testing.expectEqual(@as(?[]const u8, null), (try f.record(.of(SendInvoice, "untraced"))).trace);
+    _ = try f.client.schedule(io, ctx, SendInvoiceJob, .{ .key = "traced", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
+    try testing.expectEqualDeep(@as(?[]const u8, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), (try f.record(.of(SendInvoiceJob, "traced"))).trace);
+    _ = try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "untraced", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{});
+    try testing.expectEqual(@as(?[]const u8, null), (try f.record(.of(SendInvoiceJob, "untraced"))).trace);
 }
 
 test "store errors pass through" {
@@ -253,7 +253,7 @@ test "store errors pass through" {
     defer f.deinit();
     var d: scheduler.Diagnostics = .{};
     f.faulty.failNext(io, .create, error.Unavailable, 1);
-    try testing.expectError(error.Unavailable, f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{ .diagnostics = &d }));
+    try testing.expectError(error.Unavailable, f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{ .diagnostics = &d }));
     try testing.expectEqualStrings("testing.FaultyStore: create failed on demand with error.Unavailable", d.message());
-    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{}));
+    try testing.expectEqual(.created, try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 1, .amount_cents = 1 } }, .{}));
 }

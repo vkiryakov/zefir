@@ -26,9 +26,9 @@
 //! 1. Start: build a store, a `scheduler.Client` and a
 //!    `scheduler.Worker(Jobs)` with pointers to the jobs; `Worker.start`
 //!    writes the repeating jobs that the code declares and starts polling.
-//! 2. Scheduling: `client.schedule(io, ctx, SendInvoice, .{ .key =
+//! 2. Scheduling: `client.schedule(io, ctx, SendInvoiceJob, .{ .key =
 //!    "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = … },
-//!    .{})`; the compiler checks the payload against `SendInvoice.Payload`,
+//!    .{})`; the compiler checks the payload against `SendInvoiceJob.Payload`,
 //!    and a key already taken answers `.existing`.
 //! 3. Running: the worker polls every second, claims no more jobs than it
 //!    has free slots, runs each one's `run` in a task of its own, renews

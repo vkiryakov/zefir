@@ -16,7 +16,7 @@ const run_info = @import("../worker/run_info.zig");
 /// `payload`.
 ///
 /// ```zig
-/// var invoices: SendInvoice = .{ .billing = &billing };
+/// var invoices: SendInvoiceJob = .{ .billing = &billing };
 /// try scheduler.testing.call(io, std.testing.allocator, &invoices, .{ .order_id = 42, .amount_cents = 1999 }, info);
 /// ```
 pub fn call(io: Io, gpa: Allocator, job: anytype, payload: job_type.PayloadOf(@TypeOf(job.*)), info: context.RunInfo) job_type.RunResult(@TypeOf(job.*)) {

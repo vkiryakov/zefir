@@ -4,7 +4,7 @@
 //! thread-safe as its store.
 //!
 //! ```zig
-//! const result = try client.schedule(io, ctx, SendInvoice, .{
+//! const result = try client.schedule(io, ctx, SendInvoiceJob, .{
 //!     .key = "order-42",
 //!     .when = .{ .after = .fromSeconds(3 * 24 * 60 * 60) },
 //!     .payload = .{ .order_id = 42, .amount_cents = 1999 },

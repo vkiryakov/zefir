@@ -17,11 +17,11 @@ const now: Instant = .fromUtc(2026, 10, 24, 10, 0, 0, .h24);
 const life: scheduler.Life = @splat(9);
 
 /// A one-shot job with a payload: its records have keys.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     pub const scheduler_job: scheduler.Job = .{ .name = "send-invoice" };
     pub const Payload = struct { order_id: u64 };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         _ = self;
         _ = ctx;
         _ = payload;
@@ -90,7 +90,7 @@ fn expectNames(expected: []const []const u8, actual: []const []const u8) !void {
 }
 
 test "split puts the jobs with repeat in any_key" {
-    const Jobs = struct { invoices: *SendInvoice, cleanup: *NightlyCleanup, digest: *Digest, reminders: *Reminder };
+    const Jobs = struct { invoices: *SendInvoiceJob, cleanup: *NightlyCleanup, digest: *Digest, reminders: *Reminder };
     const names = declared.split(Jobs);
     try expectNames(&.{ "nightly-cleanup", "digest" }, names.any_key);
     try expectNames(&.{ "send-invoice", "reminder" }, names.keyed_only);
@@ -98,7 +98,7 @@ test "split puts the jobs with repeat in any_key" {
     // for them.
     comptime std.debug.assert(declared.split(Jobs).any_key.len == 2);
 
-    const keyed = declared.split(struct { invoices: *SendInvoice });
+    const keyed = declared.split(struct { invoices: *SendInvoiceJob });
     try expectNames(&.{}, keyed.any_key);
     try expectNames(&.{"send-invoice"}, keyed.keyed_only);
     const repeating = declared.split(struct { cleanup: *NightlyCleanup });

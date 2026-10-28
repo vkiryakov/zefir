@@ -8,7 +8,7 @@ const Io = std.Io;
 const core = @import("core");
 const scheduler = @import("../root.zig");
 const client_fixture = @import("client_fixture.zig");
-const SendInvoice = client_fixture.SendInvoice;
+const SendInvoiceJob = client_fixture.SendInvoiceJob;
 const WeeklyReport = client_fixture.WeeklyReport;
 const Fixture = client_fixture.Fixture;
 const Store = scheduler.Store;
@@ -18,15 +18,15 @@ const Changed = scheduler.Client.Changed;
 
 const io = testing.io;
 
-const order: scheduler.Ref = .of(SendInvoice, "order-42");
-const small: SendInvoice.Payload = .{ .order_id = 42, .amount_cents = 1999 };
+const order: scheduler.Ref = .of(SendInvoiceJob, "order-42");
+const small: SendInvoiceJob.Payload = .{ .order_id = 42, .amount_cents = 1999 };
 /// A moment long past: due at once.
 const past: Instant = .fromUnixMs(0);
 const at: Instant = .fromUtc(2030, 1, 2, 3, 4, 5, .h24);
 
-/// Schedules SendInvoice with `key` for `when`.
+/// Schedules SendInvoiceJob with `key` for `when`.
 fn invoice(f: *Fixture, key: []const u8, when: scheduler.When) !void {
-    if (try f.client.schedule(io, .root, SendInvoice, .{ .key = key, .when = when, .payload = small }, .{}) != .created) return error.TestUnexpectedResult;
+    if (try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = key, .when = when, .payload = small }, .{}) != .created) return error.TestUnexpectedResult;
 }
 
 test "pause and unpause in every state" {
@@ -81,13 +81,13 @@ test "cancel removes a record in any state" {
     try invoice(&f, "running", .{ .at = past });
     try testing.expectEqual(@as(usize, 1), (try f.claim("send-invoice")).len);
     try invoice(&f, "paused", .{ .after = .fromSeconds(3600) });
-    try testing.expectEqual(Changed.changed, try c.pause(io, .root, .of(SendInvoice, "paused"), .{}));
+    try testing.expectEqual(Changed.changed, try c.pause(io, .root, .of(SendInvoiceJob, "paused"), .{}));
     try invoice(&f, "pending", .{ .after = .fromSeconds(3600) });
     // The parked record of a declaration, which only a worker makes.
     const declared: Store.CreateRequest = .{ .job = "send-invoice", .key = "", .life = @splat(9), .plan = "every 60s", .payload = "{}", .run_at = .{ .after = .zero } };
     _ = try f.store().create(io, .root, &declared, f.options());
 
-    for ([_]scheduler.Ref{ .of(SendInvoice, "failed"), .of(SendInvoice, "running"), .of(SendInvoice, "paused"), .of(SendInvoice, "pending"), .declared(SendInvoice) }) |ref| {
+    for ([_]scheduler.Ref{ .of(SendInvoiceJob, "failed"), .of(SendInvoiceJob, "running"), .of(SendInvoiceJob, "paused"), .of(SendInvoiceJob, "pending"), .declared(SendInvoiceJob) }) |ref| {
         try testing.expect(try c.cancel(io, .root, ref, .{}));
         try testing.expectEqual(@as(?scheduler.Record, null), try f.store().get(io, .root, &ref, f.options()));
         try testing.expect(!try c.cancel(io, .root, ref, .{}));
@@ -102,8 +102,8 @@ test "reschedule moves a one-shot job and changes the schedule of a recurring on
 
     // Pending: .at.
     try invoice(&f, "pending", .{ .after = .fromSeconds(3600) });
-    try testing.expectEqual(Changed.changed, try c.reschedule(io, .root, .of(SendInvoice, "pending"), .{ .at = at }, .{}));
-    var r = try f.record(.of(SendInvoice, "pending"));
+    try testing.expectEqual(Changed.changed, try c.reschedule(io, .root, .of(SendInvoiceJob, "pending"), .{ .at = at }, .{}));
+    var r = try f.record(.of(SendInvoiceJob, "pending"));
     try testing.expectEqual(scheduler.State.pending, r.state);
     try testing.expectEqual(@as(?Instant, at), r.run_at);
     try testing.expectEqual(at, r.scheduled_at);
@@ -112,11 +112,11 @@ test "reschedule moves a one-shot job and changes the schedule of a recurring on
 
     // Paused: .after, by the store's clock, and it stays paused.
     try invoice(&f, "paused", .{ .after = .fromSeconds(3600) });
-    _ = try c.pause(io, .root, .of(SendInvoice, "paused"), .{});
+    _ = try c.pause(io, .root, .of(SendInvoiceJob, "paused"), .{});
     var from = f.store().now(io);
-    try testing.expectEqual(Changed.changed, try c.reschedule(io, .root, .of(SendInvoice, "paused"), .{ .after = .fromSeconds(7200) }, .{}));
+    try testing.expectEqual(Changed.changed, try c.reschedule(io, .root, .of(SendInvoiceJob, "paused"), .{ .after = .fromSeconds(7200) }, .{}));
     var to = f.store().now(io);
-    r = try f.record(.of(SendInvoice, "paused"));
+    r = try f.record(.of(SendInvoiceJob, "paused"));
     try testing.expectEqual(scheduler.State.paused, r.state);
     try expectWithin(r.run_at, from.unix_ms + 7_200_000, to.unix_ms + 7_200_000);
 
@@ -124,8 +124,8 @@ test "reschedule moves a one-shot job and changes the schedule of a recurring on
     try invoice(&f, "running", .{ .at = past });
     const claimed = try f.claim("send-invoice");
     try testing.expectEqual(@as(usize, 1), claimed.len);
-    try testing.expectEqual(Changed.changed, try c.reschedule(io, .root, .of(SendInvoice, "running"), .{ .at = at }, .{}));
-    r = try f.record(.of(SendInvoice, "running"));
+    try testing.expectEqual(Changed.changed, try c.reschedule(io, .root, .of(SendInvoiceJob, "running"), .{ .at = at }, .{}));
+    r = try f.record(.of(SendInvoiceJob, "running"));
     try testing.expectEqual(scheduler.State.running, r.state);
     try testing.expectEqual(claimed[0].record.revision + 1, r.revision);
     try testing.expectEqual(@as(?Instant, null), r.run_at);
@@ -151,8 +151,8 @@ test "reschedule moves a one-shot job and changes the schedule of a recurring on
 
     // Finished, missing, and a when that is none, refused before any I/O.
     _ = try f.failed("failed");
-    try testing.expectEqual(Changed.finished, try c.reschedule(io, .root, .of(SendInvoice, "failed"), .{ .at = at }, .{}));
-    try testing.expectEqual(Changed.not_found, try c.reschedule(io, .root, .of(SendInvoice, "missing"), .{ .at = at }, .{}));
+    try testing.expectEqual(Changed.finished, try c.reschedule(io, .root, .of(SendInvoiceJob, "failed"), .{ .at = at }, .{}));
+    try testing.expectEqual(Changed.not_found, try c.reschedule(io, .root, .of(SendInvoiceJob, "missing"), .{ .at = at }, .{}));
     const gets = f.faulty.calls(io, .get);
     var d: scheduler.Diagnostics = .{};
     try testing.expectError(error.InvalidArgument, c.reschedule(io, .root, order, .{ .after = .fromSeconds(-1) }, .{ .diagnostics = &d }));
@@ -212,16 +212,16 @@ test "retry gives a failed job its attempts back at once, with the same schedule
     // A live job is unchanged: running, pending, paused.
     try testing.expectEqual(Changed.unchanged, try c.retry(io, .root, order, .{}));
     try invoice(&f, "pending", .{ .after = .fromSeconds(3600) });
-    try testing.expectEqual(Changed.unchanged, try c.retry(io, .root, .of(SendInvoice, "pending"), .{}));
-    _ = try c.pause(io, .root, .of(SendInvoice, "pending"), .{});
-    try testing.expectEqual(Changed.unchanged, try c.retry(io, .root, .of(SendInvoice, "pending"), .{}));
+    try testing.expectEqual(Changed.unchanged, try c.retry(io, .root, .of(SendInvoiceJob, "pending"), .{}));
+    _ = try c.pause(io, .root, .of(SendInvoiceJob, "pending"), .{});
+    try testing.expectEqual(Changed.unchanged, try c.retry(io, .root, .of(SendInvoiceJob, "pending"), .{}));
     // A succeeded one is finished, a missing one not found.
     try invoice(&f, "done", .{ .at = past });
     const done = try f.claim("send-invoice");
     try testing.expectEqual(@as(usize, 1), done.len);
     try testing.expect(try f.finish(done[0].record, .{ .done = .{ .state = .succeeded, .keep = .forever } }) == .done);
-    try testing.expectEqual(Changed.finished, try c.retry(io, .root, .of(SendInvoice, "done"), .{}));
-    try testing.expectEqual(Changed.not_found, try c.retry(io, .root, .of(SendInvoice, "missing"), .{}));
+    try testing.expectEqual(Changed.finished, try c.retry(io, .root, .of(SendInvoiceJob, "done"), .{}));
+    try testing.expectEqual(Changed.not_found, try c.retry(io, .root, .of(SendInvoiceJob, "missing"), .{}));
 }
 
 /// Tasks that each make one change of the same record.
@@ -316,7 +316,7 @@ test "Contended after exactly 8 lost updates" {
     defer memory.deinit();
     var busy: Busy = .{ .inner = memory.store() };
     const client: scheduler.Client = .init(testing.allocator, io, .init(&busy), .{});
-    _ = try client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(3600) }, .payload = small }, .{});
+    _ = try client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(3600) }, .payload = small }, .{});
     var d: scheduler.Diagnostics = .{};
     try testing.expectError(error.Contended, client.pause(io, .root, order, .{ .diagnostics = &d }));
     try testing.expectEqual(@as(u32, 8), busy.updates);
@@ -377,8 +377,8 @@ test "a change read on one life of a key never lands on the next" {
     // The job is cancelled and scheduled again between the read of the
     // change and its write: the new job is left alone.
     for ([_][]const u8{ "pause", "reschedule" }) |key| {
-        const ref: scheduler.Ref = .of(SendInvoice, key);
-        if (try client.schedule(io, .root, SendInvoice, .{ .key = key, .when = .{ .after = .fromSeconds(60) }, .payload = small }, .{}) != .created) return error.TestUnexpectedResult;
+        const ref: scheduler.Ref = .of(SendInvoiceJob, key);
+        if (try client.schedule(io, .root, SendInvoiceJob, .{ .key = key, .when = .{ .after = .fromSeconds(60) }, .payload = small }, .{}) != .created) return error.TestUnexpectedResult;
         reborn.armed = true;
         const changed = if (std.mem.eql(u8, key, "pause")) try client.pause(io, .root, ref, .{}) else try client.reschedule(io, .root, ref, .{ .at = at }, .{});
         try testing.expectEqual(Changed.not_found, changed);

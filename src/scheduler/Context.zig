@@ -12,7 +12,7 @@ const Life = @import("record.zig").Life;
 /// borrowed pointer and must not keep it after it returns.
 ///
 /// ```zig
-/// pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+/// pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
 ///     // The same key for every attempt of this run: an idempotency key.
 ///     try self.billing.send(ctx.operation(), ctx.io(), payload.order_id, ctx.info().run_key);
 /// }

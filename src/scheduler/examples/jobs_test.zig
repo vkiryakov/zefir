@@ -10,7 +10,7 @@ const scheduler = @import("scheduler");
 const Invoices = @import("Invoices.zig");
 
 const io = testing.io;
-const Worker = scheduler.Worker(struct { invoices: *Invoices.SendInvoice });
+const Worker = scheduler.Worker(struct { invoices: *Invoices.SendInvoiceJob });
 
 /// What the worker would give the first attempt of the claim `fence` of
 /// the record of `life`: `testing.call` hands it to `run` as `ctx.info()`.
@@ -51,8 +51,8 @@ fn waitForInvoices(billing: *Invoices.Billing, n: usize) !void {
 test "an invoice goes out once for each run key" {
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
-    const payload: Invoices.SendInvoice.Payload = .{ .order_id = 42, .amount_cents = 1999 };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
+    const payload: Invoices.SendInvoiceJob.Payload = .{ .order_id = 42, .amount_cents = 1999 };
     const first = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793091600000", @splat(1), 1);
     try scheduler.testing.call(io, testing.allocator, &invoices, payload, first);
     // The same run again, as after a crash of the instance that ran it
@@ -73,7 +73,7 @@ test "the invoice of an order that is gone fails with an error of give_up_on" {
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
     billing.gone = &.{42};
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
     const info = runInfo("send-invoice", "order-42", "send-invoice/order-42/1793091600000", @splat(1), 1);
     try testing.expectError(error.OrderGone, scheduler.testing.call(io, testing.allocator, &invoices, .{ .order_id = 42, .amount_cents = 1999 }, info));
     try testing.expectEqual(0, billing.count(io));
@@ -121,19 +121,19 @@ test "a worker sends the invoice when it is due, and the job goes" {
     const client: scheduler.Client = .init(testing.allocator, io, memory.store(), .{});
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
     var worker: Worker = try .init(testing.allocator, io, memory.store(), .{ .invoices = &invoices }, .{ .poll_every = .fromMilliseconds(100) });
     defer worker.deinit(io);
     try worker.start(io);
 
-    _ = try client.schedule(io, .root, Invoices.SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
+    _ = try client.schedule(io, .root, Invoices.SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
     try waitForInvoices(&billing, 1);
     try worker.shutdown(io, soon());
 
     // A succeeded job leaves no record; its history keeps a row.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expect(try client.get(io, .root, .of(Invoices.SendInvoice, "order-42"), arena.allocator(), .{}) == null);
+    try testing.expect(try client.get(io, .root, .of(Invoices.SendInvoiceJob, "order-42"), arena.allocator(), .{}) == null);
     const history = try client.history(io, .root, .{ .job = "send-invoice", .key = "order-42" }, .{}, arena.allocator(), .{});
     try testing.expectEqual(1, history.runs.len);
     try testing.expectEqual(scheduler.RunOutcome.succeeded, history.runs[0].outcome);
@@ -150,14 +150,14 @@ test "the worker waits while its store fails, and runs the job once it answers" 
     const client: scheduler.Client = .init(testing.allocator, io, faulty.store(), .{});
     var billing: Invoices.Billing = .init(testing.allocator);
     defer billing.deinit();
-    var invoices: Invoices.SendInvoice = .{ .billing = &billing };
+    var invoices: Invoices.SendInvoiceJob = .{ .billing = &billing };
     var worker: Worker = try .init(testing.allocator, io, faulty.store(), .{ .invoices = &invoices }, .{ .poll_every = .fromMilliseconds(100) });
     defer worker.deinit(io);
     // The first three claims find the store unreachable.
     faulty.failNext(io, .claim, error.Unavailable, 3);
     try worker.start(io);
 
-    _ = try client.schedule(io, .root, Invoices.SendInvoice, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
+    _ = try client.schedule(io, .root, Invoices.SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .zero }, .payload = .{ .order_id = 42, .amount_cents = 1999 } }, .{});
     try waitForInvoices(&billing, 1);
     const stats = worker.stats();
     try testing.expectEqual(3, stats.store_errors);
@@ -170,7 +170,7 @@ test "after a lost reply, the same request again tells whether the job was made"
     defer memory.deinit();
     var faulty: scheduler.testing.FaultyStore = .init(memory.store());
     const client: scheduler.Client = .init(testing.allocator, io, faulty.store(), .{});
-    const request: scheduler.Client.Request(Invoices.SendInvoice) = .{
+    const request: scheduler.Client.Request(Invoices.SendInvoiceJob) = .{
         .key = "order-42",
         .when = .{ .after = .fromSeconds(60) },
         .payload = .{ .order_id = 42, .amount_cents = 1999 },
@@ -179,15 +179,15 @@ test "after a lost reply, the same request again tells whether the job was made"
     // The store cannot be reached: nothing was done, and the call is safe
     // to make again.
     faulty.failNext(io, .create, error.Unavailable, 1);
-    try testing.expectError(error.Unavailable, client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectError(error.Unavailable, client.schedule(io, .root, Invoices.SendInvoiceJob, request, .{}));
     try testing.expectEqual(scheduler.Outcome.not_applied, scheduler.outcome(error.Unavailable));
     // The store makes the job, and its reply is lost: the outcome is
     // unknown.
     faulty.loseNextReply(io, .create);
-    try testing.expectError(error.OutcomeUnknown, client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectError(error.OutcomeUnknown, client.schedule(io, .root, Invoices.SendInvoiceJob, request, .{}));
     try testing.expectEqual(scheduler.Outcome.unknown, scheduler.outcome(error.OutcomeUnknown));
     // The same request again: the key is taken, so the job was made.
-    try testing.expectEqual(scheduler.Client.Scheduled.existing, try client.schedule(io, .root, Invoices.SendInvoice, request, .{}));
+    try testing.expectEqual(scheduler.Client.Scheduled.existing, try client.schedule(io, .root, Invoices.SendInvoiceJob, request, .{}));
 }
 
 test "a declaration that left the code is parked until it is removed" {

@@ -16,13 +16,13 @@ const Moment = scheduler.Store.Moment;
 const t0: Instant = .fromUtc(2026, 10, 24, 10, 0, 0, .h24);
 
 /// A one-shot job with the default policy, but the errors it gives up on.
-const SendInvoice = struct {
+const SendInvoiceJob = struct {
     pub const scheduler_job: scheduler.Job = .{
         .name = "send-invoice",
         .retry = .{ .give_up_on = &.{ error.OrderGone, error.Fraud } },
     };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context) !void {
         _ = self;
         _ = ctx;
     }
@@ -61,7 +61,7 @@ test "Policy.of takes the declaration of a job type" {
     const repeat = p.repeat orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u17, 3 * 3600 + 30 * 60), repeat.internal.daily);
 
-    const defaults: Policy = .of(SendInvoice);
+    const defaults: Policy = .of(SendInvoiceJob);
     try testing.expectEqual(@as(?Duration, null), defaults.timeout);
     try testing.expectEqual(@as(?Schedule, null), defaults.repeat);
     try testing.expect(defaults.misfire == .coalesce);
@@ -70,7 +70,7 @@ test "Policy.of takes the declaration of a job type" {
 
 test "attempts by the kind of record" {
     // null: 5 for a one-shot record, 1 for a repeating one.
-    const p: Policy = .of(SendInvoice);
+    const p: Policy = .of(SendInvoiceJob);
     try testing.expectEqual(@as(u32, 5), p.attempts(""));
     try testing.expectEqual(@as(u32, 1), p.attempts("daily 03:30:00"));
     // A number stays the number, whatever the record.
@@ -83,7 +83,7 @@ test "retry pauses of 1 s, 5 s, 25 s and 120 s, each cut by up to 20 %" {
     var prng: std.Random.DefaultPrng = .init(0x5eed);
     const random = prng.random();
     // The defaults: 1 s × 5^(k−1), at most 120 s, so 125 s is 120 s.
-    const p: Policy = .of(SendInvoice);
+    const p: Policy = .of(SendInvoiceJob);
     for ([_]i64{ 1, 5, 25, 120, 120 }, 1..) |seconds, k| try expectPauses(&p, @intCast(k), .fromSeconds(seconds), random);
     // multiplier 1: the same pause after every attempt.
     var constant = p;
@@ -125,7 +125,7 @@ fn expectPauses(p: *const Policy, k: u32, full: Duration, random: std.Random) !v
 }
 
 test "givesUp names the errors of give_up_on" {
-    const p: Policy = .of(SendInvoice);
+    const p: Policy = .of(SendInvoiceJob);
     try testing.expect(p.givesUp(error.OrderGone));
     try testing.expect(p.givesUp(error.Fraud));
     try testing.expect(!p.givesUp(error.PaymentDeclined));

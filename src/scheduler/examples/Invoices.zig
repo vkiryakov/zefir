@@ -54,7 +54,7 @@ pub const Billing = struct {
 };
 
 /// The invoice of an order: a job for each order, by its key.
-pub const SendInvoice = struct {
+pub const SendInvoiceJob = struct {
     billing: *Billing,
 
     pub const scheduler_job: scheduler.Job = .{
@@ -76,7 +76,7 @@ pub const SendInvoice = struct {
         note: ?[]const u8 = null,
     };
 
-    pub fn run(self: *SendInvoice, ctx: *scheduler.Context, payload: Payload) !void {
+    pub fn run(self: *SendInvoiceJob, ctx: *scheduler.Context, payload: Payload) !void {
         // The run key is the same for every attempt of this run: the key
         // of idempotency for the billing service.
         try self.billing.send(ctx.io(), ctx.info().run_key, payload.order_id);

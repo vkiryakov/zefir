@@ -10,7 +10,7 @@ const Instant = @import("Instant.zig");
 const job_type = @import("Job.zig");
 const payload_json = @import("payload.zig");
 
-/// Which job: the name of its type and its key. `.of(SendInvoice,
+/// Which job: the name of its type and its key. `.of(SendInvoiceJob,
 /// "order-42")` in code, or `.{ .job = "send-invoice", .key = "order-42" }`
 /// in an admin page. The record of a declared repeating job has the key "".
 pub const Ref = struct {

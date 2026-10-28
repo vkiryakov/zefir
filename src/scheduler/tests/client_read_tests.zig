@@ -5,7 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const scheduler = @import("../root.zig");
 const client_fixture = @import("client_fixture.zig");
-const SendInvoice = client_fixture.SendInvoice;
+const SendInvoiceJob = client_fixture.SendInvoiceJob;
 const WeeklyReport = client_fixture.WeeklyReport;
 const Fixture = client_fixture.Fixture;
 const Store = scheduler.Store;
@@ -13,7 +13,7 @@ const Record = scheduler.Record;
 
 const io = testing.io;
 
-const order: scheduler.Ref = .of(SendInvoice, "order-42");
+const order: scheduler.Ref = .of(SendInvoiceJob, "order-42");
 
 test "get returns the record with its strings in the arena" {
     var f: Fixture = undefined;
@@ -62,12 +62,12 @@ test "list pages through 50 records filtered by job and by tenant" {
     var key: [8]u8 = undefined;
     for (0..30) |i| {
         const tenant: []const u8 = if (i % 2 == 0) "acme" else "globex";
-        _ = try f.client.schedule(io, .root, SendInvoice, .{ .key = try std.fmt.bufPrint(&key, "order-{d:0>2}", .{i}), .when = .{ .after = .fromSeconds(3600) }, .payload = .{ .order_id = i, .amount_cents = 1 }, .tenant = tenant }, .{});
+        _ = try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = try std.fmt.bufPrint(&key, "order-{d:0>2}", .{i}), .when = .{ .after = .fromSeconds(3600) }, .payload = .{ .order_id = i, .amount_cents = 1 }, .tenant = tenant }, .{});
     }
     for (0..20) |i| {
         _ = try f.client.schedule(io, .root, WeeklyReport, .{ .key = try std.fmt.bufPrint(&key, "shop-{d:0>2}", .{i}), .when = .{ .repeat = .weeklyOn(.monday, 9, 0, 0, .am) }, .tenant = "acme" }, .{});
     }
-    for (0..3) |i| _ = try f.client.pause(io, .root, .of(SendInvoice, try std.fmt.bufPrint(&key, "order-{d:0>2}", .{i})), .{});
+    for (0..3) |i| _ = try f.client.pause(io, .root, .of(SendInvoiceJob, try std.fmt.bufPrint(&key, "order-{d:0>2}", .{i})), .{});
 
     try testing.expectEqual(@as(usize, 50), try listed(&f, .{}));
     try testing.expectEqual(@as(usize, 30), try listed(&f, .{ .job = "send-invoice" }));
@@ -143,16 +143,16 @@ test "history filters by job and key, job, tenant and outcome" {
     const c = &f.client;
     const due: scheduler.When = .{ .at = .fromUnixMs(0) };
     const weekly: scheduler.Ref = .of(WeeklyReport, "acme");
-    _ = try c.schedule(io, .root, SendInvoice, .{ .key = "a", .when = due, .payload = .{ .order_id = 1, .amount_cents = 1 }, .tenant = "acme" }, .{});
-    try finishWith(&f, .of(SendInvoice, "a"), .succeeded, .delete);
-    _ = try c.schedule(io, .root, SendInvoice, .{ .key = "b", .when = due, .payload = .{ .order_id = 2, .amount_cents = 1 }, .tenant = "globex" }, .{});
-    try finishWith(&f, .of(SendInvoice, "b"), .failed, .delete);
+    _ = try c.schedule(io, .root, SendInvoiceJob, .{ .key = "a", .when = due, .payload = .{ .order_id = 1, .amount_cents = 1 }, .tenant = "acme" }, .{});
+    try finishWith(&f, .of(SendInvoiceJob, "a"), .succeeded, .delete);
+    _ = try c.schedule(io, .root, SendInvoiceJob, .{ .key = "b", .when = due, .payload = .{ .order_id = 2, .amount_cents = 1 }, .tenant = "globex" }, .{});
+    try finishWith(&f, .of(SendInvoiceJob, "b"), .failed, .delete);
     _ = try c.schedule(io, .root, WeeklyReport, .{ .key = "acme", .when = .{ .repeat = .everySeconds(1) }, .tenant = "acme" }, .{});
     _ = try c.reschedule(io, .root, weekly, due, .{});
     try finishWith(&f, weekly, .skipped, .{ .wait = .{ .state = .pending, .run_at = .{ .after = .zero }, .scheduled_at = null, .attempt = 0 } });
     try finishWith(&f, weekly, .abandoned, .{ .wait = .{ .state = .pending, .run_at = .{ .after = .fromSeconds(60) }, .scheduled_at = null, .attempt = 0 } });
-    _ = try c.schedule(io, .root, SendInvoice, .{ .key = "c", .when = due, .payload = .{ .order_id = 3, .amount_cents = 1 }, .tenant = "acme" }, .{});
-    try finishWith(&f, .of(SendInvoice, "c"), .abandoned, .delete);
+    _ = try c.schedule(io, .root, SendInvoiceJob, .{ .key = "c", .when = due, .payload = .{ .order_id = 3, .amount_cents = 1 }, .tenant = "acme" }, .{});
+    try finishWith(&f, .of(SendInvoiceJob, "c"), .abandoned, .delete);
 
     try testing.expectEqualSlices(scheduler.RunOutcome, &.{ .abandoned, .abandoned, .skipped, .failed, .succeeded }, try outcomes(&f, .{}));
     try testing.expectEqualSlices(scheduler.RunOutcome, &.{ .abandoned, .skipped }, try outcomes(&f, .{ .job = "weekly-report", .key = "acme" }));
@@ -168,9 +168,9 @@ test "payloadAs reads the payload of the job" {
     f.init(.{});
     defer f.deinit();
     const a = f.arena.allocator();
-    _ = try f.client.schedule(io, .root, SendInvoice, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 42, .amount_cents = 1999, .note = "gift" } }, .{});
+    _ = try f.client.schedule(io, .root, SendInvoiceJob, .{ .key = "order-42", .when = .{ .after = .fromSeconds(60) }, .payload = .{ .order_id = 42, .amount_cents = 1999, .note = "gift" } }, .{});
     const r = (try f.client.get(io, .root, order, a, .{})) orelse return error.TestUnexpectedResult;
-    const p = try r.payloadAs(SendInvoice, a);
+    const p = try r.payloadAs(SendInvoiceJob, a);
     try testing.expectEqual(@as(u64, 42), p.order_id);
     try testing.expectEqual(@as(u64, 1999), p.amount_cents);
     try testing.expectEqualDeep(@as(?[]const u8, "gift"), p.note);
@@ -180,12 +180,12 @@ test "payloadAs reads the payload of the job" {
     try weekly.payloadAs(WeeklyReport, a);
 }
 
-/// The payload of a record made with this JSON, as SendInvoice reads it.
-fn readAs(f: *Fixture, key: []const u8, json: []const u8) !SendInvoice.Payload {
+/// The payload of a record made with this JSON, as SendInvoiceJob reads it.
+fn readAs(f: *Fixture, key: []const u8, json: []const u8) !SendInvoiceJob.Payload {
     const request: Store.CreateRequest = .{ .job = "send-invoice", .key = key, .life = @splat(5), .plan = "", .payload = json, .run_at = .{ .after = .fromSeconds(60) } };
     _ = try f.store().create(io, .root, &request, f.options());
-    const r = (try f.client.get(io, .root, .of(SendInvoice, key), f.arena.allocator(), .{})) orelse return error.TestUnexpectedResult;
-    return r.payloadAs(SendInvoice, f.arena.allocator());
+    const r = (try f.client.get(io, .root, .of(SendInvoiceJob, key), f.arena.allocator(), .{})) orelse return error.TestUnexpectedResult;
+    return r.payloadAs(SendInvoiceJob, f.arena.allocator());
 }
 
 test "payloadAs skips unknown fields and takes defaults for missing ones" {
