@@ -5,7 +5,8 @@
 //! readme_test.zig runs them for the programs in the repository,
 //! tests/http/guide_test.zig for the runs of the service on the network.
 //! Every function compares texts with "\r\n" turned into "\n", since Git
-//! may check files out with CRLF on Windows.
+//! may check files out with CRLF on Windows, but compileError, which takes
+//! one line: its caller passes the line without "\r".
 
 const std = @import("std");
 
@@ -361,6 +362,29 @@ pub fn isPartOf(file: []const u8, block: []const u8) !bool {
     return false;
 }
 
+/// The message of an error of the compiler on `line`: after `error: ` of
+/// `<file>.zig:<line>:<column>: error: `, or of `error: zefir.`, an error of
+/// zefir's own checks, which the compiler shows at a line of zefir. Null for
+/// any other line, such as the `error: …` of a test that failed.
+pub fn compileError(line: []const u8) ?[]const u8 {
+    const marker = "error: ";
+    if (std.mem.startsWith(u8, line, marker ++ "zefir.")) return line[marker.len..];
+    const at = std.mem.find(u8, line, ": " ++ marker) orelse return null;
+    // `<file>.zig:<line>:<column>` before it.
+    var parts = std.mem.splitBackwardsScalar(u8, line[0..at], ':');
+    const column = parts.next() orelse return null;
+    const number = parts.next() orelse return null;
+    const file = parts.rest();
+    if (!std.mem.endsWith(u8, file, ".zig") or !allDigits(column) or !allDigits(number)) return null;
+    return line[at + 2 + marker.len ..];
+}
+
+fn allDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
 test "what varies is masked: timestamps, Date, ETag, durations, ports and drawn ids; given ids stay" {
     const text = "2026-10-17T19:45:03.120Z INFO  [access] Request status=200 request=4bf92f3577b34da6a3ce929d0e0e4736 duration_ms=12\n" ++
         "x-request-id: 4bf92f3577b34da6a3ce929d0e0e4736\n" ++
@@ -433,7 +457,8 @@ test "a session shows how its log begins, and once all of it, ^C aside" {
     try expectSession("doc", doc, "zig build run", log);
     // Only the beginning, or a block that is not how the log begins: what
     // expectSession fails on, without the message it prints.
-    try testing.expectEqual(.not_whole, try sessionShown(doc[0..std.mem.find(u8, doc, "Later").?], "zig build run", log));
+    const later = std.mem.find(u8, doc, "Later") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(.not_whole, try sessionShown(doc[0..later], "zig build run", log));
     try testing.expectEqual(.not_whole, try sessionShown("No run here.\n", "zig build run", log));
     try testing.expectEqual(.other_start, try sessionShown("```text\n$ zig build run\nINFO  [app] Stopped\n```\n", "zig build run", log));
 }
@@ -444,7 +469,15 @@ test "a guide passes when it shows the file, the run and only parts of the file"
     try expectFile("doc", doc, "zig", file);
     try expectRun("doc", doc, file, "$ zig build run", "POST /api/v1/todos\n");
     try expectZigFromExamples("doc", doc, &.{file});
-    const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})).?;
+    const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(foreign);
     try testing.expectEqualStrings("const x = 1;\nconst y = 2;\n", foreign);
+}
+
+test "an error of the compiler is one at a line of a Zig file, or one of zefir's checks" {
+    try testing.expectEqualDeep(@as(?[]const u8, "missing struct field: summary"), compileError("src/TodosController.zig:25:26: error: missing struct field: summary"));
+    try testing.expectEqualDeep(@as(?[]const u8, "zefir.openapi: x"), compileError("error: zefir.openapi: x"));
+    try testing.expectEqual(null, compileError("error: openapi.json is out of date; run `zig build openapi`"));
+    try testing.expectEqual(null, compileError("src/Service.zig:28:60: note: called at comptime here"));
+    try testing.expectEqual(null, compileError("a line that says error: something"));
 }

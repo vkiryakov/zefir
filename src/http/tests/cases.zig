@@ -117,6 +117,10 @@ pub const compile_errors = [_]Fixture{
     .{ .file = dir ++ "mw_openapi_input_not_type.zig", .expect = "zefir.http: the openapi of the middleware Paging: .query is the type of a DTO, such as .query = PageQuery, or void", .debug = true },
     .{ .file = dir ++ "mw_openapi_responses_not_struct.zig", .expect = "zefir.http: the openapi of the middleware Paging: .responses is a struct of statuses, such as .responses = .{ .not_modified = .{} }", .debug = true },
     .{ .file = dir ++ "mw_openapi_responses_status.zig", .expect = "zefir.http: the openapi of the middleware Paging: .responses names .notModified; its keys are names of std.http.Status, such as .not_modified", .debug = true },
+    // A mistake that src/http/examples/README.md shows in its service, whose
+    // message no other probe gives: the guide's check finds each error it
+    // shows here.
+    .{ .file = dir ++ "guide_strict_app_error.zig", .expect = "zefir.http: TodosV1Controller.create can return error.TodoLimitReached; AppErrors.mapError gives it 500 through .fallback" ++ strict_hint },
 };
 
 const strict_hint = " (strict error check; .strict_errors = false turns it off)";

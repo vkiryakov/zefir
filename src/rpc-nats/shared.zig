@@ -13,8 +13,9 @@ pub fn count(t: *Transport, counter: Counter) void {
     _ = t.counts.getPtr(counter).fetchAdd(1, .monotonic);
 }
 
-/// In Debug, panics when `io` is another `std.Io` than the transport's
-/// first one: canceling a task would not end a wait inside the library.
+/// In safe builds (Debug and ReleaseSafe), panics when `io` is another
+/// `std.Io` than the transport's first one: canceling a task would not end
+/// a wait inside the library.
 pub fn checkIo(t: *Transport, io: std.Io) void {
     if (!std.debug.runtime_safety) return;
     const first = t.io_vtable.cmpxchgStrong(null, io.vtable, .acq_rel, .acquire) orelse return;

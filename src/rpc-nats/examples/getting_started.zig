@@ -8,9 +8,6 @@
 //!   APP_NATS_URL        the NATS server; nats://127.0.0.1:4222 by default
 //!   APP_SERVE_SECONDS   how long it goes on serving after its calls, for
 //!                       the NATS CLI; 0 by default
-//!
-//! In tests/rpc-nats, `zig build example-getting_started` runs it against
-//! the servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

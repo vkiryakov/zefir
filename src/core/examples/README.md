@@ -492,6 +492,18 @@ runtimes and adapters built on `std.Io`:
 
 1. Never cancel the token to signal a timeout. Set a deadline;
    `check` reports `error.DeadlineExceeded` once the time has passed.
+
+   zefir-http keeps this rule; zefir-rpc's server is the exception. Once a
+   call's deadline passes, it cancels the call's token, sends the client
+   `deadline_exceeded`, then cancels the handler's task. In the call's
+   handler and middleware, `check` then reports `error.Cancelled` for the
+   timeout, and so does an adapter of rule 3: cancellation wins. Code there
+   that must tell a timeout from a cancel checks the deadline first: with
+   `const op = ctx.operation();`, it asks
+   `op.isExpired(std.Io.Clock.awake.now(ctx.io()))`, and only then
+   `op.isCancelled()`, as
+   [the access log of the rpc guide](../../rpc/examples/README.md#access-logs)
+   does.
 2. Wake waiting tasks with `std.Io` task cancellation. Cancel a task for a
    timeout only once `now >= deadline.expires`, and arm timers with
    `deadline.toTimeout()`.

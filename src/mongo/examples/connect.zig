@@ -8,9 +8,6 @@
 //!   APP_MONGO_URI        the server and the user, such as
 //!                        mongodb://admin@127.0.0.1:27017
 //!   APP_MONGO_PASSWORD   the user's password
-//!
-//! In tests/mongo, `zig build example-connect` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

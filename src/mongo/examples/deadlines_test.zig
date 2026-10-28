@@ -41,7 +41,8 @@ test "a reply that comes after the deadline is Timeout: the command went out, wi
     try testing.expectEqual(mongo.Outcome.may_have_executed, mongo.outcome(error.Timeout));
     // With it went maxTimeMS, the time left: the server gives up then too.
     const sent = try script.entry(io, 0);
-    const max_time_ms = try (try sent.body.get("maxTimeMS")).?.asI64();
+    const max_time = try sent.body.get("maxTimeMS") orelse return error.TestUnexpectedResult;
+    const max_time_ms = try max_time.asI64();
     try testing.expect(max_time_ms >= 1 and max_time_ms <= 200);
 }
 

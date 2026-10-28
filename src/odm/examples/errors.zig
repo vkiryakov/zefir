@@ -9,9 +9,6 @@
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/odm, `zig build example-errors` runs it against the servers of
-//! the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

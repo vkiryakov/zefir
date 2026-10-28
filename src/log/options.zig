@@ -1,6 +1,9 @@
-//! Logger options. Every field has a default, and confy can read the
-//! service, the level and the scope rules from the application's
-//! configuration.
+//! Logger options. Every field has a default. confy can read the service
+//! and the level from the application's configuration, and the scope rules
+//! from a JSON file only: no environment variable, `.env` or INI file holds
+//! a list of structs. `Options` itself cannot be a field of the
+//! configuration, as its mode and output are unions, which confy does not
+//! read: read the parts and pass them to `init`.
 
 const std = @import("std");
 const Level = @import("level.zig").Level;
@@ -168,13 +171,13 @@ pub const Output = union(enum) {
     /// thread. The logger calls it from one thread at a time, so it need
     /// not be thread-safe, but it must not log through the same logger
     /// (that call could wait for itself) or call its `flush` or `shutdown`.
-    /// The writer thread is an OS thread of the logger's, not a task of the
-    /// application's `io`: in queued mode a writer that does I/O, such as
-    /// a `File.Writer`, must be made with an Io any thread may call
-    /// (`std.Io.Threaded`), not an evented one. A writer with a buffer does
-    /// not tell how much went out when a write or its flush fails: the
-    /// records of that write are then counted as dropped, and the next
-    /// record starts on a new line.
+    /// The writer thread is an OS thread of the logger's, not a task of your
+    /// zio runtime: in queued mode a writer that does I/O, such as a
+    /// `File.Writer`, is made with `init.io`, the `io` that
+    /// `main(init: std.process.Init)` gets, which serves any thread. A
+    /// writer with a buffer does not tell how much went out when a write or
+    /// its flush fails: the records of that write are then counted as
+    /// dropped, and the next record starts on a new line.
     writer: *std.Io.Writer,
 };
 

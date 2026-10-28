@@ -69,8 +69,8 @@ settled: std.Io.Condition = .init,
 state: std.atomic.Value(State) = .init(.idle),
 /// The fields below are guarded by `mutex`.
 dispatcher: ?transport.Dispatcher = null,
-/// The `std.Io` the server started on: `call` checks in Debug that it gets
-/// the same.
+/// The `std.Io` the server started on: in safe builds (Debug and
+/// ReleaseSafe) `call` checks that it gets the same.
 server_io: ?*const std.Io.VTable = null,
 /// Every call from its registration until the server side is done with it:
 /// released, refused, abandoned or not started.

@@ -47,9 +47,9 @@
 //! 7. Writes. Each document of `insert` has its `_id` already: the driver
 //!    sends the documents as they are, in order, and stops at the first
 //!    one that the server refused. A refusal of a unique index (code
-//!    11000) is `error.DuplicateKey` with `Diagnostics.index`, any other
-//!    `error.WriteFailed`. An `update` of mode `.replace` holds the whole
-//!    document in `update`, without `_id`.
+//!    11000, 11001 or 12582) is `error.DuplicateKey` with
+//!    `Diagnostics.index`, any other `error.WriteFailed`. An `update` of
+//!    mode `.replace` holds the whole document in `update`, without `_id`.
 //! 8. A `find` with `limit = 1` leaves no cursor open on the server. A
 //!    `batch_size` of `find` or `aggregate` is the most documents that the
 //!    driver asks the server for in one batch.

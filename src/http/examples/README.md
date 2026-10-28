@@ -429,8 +429,7 @@ the runtime, starts the service on the network, and runs it until Ctrl+C:
 //!                        call the API; http://localhost:5173 by default
 //!
 //! The objects of the service, its server and its OpenAPI document are
-//! built in Service.zig, for `main` and the tests alike. In tests/http,
-//! `zig build examples` runs it and sends it the requests of the guide.
+//! built in Service.zig, for `main` and the tests alike.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -3340,7 +3339,7 @@ test "a body that does not fit is a 422 in the API's format, with every field at
     var res = try app.asAnn(.POST, "/api/v1/todos", "{\"titel\":\"Buy milk\",\"priority\":\"urgent\"}");
     defer res.deinit();
     try testing.expectEqual(422, res.status);
-    try testing.expectEqualStrings("application/json", res.header("content-type").?);
+    try testing.expectEqualStrings("application/json", res.header("content-type") orelse return error.TestUnexpectedResult);
     const body = try errorOf(&res);
     try testing.expectEqualStrings("validation_failed", body.code);
     try testing.expectEqual(3, body.details.len);
@@ -3355,11 +3354,14 @@ test "a body that does not fit is a 422 in the API's format, with every field at
     var blank = try app.asAnn(.POST, "/api/v1/todos", "{\"title\":\"   \",\"dueDate\":\"2026-13-01\"}");
     defer blank.deinit();
     const rules = try errorOf(&blank);
+    try testing.expectEqual(2, rules.details.len);
     try testing.expectEqualStrings("validation.not_blank", rules.details[0].code);
     try testing.expectEqualStrings("dueDate", rules.details[1].field);
     var page = try app.asAnn(.GET, "/api/v1/todos?perPage=500", "");
     defer page.deinit();
-    try testing.expectEqualStrings("perPage", (try errorOf(&page)).details[0].field);
+    const query = try errorOf(&page);
+    try testing.expectEqual(1, query.details.len);
+    try testing.expectEqualStrings("perPage", query.details[0].field);
 }
 
 test "the free plan allows three todos, the fourth is a 409; the same Idempotency-Key gives the first todo back" {
@@ -3400,7 +3402,7 @@ test "without a user: 401 with WWW-Authenticate; Bob may read but not delete: 40
     var anonymous = try app.request(.GET, "/api/v1/todos", &.{}, "");
     defer anonymous.deinit();
     try testing.expectEqual(401, anonymous.status);
-    try testing.expectEqualStrings("Bearer", anonymous.header("www-authenticate").?);
+    try testing.expectEqualStrings("Bearer", anonymous.header("www-authenticate") orelse return error.TestUnexpectedResult);
     try testing.expectEqualStrings("unauthenticated", (try errorOf(&anonymous)).code);
 
     // The health check needs no user.
@@ -3427,11 +3429,11 @@ test "the stream of live updates gets each todo as it is made" {
     });
     defer stream.deinit(testing.io);
     try testing.expectEqual(200, stream.status);
-    try testing.expectEqualStrings("text/event-stream", stream.header("content-type").?);
+    try testing.expectEqualStrings("text/event-stream", stream.header("content-type") orelse return error.TestUnexpectedResult);
 
     var created = try app.asAnn(.POST, "/api/v1/todos", "{\"title\":\"Buy milk\"}");
     defer created.deinit();
-    const event = (try stream.next(testing.io, .fromSeconds(5))).?;
+    const event = try stream.next(testing.io, .fromSeconds(5)) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("event: todo.created\ndata: {\"id\":1,\"title\":\"Buy milk\",\"done\":false,\"priority\":\"normal\",\"dueDate\":null,\"tags\":[]}\n\n", event);
 }
 
@@ -3445,9 +3447,10 @@ test "the export is a CSV attachment, its quotes doubled" {
     var res = try app.asAnn(.GET, "/api/v1/todos/export.csv", "");
     defer res.deinit();
     try testing.expectEqual(200, res.status);
-    try testing.expectEqualStrings("text/csv", res.header("content-type").?);
+    try testing.expectEqualStrings("text/csv", res.header("content-type") orelse return error.TestUnexpectedResult);
     try testing.expectEqualStrings("id,title,done\n1,\"Read \"\"Dune\"\"\",false\n", res.body);
-    try testing.expect(std.mem.startsWith(u8, res.header("content-disposition").?, "attachment; filename=\"todos.csv\""));
+    const disposition = res.header("content-disposition") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.startsWith(u8, disposition, "attachment; filename=\"todos.csv\""));
 }
 
 test "a form signs a browser in with the cookie session and a 303, a form of another site gets 403; signing out clears it" {
@@ -3460,8 +3463,8 @@ test "a form signs a browser in with the cookie session and a 303, a form of ano
     var login = try app.request(.POST, "/api/session", &.{ form, .{ "sec-fetch-site", "same-origin" } }, "token=ann-secret");
     defer login.deinit();
     try testing.expectEqual(303, login.status);
-    try testing.expectEqualStrings("/", login.header("location").?);
-    try testing.expectEqualStrings("session=ann-secret; Path=/; Max-Age=28800; Secure; HttpOnly; SameSite=Lax", login.header("set-cookie").?);
+    try testing.expectEqualStrings("/", login.header("location") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("session=ann-secret; Path=/; Max-Age=28800; Secure; HttpOnly; SameSite=Lax", login.header("set-cookie") orelse return error.TestUnexpectedResult);
 
     var wrong = try app.request(.POST, "/api/session", &.{form}, "token=guess");
     defer wrong.deinit();
@@ -3479,7 +3482,7 @@ test "a form signs a browser in with the cookie session and a 303, a form of ano
     var logout = try app.request(.DELETE, "/api/session", &.{.{ "cookie", "session=ann-secret" }}, "");
     defer logout.deinit();
     try testing.expectEqual(204, logout.status);
-    try testing.expectEqualStrings("session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax", logout.header("set-cookie").?);
+    try testing.expectEqualStrings("session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax", logout.header("set-cookie") orelse return error.TestUnexpectedResult);
 }
 
 test "the access log writes a record for every request, the refused ones too" {
@@ -3494,8 +3497,10 @@ test "the access log writes a record for every request, the refused ones too" {
     }
     // `request` returns once the request has ended, its onFinish phases too.
     var lines = std.mem.splitScalar(u8, app.records.written(), '\n');
-    try testing.expect(std.mem.find(u8, lines.next().?, "[access] Request method=GET path=/api/health status=200 user=- err=- request=test-1") != null);
-    try testing.expect(std.mem.find(u8, lines.next().?, "[access] Request method=GET path=/api/v1/todos status=401 user=- err=Unauthenticated request=test-1") != null);
+    const first = lines.next() orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.find(u8, first, "[access] Request method=GET path=/api/health status=200 user=- err=- request=test-1") != null);
+    const second = lines.next() orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.find(u8, second, "[access] Request method=GET path=/api/v1/todos status=401 user=- err=Unauthenticated request=test-1") != null);
 }
 
 test "the OpenAPI document is openapi.json, which the service serves with a page of it" {
@@ -3510,16 +3515,17 @@ test "the OpenAPI document is openapi.json, which the service serves with a page
     var document = try app.request(.GET, "/api/openapi.json", &.{}, "");
     defer document.deinit();
     try testing.expectEqual(200, document.status);
-    try testing.expectEqualStrings("application/json", document.header("content-type").?);
-    try testing.expectEqualStrings("no-cache", document.header("cache-control").?);
+    try testing.expectEqualStrings("application/json", document.header("content-type") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("no-cache", document.header("cache-control") orelse return error.TestUnexpectedResult);
     // A client that has it already gets 304, without a body.
-    var again = try app.request(.GET, "/api/openapi.json", &.{.{ "if-none-match", document.header("etag").? }}, "");
+    const etag = document.header("etag") orelse return error.TestUnexpectedResult;
+    var again = try app.request(.GET, "/api/openapi.json", &.{.{ "if-none-match", etag }}, "");
     defer again.deinit();
     try testing.expectEqual(304, again.status);
     var page = try app.request(.GET, "/api/docs", &.{}, "");
     defer page.deinit();
     try testing.expectEqual(200, page.status);
-    try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type").?);
+    try testing.expectEqualStrings("text/html; charset=utf-8", page.header("content-type") orelse return error.TestUnexpectedResult);
 }
 ```
 
@@ -3713,7 +3719,7 @@ test "TokenAuth: no token is anonymous; requireUser is 401 and the app's handle 
         var refused = try app.request(.GET, "/api/v1/todos", headers);
         defer refused.deinit();
         try testing.expectEqual(401, refused.status);
-        try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+        try testing.expectEqualStrings("Bearer", refused.header("www-authenticate") orelse return error.TestUnexpectedResult);
         try testing.expectEqualStrings("unauthenticated", try codeOf(&refused));
     }
 
@@ -3754,11 +3760,11 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     defer preflight.deinit();
     try testing.expectEqual(204, preflight.status);
     try testing.expectEqualStrings("", preflight.body);
-    try testing.expectEqualStrings(origin, preflight.header("access-control-allow-origin").?);
-    try testing.expectEqualStrings("GET, HEAD, POST, PUT, PATCH, DELETE", preflight.header("access-control-allow-methods").?);
-    try testing.expectEqualStrings("authorization, content-type, idempotency-key", preflight.header("access-control-allow-headers").?);
-    try testing.expectEqualStrings("true", preflight.header("access-control-allow-credentials").?);
-    try testing.expectEqualStrings("Origin", preflight.header("vary").?);
+    try testing.expectEqualStrings(origin, preflight.header("access-control-allow-origin") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("GET, HEAD, POST, PUT, PATCH, DELETE", preflight.header("access-control-allow-methods") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("authorization, content-type, idempotency-key", preflight.header("access-control-allow-headers") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("true", preflight.header("access-control-allow-credentials") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("Origin", preflight.header("vary") orelse return error.TestUnexpectedResult);
 
     // The preflight of an origin it does not list gets none of it: the
     // server answers OPTIONS itself, and the browser refuses the call.
@@ -3769,23 +3775,23 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     defer stranger.deinit();
     try testing.expectEqual(204, stranger.status);
     try testing.expectEqual(null, stranger.header("access-control-allow-origin"));
-    try testing.expectEqualStrings("DELETE, OPTIONS", stranger.header("allow").?);
+    try testing.expectEqualStrings("DELETE, OPTIONS", stranger.header("allow") orelse return error.TestUnexpectedResult);
     // The answer depends on Origin all the same, and so does that of a
     // request without one: a cache must keep them apart.
-    try testing.expectEqualStrings("Origin", stranger.header("vary").?);
+    try testing.expectEqualStrings("Origin", stranger.header("vary") orelse return error.TestUnexpectedResult);
     var plain = try app.request(.GET, "/api/health", &.{});
     defer plain.deinit();
     try testing.expectEqual(null, plain.header("access-control-allow-origin"));
-    try testing.expectEqualStrings("Origin", plain.header("vary").?);
+    try testing.expectEqualStrings("Origin", plain.header("vary") orelse return error.TestUnexpectedResult);
 
     // The answer to an error carries the headers too, so that the page can
     // read the 401.
     var refused = try app.request(.GET, "/api/v1/todos", &.{.{ "origin", origin }});
     defer refused.deinit();
     try testing.expectEqual(401, refused.status);
-    try testing.expectEqualStrings(origin, refused.header("access-control-allow-origin").?);
-    try testing.expectEqualStrings("Origin", refused.header("vary").?);
-    try testing.expectEqualStrings("x-request-id", refused.header("access-control-expose-headers").?);
+    try testing.expectEqualStrings(origin, refused.header("access-control-allow-origin") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("Origin", refused.header("vary") orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("x-request-id", refused.header("access-control-expose-headers") orelse return error.TestUnexpectedResult);
 
     // Any origin: "*", and then never with credentials; the answer is the
     // same for every origin, without Vary.
@@ -3793,7 +3799,7 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     app.cors = .{ .origins = &any };
     var open = try app.request(.GET, "/api/health", &.{.{ "origin", "https://other.example" }});
     defer open.deinit();
-    try testing.expectEqualStrings("*", open.header("access-control-allow-origin").?);
+    try testing.expectEqualStrings("*", open.header("access-control-allow-origin") orelse return error.TestUnexpectedResult);
     try testing.expectEqual(null, open.header("access-control-allow-credentials"));
     try testing.expectEqual(null, open.header("vary"));
 }
