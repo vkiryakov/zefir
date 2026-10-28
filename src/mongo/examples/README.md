@@ -295,9 +295,6 @@ adults, gives one a birthday, lets one go, and counts the adults again:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-quick_start` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -572,9 +569,6 @@ that is not there, and connection strings that the client refuses:
 //!   APP_MONGO_URI        the server and the user, such as
 //!                        mongodb://admin@127.0.0.1:27017
 //!   APP_MONGO_PASSWORD   the user's password
-//!
-//! In tests/mongo, `zig build example-connect` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -739,9 +733,6 @@ operations that write documents and read them back:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-orders` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -947,9 +938,6 @@ it, and makes a collection with a command of the server:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-reports` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1450,9 +1438,6 @@ duplicate key, so log it where such values may go.
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-errors` runs it against the servers
-//! of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -1953,9 +1938,6 @@ built by their `init`, whose parameters App passes by their types:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/mongo, `zig build example-app` runs it against the servers of
-//! the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
