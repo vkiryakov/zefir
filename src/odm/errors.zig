@@ -178,8 +178,8 @@ pub fn outcome(err: Error) Outcome {
 /// errmsg may quote values of a document (code 11000:
 /// `dup key: { email: … }`), so log it where such values may go.
 pub const Diagnostics = struct {
-    /// The server's code: 11000 for `DuplicateKey`, 13 Unauthorized, 59
-    /// CommandNotFound.
+    /// The server's code: 11000, 11001 or 12582 for `DuplicateKey`, 13
+    /// Unauthorized, 59 CommandNotFound.
     code: ?i32 = null,
     /// The item of a write that the server refused, or the document of an
     /// `insertMany` that broke its rules or did not become BSON: its index
