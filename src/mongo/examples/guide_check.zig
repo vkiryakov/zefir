@@ -274,7 +274,7 @@ test "a guide passes when it shows the file, the run and only parts of the file"
     // Another output, another command, code from elsewhere.
     try testing.expect(!try showsRun(doc, file, "$ zig build run", "2026-10-19T10:00:00.000Z INFO  Other\n"));
     try testing.expect(!try showsRun(doc, file, "$ zig build run-other", "2026-10-19T10:00:00.000Z INFO  Done at 127.0.0.1:27117\n"));
-    const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})).?;
+    const foreign = (try foreignZig(doc, &.{"const z = 3;\n"})) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(foreign);
     try testing.expectEqualStrings("const x = 1;\nconst y = 2;\n", foreign);
 }

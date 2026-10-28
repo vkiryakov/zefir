@@ -132,8 +132,8 @@ fn unixLines(text: []const u8) ![]u8 {
 }
 
 test "an error of the compiler is one at a line of a Zig file, or one of zefir's checks" {
-    try testing.expectEqualStrings("missing struct field: summary", compileError("src/TodosController.zig:25:26: error: missing struct field: summary").?);
-    try testing.expectEqualStrings("zefir.openapi: x", compileError("error: zefir.openapi: x").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "missing struct field: summary"), compileError("src/TodosController.zig:25:26: error: missing struct field: summary"));
+    try testing.expectEqualDeep(@as(?[]const u8, "zefir.openapi: x"), compileError("error: zefir.openapi: x"));
     try testing.expectEqual(null, compileError("error: openapi.json is out of date; run `zig build openapi`"));
     try testing.expectEqual(null, compileError("src/Service.zig:28:60: note: called at comptime here"));
     try testing.expectEqual(null, compileError("a line that says error: something"));
