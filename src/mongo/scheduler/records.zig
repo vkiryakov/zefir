@@ -199,7 +199,7 @@ fn updateLost(c: *Call, request: *const Store.UpdateRequest, id: []const u8, err
         return .{ .updated = request.expect.revision + 1 };
     }
     if (std.mem.eql(u8, &now.record.life, &request.expect.life)) {
-        if (now.record.revision > request.expect.revision) return c.unknown(err, null);
+        if (now.record.revision > request.expect.revision) return c.unknownSince(err);
         if (now.record.revision == request.expect.revision and now.record.state == request.expect.state)
             return if (Call.classOf(err) == .answered) c.refused(err) else c.unknown(err, null);
     }

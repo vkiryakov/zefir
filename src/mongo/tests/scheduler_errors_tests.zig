@@ -255,9 +255,15 @@ test "after a lost reply, update answers conflict only when its change cannot ha
     const update: Store.UpdateRequest = .{ .ref = .{ .job = "send", .key = "k1" }, .expect = .{ .life = fixture.life, .revision = 3, .state = .pending }, .set = .{ .run_at = .{ .after = .zero } }, .tag = fixture.tag };
 
     // The store cannot tell its change, written over since, from another
-    // change that came first.
+    // change that came first. The change cannot arrive any more: its
+    // condition holds a revision that is past.
     try testing.expectError(error.OutcomeUnknown, f.store.update(io, fixture.no_deadline, &update, f.call()));
     try expectClean(&f);
+    const text = f.diagnostics.message();
+    if (!std.mem.endsWith(u8, text, "and what changed the record since leaves no mark of it")) {
+        std.debug.print("the diagnostics: {s}\n", .{text});
+        return error.TestUnexpectedResult;
+    }
     try afterProbe();
     // A record of another life: the filter holds the life, so the change
     // never lands on it.
