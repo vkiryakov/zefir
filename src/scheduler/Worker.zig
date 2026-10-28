@@ -72,7 +72,9 @@ pub fn Worker(comptime Jobs: type) type {
 
         /// Writes the records of the declared jobs (none: no call of the
         /// store), then starts the poll and the slots. A store that fails
-        /// here gives its error, and nothing runs; a second `start` is
+        /// here gives its error, and nothing runs; a create of a declared
+        /// record that ends `OutcomeUnknown` is no failure, as the record
+        /// read again tells whether it was made. A second `start` is
         /// `error.InvalidState`. Do not move the worker afterwards.
         pub fn start(w: *Self, io: Io) StartError!void {
             w.engine.checkUse(io);

@@ -302,11 +302,20 @@ fn declareOne(e: *Engine, io: Io, ctx: core.Context, a: Allocator, wanted: *cons
     const ref: record.Ref = .{ .job = want.job, .key = "" };
     var lost: u32 = 0;
     while (lost <= max_races) : (lost += 1) {
-        switch (try e.tally(io, .create, e.store.create(io, ctx, &want, options), &d)) {
+        // A create whose reply was lost may have made the record, and the
+        // record tells: of our life, it did. A run never deletes a declared
+        // record, and a create meets a live one as existing, so without a
+        // record one more create is safe.
+        const made: ?Store.CreateResult = e.tally(io, .create, e.store.create(io, ctx, &want, options), &d) catch |err| switch (err) {
+            error.OutcomeUnknown => null,
+            else => |other| return other,
+        };
+        if (made) |result| switch (result) {
             .created, .replaced => return log.info("{s}: declared, {s}", .{ want.job, want.plan }),
             .existing => {},
-        }
+        };
         var current = (try e.tally(io, .get, e.store.get(io, ctx, &ref, options), &d)) orelse continue;
+        if (made == null and std.mem.eql(u8, &current.life, &life)) return log.info("{s}: declared, {s}", .{ want.job, want.plan });
         // A finished record goes again to create, which replaces it.
         while (current.state != .succeeded and current.state != .failed) : (lost += 1) {
             const patch = declared.reconcile(&current, want.plan, want.run_at) orelse return;

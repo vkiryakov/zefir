@@ -116,6 +116,53 @@ test "start writes declared jobs, fixes a changed plan and leaves parked ones al
     try reach(&probe.ended, before + 1, 5);
 }
 
+test "after a lost reply of the create of a declared job, start reads the record and goes on" {
+    // A store may answer OutcomeUnknown for a create due soon, as a
+    // declared job of a short period is (rule 7 of the contract). A run
+    // never deletes a declared record, and a create meets a live one as
+    // existing: start reads the record, and creates it again only when
+    // there is none.
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+    for ([_]bool{ false, true }) |applied| {
+        var f: Fixture = undefined;
+        f.init();
+        defer f.deinit();
+        var probe: Probe = .{};
+        var pulse: Pulse = .{ .probe = &probe };
+        // The create made the record, or never reached the store.
+        if (applied) f.faulty.loseNextReply(io, .create) else f.faulty.failNext(io, .create, error.OutcomeUnknown, 1);
+        var w: scheduler.Worker(struct { pulse: *Pulse }) = try .init(testing.allocator, io, f.store(), .{ .pulse = &pulse }, quick);
+        defer w.deinit(io);
+        try w.start(io);
+        const r = (try f.get(.declared(Pulse))) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("every 1s", r.plan);
+        // One create reached the store: the first, or the one after it.
+        try testing.expectEqual(@as(u32, 1), f.faulty.calls(io, .create));
+    }
+
+    // A record there before, of another life: start goes on as after
+    // `existing`, and the record takes the plan of the code.
+    var f: Fixture = undefined;
+    f.init();
+    defer f.deinit();
+    var probe: Probe = .{};
+    var pulse: Pulse = .{ .probe = &probe };
+    var w1: scheduler.Worker(struct { pulse: *Pulse }) = try .init(testing.allocator, io, f.store(), .{ .pulse = &pulse }, quick);
+    try w1.start(io);
+    w1.deinit(io);
+    const before = (try f.get(.declared(Pulse))) orelse return error.TestUnexpectedResult;
+    f.faulty.failNext(io, .create, error.OutcomeUnknown, 1);
+    var every2: PulseEvery2 = .{ .probe = &probe };
+    var w2: scheduler.Worker(struct { pulse: *PulseEvery2 }) = try .init(testing.allocator, io, f.store(), .{ .pulse = &every2 }, quick);
+    defer w2.deinit(io);
+    try w2.start(io);
+    const moved = (try f.get(.declared(Pulse))) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("every 2s", moved.plan);
+    try testing.expectEqualSlices(u8, &before.life, &moved.life);
+    try testing.expectEqual(@as(u32, 1), f.faulty.calls(io, .create));
+}
+
 test "a worker without declared jobs does not touch the store at start" {
     var f: Fixture = undefined;
     f.init();
