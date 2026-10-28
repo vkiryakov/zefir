@@ -155,7 +155,10 @@ test "TokenAuth: no token is anonymous; requireUser is 401 and the app's handle 
         var refused = try app.request(.GET, "/api/v1/todos", headers);
         defer refused.deinit();
         try testing.expectEqual(401, refused.status);
-        try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+        // `header` is null when the response has no such field: compared as
+        // an optional, a missing one fails the test, where `.?` would stop
+        // it with a panic.
+        try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), refused.header("www-authenticate"));
         try testing.expectEqualStrings("unauthenticated", try codeOf(&refused));
     }
 
@@ -196,11 +199,11 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     defer preflight.deinit();
     try testing.expectEqual(204, preflight.status);
     try testing.expectEqualStrings("", preflight.body);
-    try testing.expectEqualStrings(origin, preflight.header("access-control-allow-origin").?);
-    try testing.expectEqualStrings("GET, HEAD, POST, PUT, PATCH, DELETE", preflight.header("access-control-allow-methods").?);
-    try testing.expectEqualStrings("authorization, content-type, idempotency-key", preflight.header("access-control-allow-headers").?);
-    try testing.expectEqualStrings("true", preflight.header("access-control-allow-credentials").?);
-    try testing.expectEqualStrings("Origin", preflight.header("vary").?);
+    try testing.expectEqualDeep(@as(?[]const u8, origin), preflight.header("access-control-allow-origin"));
+    try testing.expectEqualDeep(@as(?[]const u8, "GET, HEAD, POST, PUT, PATCH, DELETE"), preflight.header("access-control-allow-methods"));
+    try testing.expectEqualDeep(@as(?[]const u8, "authorization, content-type, idempotency-key"), preflight.header("access-control-allow-headers"));
+    try testing.expectEqualDeep(@as(?[]const u8, "true"), preflight.header("access-control-allow-credentials"));
+    try testing.expectEqualDeep(@as(?[]const u8, "Origin"), preflight.header("vary"));
 
     // The preflight of an origin it does not list gets none of it: the
     // server answers OPTIONS itself, and the browser refuses the call.
@@ -211,23 +214,23 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     defer stranger.deinit();
     try testing.expectEqual(204, stranger.status);
     try testing.expectEqual(null, stranger.header("access-control-allow-origin"));
-    try testing.expectEqualStrings("DELETE, OPTIONS", stranger.header("allow").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "DELETE, OPTIONS"), stranger.header("allow"));
     // The answer depends on Origin all the same, and so does that of a
     // request without one: a cache must keep them apart.
-    try testing.expectEqualStrings("Origin", stranger.header("vary").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Origin"), stranger.header("vary"));
     var plain = try app.request(.GET, "/api/health", &.{});
     defer plain.deinit();
     try testing.expectEqual(null, plain.header("access-control-allow-origin"));
-    try testing.expectEqualStrings("Origin", plain.header("vary").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Origin"), plain.header("vary"));
 
     // The answer to an error carries the headers too, so that the page can
     // read the 401.
     var refused = try app.request(.GET, "/api/v1/todos", &.{.{ "origin", origin }});
     defer refused.deinit();
     try testing.expectEqual(401, refused.status);
-    try testing.expectEqualStrings(origin, refused.header("access-control-allow-origin").?);
-    try testing.expectEqualStrings("Origin", refused.header("vary").?);
-    try testing.expectEqualStrings("x-request-id", refused.header("access-control-expose-headers").?);
+    try testing.expectEqualDeep(@as(?[]const u8, origin), refused.header("access-control-allow-origin"));
+    try testing.expectEqualDeep(@as(?[]const u8, "Origin"), refused.header("vary"));
+    try testing.expectEqualDeep(@as(?[]const u8, "x-request-id"), refused.header("access-control-expose-headers"));
 
     // Any origin: "*", and then never with credentials; the answer is the
     // same for every origin, without Vary.
@@ -235,7 +238,7 @@ test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin
     app.cors = .{ .origins = &any };
     var open = try app.request(.GET, "/api/health", &.{.{ "origin", "https://other.example" }});
     defer open.deinit();
-    try testing.expectEqualStrings("*", open.header("access-control-allow-origin").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "*"), open.header("access-control-allow-origin"));
     try testing.expectEqual(null, open.header("access-control-allow-credentials"));
     try testing.expectEqual(null, open.header("vary"));
 }
