@@ -8,8 +8,10 @@
 //! Settings, from the environment:
 //!
 //!   APP_NATS_URL               the NATS server; nats://127.0.0.1:4222 by default
-//!   APP_USERS_NATS_PASSWORD    the password of the NATS user "users"
-//!   APP_ORDERS_NATS_PASSWORD   the password of the NATS user "orders"
+//!   APP_USERS_NATS_USER        the NATS user of users; "users" by default
+//!   APP_USERS_NATS_PASSWORD    that user's password
+//!   APP_ORDERS_NATS_USER       the NATS user of orders; "orders" by default
+//!   APP_ORDERS_NATS_PASSWORD   that user's password
 
 const std = @import("std");
 const confy = @import("confy");

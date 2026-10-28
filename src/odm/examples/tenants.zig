@@ -14,7 +14,8 @@
 //!                         it names one
 //!   APP_BIG_URI           the server of big-co and its user, such as
 //!                         mongodb://admin@127.0.0.1:27018
-//!   APP_BIG_PASSWORD      that user's password
+//!   APP_BIG_PASSWORD      the password of the user of APP_BIG_URI, if it
+//!                         names one
 //!   APP_BIG_DATABASE      the database of big-co; bigco by default
 
 const std = @import("std");
