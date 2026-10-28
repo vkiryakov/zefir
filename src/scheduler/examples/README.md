@@ -1825,9 +1825,6 @@ time, waits for the run, stops the worker, and reads what the store kept:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/scheduler, `zig build example-mongo_quick_start` runs it
-//! against the servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -2120,9 +2117,6 @@ invoices of 30 orders:
 //!   APP_MONGO_URI        the server; mongodb://127.0.0.1:27017 by default
 //!   APP_MONGO_PASSWORD   the password of the user that the URI names, if
 //!                        it names one
-//!
-//! In tests/scheduler, `zig build example-instances` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
