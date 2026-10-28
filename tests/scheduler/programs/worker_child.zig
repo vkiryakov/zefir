@@ -12,6 +12,7 @@
 //!   SCHEDULER_E2E_DATABASE   the database of the store and of `effects`
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("zio");
 const core = @import("core");
 const scheduler = @import("scheduler");
@@ -32,6 +33,11 @@ fn exitOnPanic(message: []const u8, _: ?usize) noreturn {
 /// How long the process may live: the test kills it within seconds.
 const time_limit: std.Io.Duration = .fromSeconds(120);
 
+/// Windows has no `getppid`, and the test that starts this process runs
+/// only on Linux and macOS: there the process is built, never run, and
+/// only `time_limit` would end it.
+const watches_parent = builtin.os.tag != .windows;
+
 /// Exits with code 5 once the process that started this one is gone, as
 /// the parent of an orphan changes, and with code 4 after `time_limit`;
 /// a cancel ends it first.
@@ -39,7 +45,7 @@ fn watch(io: std.Io, parent: std.posix.pid_t) void {
     const end = std.Io.Clock.awake.now(io).addDuration(time_limit);
     while (true) {
         io.sleep(.fromSeconds(1), .awake) catch return;
-        if (std.posix.getppid() != parent) {
+        if (watches_parent and std.posix.getppid() != parent) {
             std.debug.print("worker_child: the test that started it is gone: exit with code 5\n", .{});
             std.process.exit(5);
         }
@@ -75,7 +81,8 @@ const Kill = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var watchdog = try init.io.concurrent(watch, .{ init.io, std.posix.getppid() });
+    const parent: std.posix.pid_t = if (watches_parent) std.posix.getppid() else undefined;
+    var watchdog = try init.io.concurrent(watch, .{ init.io, parent });
     defer watchdog.cancel(init.io);
     const uri = init.environ_map.get("SCHEDULER_E2E_URI") orelse return error.NoUri;
     const database = init.environ_map.get("SCHEDULER_E2E_DATABASE") orelse return error.NoDatabase;
