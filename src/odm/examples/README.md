@@ -851,7 +851,7 @@ nothing after a success:
 | Field | What it holds |
 |---|---|
 | `message()` | the server's errmsg, the driver's text, or odm's own |
-| `code` | the server's code: 11000 for a duplicate key, 13 for a login without the rights |
+| `code` | the server's code: 11000, 11001 or 12582 for a duplicate key, 13 for a login without the rights |
 | `index` | the document of a write that the server refused, or that broke a rule |
 | `violation` | the rule of zefir-validator: its `code` and `message` |
 | `path()` | the field: of a rule, or of a document that did not decode |
