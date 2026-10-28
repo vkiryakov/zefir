@@ -1972,7 +1972,7 @@ const HttpGuideModules = struct {
 /// example_main.zig, which exits with code 3 on a panic instead of
 /// aborting and with code 4 past its time limit; it must exit with 0.
 /// readme_test.zig then checks that README.md shows every file as it is,
-/// every run as it printed, of an error of zefir's checks only a message
+/// every run as it printed, of an error of the compiler only a message
 /// that a probe of src/http/tests/cases.zig expects, which it gets as
 /// `http-cases`, and of the Debug check only a line that a test of
 /// check.zig makes, from src/http/tests/check_lines.zig, which it gets as

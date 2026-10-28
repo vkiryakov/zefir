@@ -1,6 +1,6 @@
 //! README.md shows every file of the examples as it is, a run of every
 //! program as it printed, after the program, no Zig code that is not a
-//! part of these files, of an error of zefir's checks at compile time only
+//! part of these files, of an error of the compiler only
 //! a message that a probe of zefir-http expects, and of the Debug check
 //! only a line that a test of its check.zig makes: a file that changes
 //! without its copy in README.md, a program that prints something else, or
@@ -41,17 +41,13 @@ test "every Zig block of README.md but those of build.zig is a part of an exampl
     try check.expectZigFromExamples("README.md", guide, example_files);
 }
 
-test "every error of zefir's checks that README.md shows is the message of a probe" {
+test "every error of the compiler that README.md shows is the message of a probe" {
     var shown: usize = 0;
     var lines = std.mem.splitScalar(u8, guide, '\n');
     while (lines.next()) |raw| {
         // Git may check files out with CRLF on Windows.
         const line = std.mem.trimEnd(u8, raw, "\r");
-        // The compiler shows an error of zefir's checks at a line of
-        // zefir: `error: zefir.http: …`.
-        const marker = "error: ";
-        if (!std.mem.startsWith(u8, line, marker ++ "zefir.")) continue;
-        const message = line[marker.len..];
+        const message = check.compileError(line) orelse continue;
         shown += 1;
         if (isProbed(message)) continue;
         std.debug.print("README.md shows an error that no probe of src/http/tests/cases.zig expects:\n{s}\n", .{message});
@@ -74,7 +70,9 @@ test "every line of the Debug check that README.md shows is one that a test of c
     while (lines.next()) |raw| {
         // Git may check files out with CRLF on Windows.
         const line = std.mem.trimEnd(u8, raw, "\r");
-        if (!std.mem.startsWith(u8, line, "zefir.http: ")) continue;
+        // Every line that holds a line of the check, at its start or not,
+        // but an error of the compiler, which the test above checks.
+        if (std.mem.find(u8, line, "zefir.http: ") == null or check.compileError(line) != null) continue;
         shown += 1;
         if (isCheckLine(line)) continue;
         std.debug.print("README.md shows a line of the Debug check that src/http/tests/check_lines.zig does not hold, so no test of check.zig makes it:\n{s}\n", .{line});
