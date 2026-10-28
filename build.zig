@@ -1971,8 +1971,10 @@ const HttpGuideModules = struct {
 /// programs that run on the backend in memory, each through
 /// example_main.zig, which exits with code 3 on a panic instead of
 /// aborting and with code 4 past its time limit; it must exit with 0.
-/// readme_test.zig then checks that README.md shows every file as it is
-/// and every run as it printed. The service, main.zig, imports zio: only
+/// readme_test.zig then checks that README.md shows every file as it is,
+/// every run as it printed, and of an error of zefir's checks only a
+/// message that a probe of src/http/tests/cases.zig expects, which it gets
+/// as `http-cases`. The service, main.zig, imports zio: only
 /// tests/http builds and runs it. The tests of the app find its page and
 /// its OpenAPI document by their absolute paths, `paths`, and run where
 /// every test runs (see addOpenapiGoldens); openapi.json is an input of
@@ -2024,6 +2026,12 @@ fn addHttpGuide(
         .target = target,
         .optimize = optimize,
         .sanitize_thread = tsan,
+        .imports = &.{.{ .name = "http-cases", .module = b.createModule(.{
+            .root_source_file = b.path("src/http/tests/cases.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+        }) }},
     });
     // "http in a minute" of the repository's README.md is a program of the
     // guide too.
