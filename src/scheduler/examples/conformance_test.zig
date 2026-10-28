@@ -2,7 +2,7 @@
 //! of a store of your own run it: a harness gives each check a new, empty
 //! store and takes it back. Here the store is `scheduler.MemoryStore`; a
 //! store of your own runs the suite in the tests of its package, against
-//! its server. `zig build test-scheduler` runs it.
+//! its server.
 
 const std = @import("std");
 const scheduler = @import("scheduler");

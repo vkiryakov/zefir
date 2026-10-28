@@ -2,7 +2,7 @@
 //! a handler alone, with `scheduler.testing.call`; the jobs on a worker
 //! and `scheduler.MemoryStore`; a store that fails, with
 //! `scheduler.testing.FaultyStore`; and a rollout that parks a declared
-//! job. `zig build test-scheduler` runs them.
+//! job.
 
 const std = @import("std");
 const testing = std.testing;

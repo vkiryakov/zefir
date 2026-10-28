@@ -454,8 +454,7 @@ Declare a job, put it on its time, and let a worker run it. Here the jobs live i
 //! The quick start of the guide: a shop sends the invoice of an order a
 //! second after the order. The jobs live in `scheduler.MemoryStore`, so
 //! the program needs no server: it starts a worker, puts the invoice of
-//! order 42 on its time, waits for the run, and stops the worker. `zig
-//! build test-scheduler` runs it.
+//! order 42 on its time, waits for the run, and stops the worker.
 
 const std = @import("std");
 const log = @import("log");

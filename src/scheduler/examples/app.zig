@@ -8,7 +8,7 @@
 //! together with the servers of a service. App gives every bean by its
 //! type, so the client of each scheduler is a type of its own. In a
 //! service the shared store is `mongo.SchedulerStore`; here a MemoryStore
-//! stands in for it. `zig build test-scheduler` runs it.
+//! stands in for it.
 
 const std = @import("std");
 const core = @import("core");

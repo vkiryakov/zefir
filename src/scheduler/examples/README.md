@@ -1,4 +1,4 @@
-# scheduler
+# zefir-scheduler: a job scheduler for Zig services
 
 **Jobs that a Zig service puts on a time, and that any of its instances
 runs.** A shop sends the invoice of an order a minute after the order,
@@ -16,7 +16,7 @@ runs on [zio](https://github.com/lalinsky/zio) in production, and keeps
 its jobs in memory or in MongoDB.
 
 > [!IMPORTANT]
-> **Not in v1 (TODO):**
+> **Not implemented yet (TODO):**
 >
 > - **Time zones** and their changes of the clock in summer: every time is
 >   UTC.
@@ -125,16 +125,15 @@ app.info("Scheduled", .{ .result = try client.schedule(io, .root, SendInvoice, r
 15. [Tests of your jobs](#tests-of-your-jobs)
 16. [A store of your own](#a-store-of-your-own)
 
-Programs that `zig build test-scheduler` runs without a server, checking
-what they print against this guide: [quick start](quick_start.zig) ·
-[schedules](schedules.zig) · [orders](orders.zig) ·
-[failures](failures.zig) · [under App](app.zig). Tests that it runs:
-[the jobs of the invoices](jobs_test.zig), which test
-[Invoices.zig](Invoices.zig) · [the conformance suite](conformance_test.zig).
-Programs that `zig build e2e` in `tests/scheduler` builds and runs against
-mongod, checking what they print against this guide:
-[quick start on MongoDB](mongo_quick_start.zig) ·
-[instances](instances.zig).
+Every example of this guide is shown whole, and every program with what
+it printed. Programs without a server: [quick start](#quick-start) ·
+[schedules](#what-the-store-keeps-and-values-known-only-at-run-time) ·
+[orders](#jobs-by-key) · [failures](#failures-and-retries) ·
+[under App](#under-zefirapp). Programs against mongod:
+[quick start on MongoDB](#the-quick-start-on-mongodb) ·
+[instances](#several-instances-on-one-store). Tests:
+[the jobs of the invoices and their tests](#tests-of-your-jobs) ·
+[the conformance suite](#the-conformance-suite).
 
 ## What the scheduler does
 
@@ -248,28 +247,34 @@ drops their collections when they start:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "scheduler", .module = zefir.module("zefir-scheduler") },
-            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
-            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "scheduler", .module = zefir.module("zefir-scheduler") },
+                .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -289,17 +294,16 @@ docker run --rm -p 27017:27017 mongo:9.0.4
 
 ## Quick start
 
-The invoice of an order, sent a second after the order: a job, a store, a
-client that puts the job on its time, and a worker that runs it. The jobs
-live in memory, in `scheduler.MemoryStore`, so the program needs no
-server:
+The invoice of an order, sent a second after the order, in
+`quick_start.zig`: a job, a store, a client that puts the job on its time,
+and a worker that runs it. The jobs live in memory, in
+`scheduler.MemoryStore`, so the program needs no server:
 
 ```zig
 //! The quick start of the guide: a shop sends the invoice of an order a
 //! second after the order. The jobs live in `scheduler.MemoryStore`, so
 //! the program needs no server: it starts a worker, puts the invoice of
-//! order 42 on its time, waits for the run, and stops the worker. `zig
-//! build test-scheduler` runs it.
+//! order 42 on its time, waits for the run, and stops the worker.
 
 const std = @import("std");
 const log = @import("log");
@@ -665,8 +669,10 @@ and day of the week, or 6 with the seconds first; the time is UTC.
 
   A day that comes rarely is fine: the search for the next run looks up
   to 9 years ahead, and `0 0 29 2 *` waits for the 29th of February.
-- Not in v1: `?`, `L`, `W`, `#`, `H`, a field of the year, `a/n`,
-  `@reboot` and `@every`; each is an error that names it.
+- Not implemented yet: `?`, `L`, `W`, `#`, `H`, a field of the year,
+  `a/n`, `@reboot` and `@every`; each is an error that names it. The
+  messages say "not in v1", v1 being the first version of
+  zefir-scheduler.
 
 ### What the store keeps, and values known only at run time
 
@@ -693,8 +699,8 @@ Saturday 24 October 2026 at midnight UTC, so every run prints the same:
 //! the arguments it knows, `next` gives the first moment after a moment,
 //! and `format` writes the text that the record of a job keeps. Values
 //! known only at run time, such as settings, are checked by `check`, as
-//! the client checks a schedule it is given. No store, no worker: `zig
-//! build test-scheduler` runs it.
+//! the client checks a schedule it is given. It needs neither a store nor
+//! a worker.
 
 const std = @import("std");
 const scheduler = @import("scheduler");
@@ -927,8 +933,7 @@ worker runs the jobs, so the program shows what the store keeps of them:
 //! finds, moves, pauses and cancels by its key. An order gets a reminder
 //! to pay three days later, and each tenant a report every Monday at 9 AM.
 //! Only the client works here, on `scheduler.MemoryStore`: no worker runs
-//! the jobs, so the program shows what the store keeps of them. `zig build
-//! test-scheduler` runs it.
+//! the jobs, so the program shows what the store keeps of them.
 
 const std = @import("std");
 const log = @import("log");
@@ -1210,8 +1215,7 @@ the lines come in the order of the story:
 //! `client.retry`. The gateway hangs on the first attempt of order 3, so
 //! the run passes its timeout and is cancelled, and the next attempt goes
 //! through. The jobs live in `scheduler.MemoryStore`, and the pauses are
-//! short, so that the program ends in seconds. `zig build test-scheduler`
-//! runs it.
+//! short, so that the program ends in seconds.
 
 const std = @import("std");
 const log = @import("log");
@@ -1804,9 +1808,9 @@ record of a declared one.
 ### The quick start on MongoDB
 
 The quick start again, on MongoDB: the shop sends the invoice of order 42
-a second after the order. The program connects, makes the indexes of the
-store, starts a worker, puts the invoice on its time, waits for the run,
-stops the worker, and reads what the store kept:
+a second after the order. The program, `mongo_quick_start.zig`, connects,
+makes the indexes of the store, starts a worker, puts the invoice on its
+time, waits for the run, stops the worker, and reads what the store kept:
 
 ```zig
 //! The quick start on MongoDB: the shop sends the invoice of an order a
@@ -2085,14 +2089,13 @@ guide of zefir-mongo has the rest.
 
 ### MongoDB 7.0
 
-The store works on MongoDB 7.0 and later; its end-to-end tests run on
-7.0.45 and 9.0.4. A claim compares the time of a job with `$$NOW`, the
-clock of the server, and MongoDB 7.0 uses no index for such a comparison.
-So the filter of a claim also holds a plain range, `wake_at` up to the
-store's estimate of the server's clock plus 2 s, which the index `scan`
-serves on every version, next to the exact comparison with `$$NOW`. The
-range never decides what a claim takes; a poor estimate costs a delay or
-a few more documents read, never a wrong claim.
+The store works on MongoDB 7.0 and later. A claim compares the time of a
+job with `$$NOW`, the clock of the server, and MongoDB 7.0 uses no index
+for such a comparison. So the filter of a claim also holds a plain range,
+`wake_at` up to the store's estimate of the server's clock plus 2 s, which
+the index `scan` serves on every version, next to the exact comparison
+with `$$NOW`. The range never decides what a claim takes; a poor estimate
+costs a delay or a few more documents read, never a wrong claim.
 
 ### Several instances on one store
 
@@ -2370,7 +2373,7 @@ makes on `*mongo.Client`; the program runs without a server, so a
 //! together with the servers of a service. App gives every bean by its
 //! type, so the client of each scheduler is a type of its own. In a
 //! service the shared store is `mongo.SchedulerStore`; here a MemoryStore
-//! stands in for it. `zig build test-scheduler` runs it.
+//! stands in for it.
 
 const std = @import("std");
 const core = @import("core");
@@ -2927,7 +2930,7 @@ versions of the shop:
 //! a handler alone, with `scheduler.testing.call`; the jobs on a worker
 //! and `scheduler.MemoryStore`; a store that fails, with
 //! `scheduler.testing.FaultyStore`; and a rollout that parks a declared
-//! job. `zig build test-scheduler` runs them.
+//! job.
 
 const std = @import("std");
 const testing = std.testing;
@@ -3300,15 +3303,16 @@ The harness is a type with two methods and an optional third:
 
 `Options.time_scale` stretches the leases, waits and tolerances of the
 checks, for a slow machine or a remote store, and `Options.only` runs
-some of them. Here is the suite on `MemoryStore`, as the tests of a store
-of your own run it on that store, against its server:
+some of them. Here is the suite on `MemoryStore`, in
+`conformance_test.zig`, as the tests of a store of your own run it on that
+store, against its server:
 
 ```zig
 //! The conformance suite of the stores of the scheduler, run as the tests
 //! of a store of your own run it: a harness gives each check a new, empty
 //! store and takes it back. Here the store is `scheduler.MemoryStore`; a
 //! store of your own runs the suite in the tests of its package, against
-//! its server. `zig build test-scheduler` runs it.
+//! its server.
 
 const std = @import("std");
 const scheduler = @import("scheduler");

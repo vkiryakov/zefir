@@ -2,8 +2,7 @@
 //! finds, moves, pauses and cancels by its key. An order gets a reminder
 //! to pay three days later, and each tenant a report every Monday at 9 AM.
 //! Only the client works here, on `scheduler.MemoryStore`: no worker runs
-//! the jobs, so the program shows what the store keeps of them. `zig build
-//! test-scheduler` runs it.
+//! the jobs, so the program shows what the store keeps of them.
 
 const std = @import("std");
 const log = @import("log");

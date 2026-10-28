@@ -7,8 +7,7 @@
 //! `client.retry`. The gateway hangs on the first attempt of order 3, so
 //! the run passes its timeout and is cancelled, and the next attempt goes
 //! through. The jobs live in `scheduler.MemoryStore`, and the pauses are
-//! short, so that the program ends in seconds. `zig build test-scheduler`
-//! runs it.
+//! short, so that the program ends in seconds.
 
 const std = @import("std");
 const log = @import("log");

@@ -5,8 +5,8 @@
 //! the arguments it knows, `next` gives the first moment after a moment,
 //! and `format` writes the text that the record of a job keeps. Values
 //! known only at run time, such as settings, are checked by `check`, as
-//! the client checks a schedule it is given. No store, no worker: `zig
-//! build test-scheduler` runs it.
+//! the client checks a schedule it is given. It needs neither a store nor
+//! a worker.
 
 const std = @import("std");
 const scheduler = @import("scheduler");
