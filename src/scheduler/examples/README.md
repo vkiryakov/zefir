@@ -2077,7 +2077,9 @@ each write; `.{ .journal = false }` trades that for speed. A reply with a
 `writeConcernError` means the write ran without that promise, also one of
 code 50, MaxTimeMSExpired, when the deadline of the call passed while the
 server waited: the reply still says what the write did, so the store
-returns the result as usual and logs a warning with the server's code.
+returns the result as usual and, when the write changed a job or a row of
+the history, logs a warning with the server's code. A write that changed
+nothing, such as a poll that found no job due, logs none.
 [Durable writes](../../mongo/examples/README.md#durable-writes) in the
 guide of zefir-mongo has the rest.
 

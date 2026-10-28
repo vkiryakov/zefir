@@ -56,7 +56,7 @@ pub fn claim(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Stor
                 ended = true;
                 break;
             };
-            c.ran(err);
+            c.ranBy(err, modified);
             timed = false;
             break :doc modified.value;
         };
@@ -258,7 +258,7 @@ fn renewOnce(c: *Call, id: []const u8, life: []const u8, filter: anytype, stage:
         // Without its write concern, the renewal ran, and its reply says
         // whether it held.
         const modified = Call.modifiedUnconfirmed(refusal) orelse return err;
-        c.ran(err);
+        c.ranBy(err, modified);
         if (modified.value != null) return .renewed;
         break :found null;
     };
@@ -301,7 +301,7 @@ pub fn finish(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
         var known: mongo.Collection.DeleteResult = .{};
         const result = c.jobs().deleteOne(io, c.op(), filter, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
             if (!Call.ranUnconfirmed(known)) return finishLost(&c, id, request, err);
-            c.ran(err);
+            c.ranBy(err, known);
             break :result known;
         };
         break :applied result.deleted > 0;
@@ -310,7 +310,7 @@ pub fn finish(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
         var known: mongo.Collection.UpdateResult = .{};
         const result = c.jobs().updateOne(io, c.op(), filter, stages, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
             if (!Call.ranUnconfirmed(known)) return finishLost(&c, id, request, err);
-            c.ran(err);
+            c.ranBy(err, known);
             break :result known;
         };
         break :applied result.matched > 0;
@@ -432,7 +432,7 @@ fn writeRow(c: *Call, run: *const scheduler.Run, keep: scheduler.Retention) Stor
     _ = c.runs().updateOne(c.io, c.op(), .{ ._id = row_id }, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .upsert = true, .write_concern = c.store.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| {
         if (Call.code(&c.md)) |code| if (code == 11000) return;
         // Without its write concern, the row is there all the same.
-        if (Call.ranUnconfirmed(known)) return c.ran(err);
+        if (Call.ranUnconfirmed(known)) return c.ranBy(err, known);
         // The transition did not go out: the record is as it was.
         return c.nothing(err);
     };

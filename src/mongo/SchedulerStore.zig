@@ -32,7 +32,8 @@
 //!   passed while the server waited) as with any other: the reply still
 //!   says what the write did, so the store returns the normal result, goes
 //!   on after a row of the history, and logs a warning with the server's
-//!   code.
+//!   code when the write changed a job or a row; a write that changed
+//!   nothing, such as a claim that found no job due, logs none.
 //! - An error after which the write may have run (a lost connection, a
 //!   timeout, a refusal of the server) is resolved by reading the job
 //!   again by the mark the write left; where that cannot tell, the call is

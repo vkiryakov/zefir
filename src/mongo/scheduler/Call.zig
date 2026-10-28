@@ -6,7 +6,8 @@
 //! write concern, and the reply still says what it did. zefir-mongo gives
 //! it as `WriteFailed`, or `Timeout` for code 50, with the result in the
 //! `partial` of a write or the `failure_reply` of a findAndModify, and the
-//! operation returns that result and logs a warning (`ran`).
+//! operation returns that result, with a warning when the write changed
+//! something (`ranBy`).
 //!
 //! Any other error of zefir-mongo falls in one of three classes. "Not
 //! sent" (`Unavailable`, `DeadlineExceeded`, …) changed nothing.
@@ -197,6 +198,26 @@ pub fn unknownResent(c: *Call, err: mongo.Error, first: *const mongo.Diagnostics
 pub fn ran(c: *Call, err: mongo.Error) void {
     if (!unconfirmed(err, &c.md)) return;
     log.warn("SchedulerStore: {s}: the server answered error.{t} (code {d}: {s}), yet the write is in place: its write concern is not confirmed", .{ c.what, err, code(&c.md) orelse 0, c.md.message() });
+}
+
+/// The write that failed with `err` ran without its write concern, and its
+/// reply says it did `known`: `ran` when that changed something. A write
+/// that changed nothing, such as a claim that found no job due, has
+/// nothing in place to warn of.
+pub fn ranBy(c: *Call, err: mongo.Error, known: anytype) void {
+    if (changed(known)) c.ran(err);
+}
+
+/// Whether the write that `known` tells of changed a document: an
+/// `UpdateResult` that inserted or modified one, a `DeleteResult` that
+/// deleted one, or the `Modified` of a findAndModify that returned one.
+pub fn changed(known: anytype) bool {
+    return switch (@TypeOf(known)) {
+        mongo.Collection.UpdateResult => known.upserted_id != null or known.modified > 0,
+        mongo.Collection.DeleteResult => known.deleted > 0,
+        Modified => known.value != null,
+        else => @compileError("changed: an UpdateResult, a DeleteResult or a Modified, not " ++ @typeName(@TypeOf(known))),
+    };
 }
 
 /// Whether a write that failed with `err`, and that ran, ran without its

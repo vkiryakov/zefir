@@ -64,6 +64,23 @@ test "a write in place after an answered error or code 50 ran without its write 
     try testing.expect(Call.unconfirmed(error.Timeout, &md));
 }
 
+test "a write that ran without its write concern warns only when its reply shows a change" {
+    // A claim that took nothing, a renewal not of this claim, an update or
+    // a transition that matched nothing, a delete of nothing, a create of a
+    // job that is there, a row of the history that is there: nothing of
+    // the write is in place.
+    try testing.expect(!Call.changed(mongo.Collection.UpdateResult{}));
+    try testing.expect(!Call.changed(mongo.Collection.UpdateResult{ .matched = 1 }));
+    try testing.expect(!Call.changed(mongo.Collection.DeleteResult{}));
+    try testing.expect(!Call.changed(Call.Modified{ .value = null }));
+    // A record or a row made or changed, a record deleted, a record
+    // claimed or renewed.
+    try testing.expect(Call.changed(mongo.Collection.UpdateResult{ .upserted_id = .{ .string = "send/k1" } }));
+    try testing.expect(Call.changed(mongo.Collection.UpdateResult{ .matched = 1, .modified = 1 }));
+    try testing.expect(Call.changed(mongo.Collection.DeleteResult{ .deleted = 1 }));
+    try testing.expect(Call.changed(Call.Modified{ .value = bson.literal(.{ ._id = "send/k1" }) }));
+}
+
 /// Fails unless the diagnostics hold neither the connection string nor
 /// the payload.
 fn expectClean(f: *Fixture) !void {

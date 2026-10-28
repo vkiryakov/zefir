@@ -32,7 +32,7 @@ pub fn create(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     var known: mongo.Collection.UpdateResult = .{};
     const result = upsert(&c, id, stage, &known) catch |err| result: {
         if (!Call.ranUnconfirmed(known)) return createLost(&c, id, stage, request, run_at, err);
-        c.ran(err);
+        c.ranBy(err, known);
         break :result known;
     };
     return createdBy(result);
@@ -162,7 +162,7 @@ pub fn update(s: *SchedulerStore, io: Io, ctx: core.Context, request: *const Sto
     var known: mongo.Collection.UpdateResult = .{};
     const result = c.jobs().updateOne(io, c.op(), filter, &[_]bson.RawDocument{stage}, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
         if (!Call.ranUnconfirmed(known)) return updateLost(&c, request, id, err);
-        c.ran(err);
+        c.ranBy(err, known);
         break :result known;
     };
     if (result.matched > 0) return .{ .updated = request.expect.revision + 1 };
@@ -291,7 +291,7 @@ pub fn remove(s: *SchedulerStore, io: Io, ctx: core.Context, ref: *const schedul
     var known: mongo.Collection.DeleteResult = .{};
     const result = c.jobs().deleteOne(io, c.op(), .{ ._id = id }, .{ .allocator = c.a(), .write_concern = s.write_concern, .diagnostics = &c.md, .partial = &known }) catch |err| result: {
         if (Call.ranUnconfirmed(known)) {
-            c.ran(err);
+            c.ranBy(err, known);
             break :result known;
         }
         switch (Call.classOf(err)) {
