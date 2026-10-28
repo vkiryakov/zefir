@@ -46,7 +46,7 @@ test "bool is a boolean" {
     try expectField(named("false"), false);
 }
 
-test "integers whose values all fit int32 are int32: i8 to i32, u8 to u16" {
+test "integers whose values all fit int32 are int32: i8 to i32, u8 to u31" {
     try expectField(hex("0c000000 10 6100 80ffffff 00"), @as(i8, -128));
     try expectField(hex("0c000000 10 6100 ff7f0000 00"), @as(i16, std.math.maxInt(i16)));
     try expectField(named("smallest int32"), @as(i32, std.math.minInt(i32)));

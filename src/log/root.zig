@@ -101,13 +101,14 @@
 //! they reach the output, so it gets an error record even when the queue
 //! or stdout refuses it; a record too long for `.oversize = .drop` reaches
 //! no subscriber. The handler runs on that thread, which is the logger's,
-//! not a task of the application's `io`. What it logs on its own thread
-//! never returns to the subscribers; threads and Io tasks it hands work to
-//! log like any caller. `use` adds an interceptor for good, so its context
-//! must outlive the logger: it sees each record at the caller, once
-//! encoded, and drops it by returning false. Both get an `Event`: the
-//! level, the time, the scope, the message, the trace ids and the whole
-//! line, valid during the call. More in `examples/README.md`.
+//! not a task of your zio runtime: make its calls through `init.io`, which
+//! serves any thread. What it logs on its own thread never returns to the
+//! subscribers; threads and Io tasks it hands work to log like any caller.
+//! `use` adds an interceptor for good, so its context must outlive the
+//! logger: it sees each record at the caller, once encoded, and drops it by
+//! returning false. Both get an `Event`: the level, the time, the scope,
+//! the message, the trace ids and the whole line, valid during the call.
+//! More in `examples/README.md`.
 
 const std = @import("std");
 const options = @import("options.zig");
