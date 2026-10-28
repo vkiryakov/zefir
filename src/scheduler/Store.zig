@@ -70,15 +70,20 @@
 //! 7. Unknown outcomes. The store resolves one where it can, reading the
 //!    record again by `tag`, `life`, `owner` and `fence`; else it answers
 //!    `error.OutcomeUnknown`. A definite answer it is not sure of breaks
-//!    the contract. It sends again only what changes nothing the second
-//!    time: a write on the same condition. The insert of a `create` whose
-//!    reading again finds no live record and none of its life is not such
-//!    a write: a claim may have run that life meanwhile and its finish
-//!    removed it, and the insert would make it again. It goes again only
-//!    while no claim can have taken the record: the `run_at` of the
-//!    request (the moment of `.at`, or the store's now when the call began
-//!    and `.after`) is a minute or more past the deadline of the call, on
-//!    the store's clock; nearer, or without a deadline, the create answers
+//!    the contract, but for one: a `remove`, and a `finish` that deletes
+//!    the record (`Next.delete`), whose reading again finds no record
+//!    answer true and `done`. The store cannot tell whether they removed
+//!    it, or a cancel or the finish of another claim did, or, for a
+//!    `remove`, whether it was there at all; the job is over either way.
+//!    It sends again only what changes nothing the second time: a write on
+//!    the same condition. The insert of a `create` whose reading again
+//!    finds no live record and none of its life is not such a write: a
+//!    claim may have run that life meanwhile and its finish removed it,
+//!    and the insert would make it again. It goes again only while no
+//!    claim can have taken the record: the `run_at` of the request (the
+//!    moment of `.at`, or the store's now when the call began and
+//!    `.after`) is a minute or more past the deadline of the call, on the
+//!    store's clock; nearer, or without a deadline, the create answers
 //!    `error.OutcomeUnknown`. A `remove` between the two inserts is lost
 //!    all the same: it answered true, and the job is there again.
 //! 8. Durability. A definite success survives a restart of the store

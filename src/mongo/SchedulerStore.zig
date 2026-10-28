@@ -37,8 +37,10 @@
 //! - An error after which the write may have run (a lost connection, a
 //!   timeout, a refusal of the server) is resolved by reading the job
 //!   again by the mark the write left; where that cannot tell, the call is
-//!   `error.OutcomeUnknown`. Reads (`get`, `list`, `history`) change
-//!   nothing, so their errors are those of a call that did nothing.
+//!   `error.OutcomeUnknown`, but for a `remove` or a `finish` that deletes
+//!   the job and finds none: true and `done`, as rule 7 of the contract
+//!   allows. Reads (`get`, `list`, `history`) change nothing, so their
+//!   errors are those of a call that did nothing.
 //! - A `create` whose reading again finds neither its job nor a live job
 //!   of the key sends its upsert once more only when the job is due a
 //!   minute or more after the deadline of the call, on the server's clock:

@@ -3264,7 +3264,10 @@ The header of [Store.zig](../Store.zig) has them in full:
    meanwhile, and its finish removed it. It goes again only while the job
    is due a minute or more after the deadline of the call, by the store's
    clock; a cancel between the two inserts answered true, and the job is
-   there again.
+   there again. One definite answer goes without that certainty: a
+   `remove`, or a `finish` that deletes the job, whose reading again finds
+   no record answers true or `done`, though a cancel or another claim may
+   have removed it, as the job is over either way.
 8. A definite success survives a restart of the store; `MemoryStore` is
    the exception, and says so.
 9. The store never retries but to resolve an unknown outcome: retries are
