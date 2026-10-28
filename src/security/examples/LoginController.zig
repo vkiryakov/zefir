@@ -1,3 +1,4 @@
+// Application code (src/LoginController.zig of the orders service): zefir-security ships none of these.
 //! Signing in: POST /api/login. A user sends a name and a secret, and the
 //! answer is a token of orders, in the form that OAuth clients read (RFC
 //! 6749 §5.1). zefir has no passwords: here the users and their secrets

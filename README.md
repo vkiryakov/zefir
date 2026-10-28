@@ -35,8 +35,8 @@ Zefir is shaped by my needs first, and it's open to everyone. If it fits the way
 - **Take only what you use.** Every module is its own import, and the umbrella `zefir` module brings them all together.
 - **Not limited to what ships.** Where a module meets the outside world, it goes through an interface, a pointer to your object and its function pointers, as `std.Io` does, and an implementation of your own takes the place of zefir's: a transport of rpc (`rpc.ClientTransport` and `rpc.ServerTransport`, which every `rpc.Server` and `rpc.Client` is given: zefir ships NATS, and [your own](src/rpc-nats/examples/writing-a-transport.md) lives in a package of its own), `rpc_nats.Conn` for another NATS library, and the `std.Io.Writer` that zefir-log writes to (`.output = .{ .writer = … }`). Middleware, authenticators and credentials providers of your own join the calls of rpc the same way.
 - **Your types are the contract.** Declare a struct, and confy fills it and checks every value against its field's type. It reports every problem at once, each pointing at the file and line, or the variable, it came from.
-- **No dependencies.** Pure Zig on top of the standard library; nothing else to fetch or audit.
-- **Tested on Linux, macOS and Windows.** CI runs the tests of every module on all three.
+- **No dependencies.** Pure Zig on top of the standard library; zio, the runtime a service runs on, comes from your build, not from Zefir.
+- **Tested on Linux, macOS and Windows.** Every module's tests run on all three.
 
 ## Modules
 
@@ -62,7 +62,7 @@ Take any module on its own, or all the finished ones at once through the umbrell
 | `zefir-grpc`                       | gRPC interoperability                                                                                                                                                                                                         | 📋 Planned                                                                                                                                                        |
 | **Database & Persistence**         |                                                                                                                                                                                                                               |                                                                                                                                                                  |
 | `zefir-mongo`                      | Async MongoDB driver on `std.Io`: standalone mongod, SCRAM, pooling, BSON, collections; no TLS yet                                                                                                                            | 🟡 Partial (standalone mongod only: no replica set, sharded cluster or TLS) · [docs](src/mongo/examples/README.md)                                                |
-| `zefir-mongo-bson`                 | BSON, the format of MongoDB's documents: Zig values to BSON and back, raw documents, Extended JSON; shared by `zefir-mongo` and `zefir-odm`                                                                                   | ✅ Done · [docs](src/mongo/examples/README.md)                                                                                                                    |
+| `zefir-mongo-bson`                 | BSON, the format of MongoDB's documents: Zig values to BSON and back, raw documents, Extended JSON; shared by `zefir-mongo` and `zefir-odm`                                                                                   | ✅ Done · [docs](src/mongo/examples/README.md#documents-zefir-mongo-bson)                                                                                         |
 | `zefir-redis`                      | Redis and Valkey client on `std.Io`: one standalone server, RESP3, connection pooling, typed replies, pipelines, WATCH transactions, Lua scripts, streams with consumer groups, pub/sub; no TLS yet, so trusted networks only | 🟡 Partial (one standalone server only: no Sentinel, Cluster or TLS) · [docs](src/redis/examples/README.md)                                                       |
 | `zefir-odm`                        | Typed ODM for MongoDB: models as structs, queries checked at compile time, tenants on shared and own servers, connections replaced on the fly, any driver that passes its conformance suite                                   | ✅ Done · [docs](src/odm/examples/README.md)                                                                                                                      |
 | `zefir-cache`                      | L1/L2 caching, TTL, Redis, invalidation, synchronization                                                                                                                                                                      | 📋 Planned                                                                                                                                                        |
@@ -87,6 +87,21 @@ Take any module on its own, or all the finished ones at once through the umbrell
 > Zefir is in early development. Until 1.0, any minor release may change the API.
 
 ## confy in a minute
+
+A service that listens on a port and talks to a database. Its defaults go in `config.json`, next to `build.zig`:
+
+```json
+{
+  "http": { "port": 8080 },
+  "db": { "url": "postgres://localhost:5432/app" }
+}
+```
+
+The password goes in `.env`, which stays out of version control:
+
+```sh
+APP_DB_PASSWORD=change-me
+```
 
 Declare the configuration and load it at the start of `main`:
 
@@ -115,25 +130,31 @@ pub fn main(init: std.process.Init) !void {
         .sources = &.{ .json("config.json"), .env(".env"), .osEnv() },
     });
 
-    std.log.info("listening on port {d}, database {s}", .{ config.http.port, config.db.url });
+    std.log.info("listening on port {d}, database {s}, password {f}", .{ config.http.port, config.db.url, config.db.password });
 }
 ```
 
-With `http.port` and `db.url` in `config.json`, and `APP_DB_PASSWORD` in `.env`:
-
 ```text
 $ zig build run
-info: listening on port 8080, database postgres://localhost:5432/app
+info: listening on port 8080, database postgres://localhost:5432/app, password [REDACTED]
+```
 
+The environment comes last, so it overrides the files:
+
+```text
 $ APP_HTTP_PORT=9090 zig build run
-info: listening on port 9090, database postgres://localhost:5432/app
+info: listening on port 9090, database postgres://localhost:5432/app, password [REDACTED]
+```
 
+A value that doesn't fit its field stops the program before it does anything:
+
+```text
 $ APP_HTTP_PORT=90000 zig build run
 error(confy): 1 configuration problem:
   environment: APP_HTTP_PORT: invalid (expected an integer 0..65535)
 ```
 
-The environment overrides the files, a bad value stops the program before it does anything, and `confy.Secret` prints as `[REDACTED]`. **[Read the confy guide →](src/confy/examples/README.md)**
+`confy.Secret` prints as `[REDACTED]`, and every problem of the configuration comes at once, each pointing at the file and line, or the variable, it came from. **[Read the confy guide →](src/confy/examples/README.md)**
 
 ## core in a minute
 
@@ -160,6 +181,11 @@ fn findUser(ctx: core.Context, io: std.Io, id: u64) ![]const u8 {
 }
 ```
 
+```text
+$ zig build run
+info: user 42 is Ada
+```
+
 Cancel the token when the client goes away, and every check below fails with `error.Cancelled`; once the deadline passes, they fail with `error.DeadlineExceeded`. `core.w3c` reads and writes the W3C `traceparent` and `tracestate` headers, and none of these primitives allocates, reads a clock or does I/O; `zefir.App`, the root of an application, which core also holds, is the one exception. **[Read the core guide →](src/core/examples/README.md)** · **[Read the App guide →](src/core/examples/app/README.md)**
 
 ## log in a minute
@@ -181,7 +207,8 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-```json
+```text
+$ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
 ```
 
@@ -190,20 +217,39 @@ Every record is one line of JSON on stdout, ready for a log collector. The field
 ## nats in a minute
 
 > [!NOTE]
-> The example needs zio in your `build.zig.zon` and `build.zig`; the [guide's Installation](src/nats/examples/README.md#installation) shows both.
+> The example needs zio in your `build.zig.zon` and `build.zig`, and confy among its imports; the [guide's Installation](src/nats/examples/README.md#installation) shows them.
 
-Connect to a NATS server, subscribe to a subject, publish to it and take the message. The client runs on any `std.Io` with real concurrency; [zio](https://github.com/lalinsky/zio) is the one for services:
+Connect to a NATS server, subscribe to a subject, publish to it and take the message. The client runs on [zio](https://github.com/lalinsky/zio), and confy reads the server's address from `APP_NATS_URL`:
 
 ```zig
 const std = @import("std");
+const confy = @import("confy");
 const nats = @import("nats");
 const zio = @import("zio");
 
+/// The client logs through std.log; this leaves out its debug records.
+pub const std_options: std.Options = .{ .log_level = .info };
+
+const Config = struct {
+    nats: struct {
+        url: []const u8 = "nats://127.0.0.1:4222",
+    } = .{},
+};
+
 pub fn main(init: std.process.Init) !void {
+    // APP_NATS_URL sets the server; without it, the default stays.
+    var config: Config = undefined;
+    confy.loadOrExit(init.arena.allocator(), &config, .{
+        .io = init.io,
+        .environ = init.environ_map,
+        .env_prefix = "APP_",
+        .sources = &.{.osEnv()},
+    });
+
     const rt = try zio.Runtime.init(init.gpa, .{});
     defer rt.deinit();
 
-    var client: nats.Client = try .init(init.gpa, rt.io(), .{ .servers = &.{"nats://127.0.0.1:4222"} });
+    var client: nats.Client = try .init(init.gpa, rt.io(), .{ .servers = &.{config.nats.url} });
     defer client.deinit();
     try client.connect();
 
@@ -219,13 +265,12 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
+Against a server started with `docker run --rm -d -p 4222:4222 nats:2.15.0-alpine`:
+
 ```text
-$ docker run --rm -d -p 4222:4222 nats:2.15.0-alpine
-$ zig build run -Doptimize=ReleaseSafe
+$ zig build run
 info: orders.created: {"id":1001}
 ```
-
-A Debug build also shows the client's own `debug(nats)` records: connecting, connected, closing.
 
 `flush` waits until the server has the subscription, and `publish` returns once a copy of the message is in the client's queue. Every queue has a limit, a dropped connection comes back with its subscriptions, all requests share one reply subscription, and `drain()` stops a service without losing the work it took. **[Read the nats guide →](src/nats/examples/README.md)**
 
@@ -401,8 +446,6 @@ GET /api/v1/todos
 
 The compiler checks the routes and the handlers when it builds the server, `ctx.json(NewTodo)` reads the body by the `field_rules` of the DTO, trims the title and checks it, and a body that does not fit is a 422 that names every field. On the network, `.listen = .{ .port = 8080 }` puts `http.native.Backend` on zio in the place of the backend in memory, and the controller stays the same. Middleware of your own, one error handler for every error, static files, streamed responses, server-sent events and a graceful stop are in the guide. **[Read the http guide →](src/http/examples/README.md)**
 
-On a shared GitHub runner, 4 vCPUs of an AMD EPYC 7763, a server on zio with four executors, loaded by clients in the same process, answers plain text at about 11 800 requests per second over one connection kept alive and 122 000 over 64, JSON out at 11 700 and 120 000, a JSON body in and JSON out at 11 800 and 116 000; the [guide's benchmark](src/http/examples/README.md#benchmark) shows the whole run, the spread across runs, and why one connection is faster on one executor.
-
 ## scheduler in a minute
 
 Declare a job, put it on its time, and let a worker run it. Here the jobs live in memory, in `scheduler.MemoryStore`, so the program needs no server:
@@ -494,6 +537,12 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 `--save` pins the commit it fetched, so your build doesn't change when `dev` moves on. For the latest release, **v0.11.0**, fetch `#v0.11.0` instead; other versions are on the [releases page](https://github.com/vkiryakov/zefir/releases), and a commit hash works too.
 
+A service also needs [zio](https://github.com/lalinsky/zio), the runtime it runs on; zio has no release for Zig 0.17 yet, so pin the commit that the guides name in their Installation, where their `build.zig` imports it too:
+
+```sh
+zig fetch --save git+https://github.com/lalinsky/zio#d15034f1a4d9ddaa42829aae8f7e02d37cd1093a
+```
+
 Then import the modules you need in your `build.zig`:
 
 ```zig
@@ -527,131 +576,7 @@ const zefir = @import("zefir"); // zefir.confy, zefir.core, ...
 
 ## Development
 
-```sh
-zig build test --summary all                                                     # run all tests
-zig build test-log --summary all                                                 # run one module's tests: test-core, test-log, …
-# check formatting, as CI does
-zig fmt --check build.zig build.zig.zon src tests examples \
-  --exclude tests/nats/zig-pkg --exclude tests/rpc-nats/zig-pkg \
-  --exclude tests/http/zig-pkg --exclude tests/mongo/zig-pkg --exclude tests/odm/zig-pkg \
-  --exclude tests/redis/zig-pkg --exclude tests/app/zig-pkg --exclude tests/scheduler/zig-pkg \
-  --exclude examples/rpc-custom-transport/zig-pkg --exclude examples/rpc-custom-transport/consumer/zig-pkg
-```
-
-CI tests a pull request only on the modules it affects. A change under `src/<module>/` runs the tests of that module, of every module that depends on it and of `zefir`; a change to `build.zig`, `build.zig.zon`, `src/zefir.zig` or `.github/` runs them all, and documentation outside `src/` runs none, except this README: its "rpc in a minute", "http in a minute" and "scheduler in a minute" are programs that the tests of rpc, of http and of scheduler check. Every push to `dev` and `main` tests all modules. The module graph for this is in `.github/scripts/affected-modules.sh`: a new module goes there as well as into `build.zig`.
-
-The end-to-end tests of nats run against real NATS servers in Docker, described by `docker-compose.yml` at the repository root. The tests are a package of their own in `tests/nats`, so zio, the runtime they use, never reaches zefir's users:
-
-```sh
-docker compose up -d --wait   # start the servers, from the repository root
-cd tests/nats
-zig build e2e                 # start the servers if needed, run the tests, then the examples
-zig build example-pub_sub     # run one example of src/nats/examples and show what it prints
-zig build stress              # the stress tests, in Debug and in ReleaseSafe
-zig build bench               # the benchmark, built with ReleaseFast
-zig build check               # build all of the above without running it; no servers needed
-zig build down                # stop the servers
-```
-
-`zig build down` also resets the servers when a run dies half way, say while a test holds one of them paused. Whenever CI tests nats, it builds this package on Linux, macOS and Windows and runs the end-to-end tests on Linux; a change to `tests/nats/` counts as a change to nats.
-
-The end-to-end tests of rpc-nats, with the examples of its guide, are a package of the same kind in `tests/rpc-nats`, against servers of the same `docker-compose.yml`:
-
-```sh
-cd tests/rpc-nats
-zig build e2e      # start the servers if needed, run the tests, then the examples, checking what they print against the guide
-zig build check    # build the tests and the examples without running them; no servers needed
-zig build down     # stop the servers
-```
-
-CI treats it as nats: whenever it tests rpc-nats, it builds the package on the three systems and runs it on Linux; a change to `tests/rpc-nats/` counts as a change to rpc-nats, and one to `docker-compose.yml` as a change to both.
-
-The end-to-end tests of http, with the service of its guide, are a package of the same kind in `tests/http`, on zio, and need no servers:
-
-```sh
-cd tests/http
-zig build e2e        # the end-to-end tests, then the service of the guide with its curl commands, checked against the guide
-zig build examples   # only the service of the guide and its check (Linux and macOS)
-zig build check      # build all of it without running it
-```
-
-Whenever CI tests http, it builds the package and runs its end-to-end tests on the three systems; a change to `tests/http/` counts as a change to http.
-
-The end-to-end tests of mongo, with the programs of its guide, are a package of the same kind in `tests/mongo`, against the mongod servers of the profile `mongo` of the same `docker-compose.yml`:
-
-```sh
-cd tests/mongo
-zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
-zig build stress     # the stress tests, in Debug and in ReleaseSafe
-zig build check      # build all of it without running it; no servers needed
-zig build down       # stop the servers
-```
-
-`MONGO_VERSION` picks the image, 9.0.4 by default: `MONGO_VERSION=7.0.45 zig build e2e`. Whenever CI tests mongo, it builds the package on the three systems and runs its end-to-end tests on Linux against 7.0, 8.0 and 9.0; a change to `tests/mongo/` or to `docker-compose.yml` counts as a change to mongo.
-
-The end-to-end tests of odm, with the programs of its guide, are a package of the same kind in `tests/odm`, against mongo-plain and mongo-auth of the same profile:
-
-```sh
-cd tests/odm
-zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
-zig build examples   # only the programs of the guide and their check
-zig build stress     # the stress tests, in Debug and in ReleaseSafe
-zig build check      # build all of it without running it; no servers needed
-zig build down       # stop the servers
-```
-
-The package stands on odm and on mongo, whose `OdmDriver` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 9.0; a change to `tests/odm/` or to `docker-compose.yml` counts as a change to odm.
-
-The end-to-end tests of scheduler, its stress tests and the programs of its guide that need mongod are a package of the same kind in `tests/scheduler`, against mongo-plain, mongo-stall and mongo-restart of the same profile:
-
-```sh
-cd tests/scheduler
-zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
-zig build examples   # only the programs of the guide and their check
-zig build stress     # the stress tests, in Debug and in ReleaseSafe
-zig build check      # build all of it without running it; no servers needed
-zig build down       # stop the servers
-```
-
-`MONGO_VERSION` picks the image, as in tests/mongo. The package stands on scheduler and on mongo, whose `SchedulerStore` it runs: whenever CI tests either of them, it builds the package on the three systems and runs its end-to-end tests on Linux against mongod 7.0 and 9.0; a change to `tests/scheduler/` or to `docker-compose.yml` counts as a change to scheduler.
-
-The end-to-end tests of redis, with the programs of its guide, are a package of the same kind in `tests/redis`, against the Redis and Valkey servers of the profile `redis` of the same `docker-compose.yml`:
-
-```sh
-cd tests/redis
-zig build e2e        # start the servers, run the tests, then the programs of the guide, checking their runs against the guide
-zig build stress     # the stress tests, in Debug and in ReleaseSafe
-zig build check      # build all of it without running it; no servers needed
-zig build down       # stop the servers
-```
-
-`REDIS_IMAGE` picks the image, redis:8.10.2 by default: `REDIS_IMAGE=valkey/valkey:9.1.2 zig build e2e`. Whenever CI tests redis, it builds the package on the three systems and runs its end-to-end tests on Linux against Redis 7.2, Redis 8.10 and Valkey 9.1; a change to `tests/redis/` or to `docker-compose.yml` counts as a change to redis.
-
-The end-to-end tests of zefir.App, with the shop of its guide, are a package of the same kind in `tests/app`, on zio:
-
-```sh
-cd tests/app
-zig build e2e        # the end-to-end tests, programs stopped by SIGTERM, then the shop of the guide with its curl commands, checked against the guide
-zig build examples   # only the shop of the guide and its check (Linux and macOS)
-zig build shop       # the shop with NATS and MongoDB, shop/, against the servers it starts in Docker
-zig build check      # build all of it without running it; no servers needed
-```
-
-Whenever CI tests zefir, it builds the package on the three systems and runs its end-to-end tests there; `zig build shop` runs on a developer's machine only. A change to `tests/app/` counts as a change to zefir.
-
-`examples/rpc-custom-transport` is a transport of rpc in a package of its own, the proof that one can be written outside zefir. Its `consumer/` builds it as an application does, against the zefir of this checkout, and CI runs it whenever it tests rpc; a change to the package counts as a change to rpc:
-
-```sh
-cd examples/rpc-custom-transport/consumer
-zig build test     # the conformance suite of rpc on the transport, its own tests, rpc.Server and rpc.Client over it
-```
-
-Branches:
-
-- `dev` — the default branch and the next version in progress: its `.version` in `build.zig.zon` is that version with `-dev`, such as `0.2.0-dev`. Every change lands here first, through a squash-merged pull request.
-- `feature/<name>` — new functionality; `chore/<name>` — docs, CI, tooling and other maintenance. Both are created from `dev` and merged back into it; a big feature goes in as several smaller pull requests.
-- `main` — releases only. A release is a pull request from `dev`, merged with a merge commit and tagged `vX.Y.Z`.
-- `hotfix/<name>` — an urgent fix for the latest release: created from `main`, merged into it as a patch release such as `v0.1.1`, and then brought to `dev` as well.
+[CONTRIBUTING.md](CONTRIBUTING.md) tells how to build and test Zefir itself, and how a change reaches a release.
 
 ## License
 

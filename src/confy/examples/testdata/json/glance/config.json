@@ -1,0 +1,19 @@
+{
+  "name": "zefir-demo",
+  "log_level": "debug",
+  "http": {
+    "port": 8080,
+    "timeout_s": 2.5,
+    "allowed_origins": ["https://app.example.com", "https://admin.example.com"]
+  },
+  "db": {
+    "url": "postgres://db.internal:5432/app",
+    "password": "change-me",
+    "replica_url": null,
+    "pool": { "size": 8 }
+  },
+  "upstreams": [
+    { "host": "10.0.0.1:9000", "weight": 3 },
+    { "host": "10.0.0.2:9000" }
+  ]
+}

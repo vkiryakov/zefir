@@ -75,11 +75,17 @@ test "rpc.Server and rpc.Client over the mailbox" {
 
     var found = try client.call(io, .root, api.UserApi.getUser, .{ .id = 1 }, .{});
     defer found.deinit();
-    try std.testing.expectEqualStrings("Ada", found.outcome.ok.name);
+    switch (found.outcome) {
+        .ok => |user| try std.testing.expectEqualStrings("Ada", user.name),
+        .failure => return error.TestUnexpectedResult,
+    }
 
     var missing = try client.call(io, .root, api.UserApi.getUser, .{ .id = 2 }, .{});
     defer missing.deinit();
-    try std.testing.expectEqualStrings("users.not_found", missing.outcome.failure.app_code);
+    switch (missing.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try std.testing.expectEqualStrings("users.not_found", failure.app_code),
+    }
 
     // Once the server stops, its queue is gone: the call surely did not run.
     try server.shutdown(io, far(io));

@@ -4,10 +4,9 @@
 //! field by field with `bson.Builder`; or a `bson.RawDocument`, bytes that
 //! are a document already. This program writes a customer of the shop in
 //! each form and prints the documents as Extended JSON, the text MongoDB's
-//! tools show them in. It needs no server: `zig build test-mongo` runs it.
+//! tools show them in. It needs zefir-mongo-bson only, and no server.
 
 const std = @import("std");
-const mongo = @import("mongo");
 const bson = @import("mongo-bson");
 
 const Status = enum { active, suspended };

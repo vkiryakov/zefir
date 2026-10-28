@@ -1,9 +1,37 @@
-# validator
+# zefir-validator: validation rules on Zig types
 
 **Validation rules declared on your structs.** Write the rules of each field
 next to the struct, check a value with one call, and get the first violation —
 its code, message and path — without allocating. A rule that does not fit its
 field is a compile error, not a surprise at run time.
+
+> [!IMPORTANT]
+> **Not implemented yet (TODO):**
+>
+> - **Recursive DTOs.** A struct that reaches itself through a slice, such as
+>   a comment with `replies: []const Comment`, cannot be checked when it or a
+>   type below it declares `field_rules` or `validateSelf`: the build stops
+>   with `recursive types are not supported`.
+> - **Unions, pointers, tuples and vectors** are not walked: rules,
+>   `validateSelf` or transforms below one are a compile error
+>   ([Nested structs and lists](#nested-structs-and-lists)).
+> - **Hash maps and other containers that hide their item type**, such as
+>   `std.HashMapUnmanaged` and `std.MultiArrayList`, are not walked, and
+>   nothing reports it: use slices in DTOs.
+> - **Unicode case.** `v.toLower` and `v.toUpper` change ASCII letters only,
+>   and `v.contains` has no search that ignores case.
+> - **Translations.** Default messages are English, with no catalogs: give
+>   the rules messages with `.withMessage`, or translate by `code`.
+> - **Conditional rules and groups.** A rule cannot depend on another field:
+>   write such a check in `validateSelf`. Rules have no groups either: every
+>   check uses all the rules of a type.
+> - **Regular expressions.** There is no pattern rule, since the Zig standard
+>   library has no regex engine: write `v.custom` with a matcher of your own.
+
+A whole program: it checks a sign-up against the rules of its struct and logs
+the first violation:
+
+**`src/main.zig`**
 
 ```zig
 const std = @import("std");
@@ -111,9 +139,9 @@ Rules by category: [Common](common.md) · [Numbers](numbers.md) · [Strings](str
 [Dates](dates.md) · [Lists](lists.md) ·
 [Coming from class-validator](class_validator.md)
 
-Examples that `zig build test` compiles and runs:
-[Getting started](getting_started.zig) · [validateSelf](validate_self.zig) · [withMessage](with_message.zig) · [DTO package test](dto_test.zig) ·
-[Names and transforms](names_and_transforms.zig) · [A codec by outside names](codec_test.zig)
+Whole examples, each with its run or its tests:
+[Getting started](#getting-started) · [validateSelf](#validateself-and-vfail) · [withMessage](#withmessage) · [DTO package test](#testing-a-dto-package) ·
+[Names and transforms](#a-talk-proposal-from-the-form-to-the-rules) · [A codec by outside names](#reading-and-writing-json-by-outside-names)
 
 ## How it works
 
@@ -165,31 +193,45 @@ zig fetch --save git+https://github.com/vkiryakov/zefir#dev
 
 This guide is on the `dev` branch, so the command fetches its latest commit; `--save` pins that commit. For the latest release, v0.11.0, fetch `#v0.11.0` instead.
 
-Then import the `zefir-validator` module in `build.zig`:
+Then import the `zefir-validator` module in `build.zig`. The example programs
+of this guide also log what they find with
+[zefir-log](../../log/examples/README.md), as text, one line per record, so
+this `build.zig` imports `zefir-log` too, and its `zig build test` runs the
+tests of `src/main.zig` and of the files it pulls in with
+`test { _ = @import("users.zig"); }`, such as those of
+[Testing a DTO package](#testing-a-dto-package):
 
 ```zig
-const zefir = b.dependency("zefir", .{
-    .target = target,
-    .optimize = optimize,
-});
+// build.zig of a program that checks its values
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "validator", .module = zefir.module("zefir-validator") },
-        },
-    }),
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "validator", .module = zefir.module("zefir-validator") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the program").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{ .root_module = exe.root_module });
+    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+}
 ```
 
-The validator works without other modules. The example programs of this guide
-also log what they find with [zefir-log](../../log/examples/README.md), as text,
-one line per record; to run them, import it too:
-`.{ .name = "log", .module = zefir.module("zefir-log") }`.
+The validator itself works without other modules: a program that does not
+log leaves out the line of `log`.
 
 > [!TIP]
 > validator is also part of the umbrella module: with `zefir.module("zefir")`
@@ -330,8 +372,18 @@ must be present is not optional, and there is no `required` rule. `""` is a
 value: `v.notEmpty` fails it.
 
 ```zig
+const Address = struct {
+    city: []const u8,
+    zip: []const u8,
+
+    pub const field_rules = .{
+        .city = v.notBlank,
+        .zip = .{ v.length(5, 5), v.digits },
+    };
+};
+
 const Checkout = struct {
-    billing: ?Address = null, // the Address of Getting started
+    billing: ?Address = null, // its rules run when it is there
     tip_percent: ?u8 = null,
     coupon: ?[]const u8 = null,
 
@@ -404,6 +456,10 @@ below that of their items. When one of them contains a type with rules or
 transforms, that is a compile error naming the field: nothing is skipped
 silently. `field_rules` and `validateSelf` belong on structs: on an enum, a
 union or an opaque type that the walk reaches, they are a compile error too.
+A struct that reaches itself through a slice, such as a comment with
+`replies: []const Comment`, stops the build as well when it or a type below
+it declares `field_rules` or `validateSelf`:
+`recursive types are not supported`.
 
 > [!NOTE]
 > Containers that hide their item type — `std.HashMapUnmanaged`,
@@ -413,15 +469,17 @@ union or an opaque type that the walk reaches, they are a compile error too.
 
 ### Reusing rules
 
-Rules are compile-time values, so a project declares its own once:
+Rules are compile-time values, so a project declares its own once, in a
+file of rules such as this `rules.zig`:
 
 ```zig
-// rules.zig
 const v = @import("validator");
 
 pub const quantity = .{ v.positive, v.max(1000) }; // a tuple
 pub const sku: v.Rule = v.notEmpty; // one rule
 ```
+
+A DTO imports the file and uses its rules as entries, or as parts of them:
 
 ```zig
 const v = @import("validator");
@@ -482,8 +540,8 @@ Both describe a field, like its rules, so they go into the same entry of
 
 1. **The outside name**, `v.rename("userName")`: what the field is called
    outside the program. Violations use it in their paths by themselves; JSON
-   keys use it only when your codec asks `v.fieldNamed` and `v.nameOf`
-   (`std.json` does not). At most one, and always first.
+   keys use it when a codec asks `v.fieldNamed` and `v.nameOf`, as the one of
+   zefir-http does (`std.json` does not). At most one, and always first.
 2. **Transforms**, such as `v.trim` and `v.toLower`: they bring the value to
    its normal form. They never reject it.
 3. **Rules**, as in [Declaring rules](#declaring-rules): they check the value
@@ -497,17 +555,23 @@ entries.
 > A JSON key takes it only when a codec asks for it with `v.fieldNamed` and
 > `v.nameOf`: `std.json` does not know it, so `std.json.parseFromSlice` still
 > looks for `user_name`. Transforms run only where `v.transform` is called.
-> No zefir module does either yet: your own codec and handler do, or
-> zefir-http's when it comes.
+> [zefir-http](../../http/examples/README.md#input) does both for every
+> request: `ctx.json(T)`, `ctx.query(T)` and its other input calls read the
+> fields by their outside names (`ctx.headers(T)` by the names of the
+> headers), run `v.transform`, then the rules, and its JSON responses go out
+> by the outside names too, after `v.transform`.
 
 What this means for your code:
 
-- **Transforms and rules** work on any struct, however it was filled: decode
-  with `std.json` as usual, then call `v.transform` and `v.checkAll`.
+- **In a zefir-http handler**, `ctx.json(T)` gives you the value already read
+  by the outside names, transformed and checked.
+- **Elsewhere**, transforms and rules work on any struct, however it was
+  filled: decode with `std.json` as usual, then call `v.transform` and
+  `v.checkAll`.
 - **Outside names** reach JSON only through a codec that asks the validator
-  for them:
+  for them, as the one of zefir-http does:
   [Reading and writing JSON by outside names](#reading-and-writing-json-by-outside-names)
-  shows one in 20 lines.
+  shows one of your own in 20 lines.
 
 With such a codec, a request goes through these steps, and only then does your
 code get the value:
@@ -685,6 +749,9 @@ this order:
 3. `v.check` or `v.checkAll`: the rules, on the normalized value;
 4. your code.
 
+In a handler of zefir-http, `ctx.json(T)` does steps 1 to 3; other code, such
+as a consumer of a queue, calls them itself.
+
 They are two calls because they need different things: `v.check` allocates
 nothing and reads a `*const` value; `v.transform` changes the value and may
 allocate. Nothing reminds you of step 2: without it the program compiles, and
@@ -710,8 +777,8 @@ already transformed, wherever it is written.
 
 - **Where it is used.** The paths of violations use it by themselves:
   `displayName`, `speakers[1].displayName`. A codec that asks `v.fieldNamed`
-  and `v.nameOf` reads and writes JSON keys by it
-  ([below](#reading-and-writing-json-by-outside-names)); `std.json` alone
+  and `v.nameOf`, such as the one of zefir-http, reads and writes JSON keys by
+  it ([below](#reading-and-writing-json-by-outside-names)); `std.json` alone
   keeps the Zig names. A field without `v.rename` is called outside as it is
   in Zig.
 - **The name** is 1 to 64 characters from `A-Z`, `a-z`, `0-9`, `_` and `-`,
@@ -739,21 +806,22 @@ panic in Debug, `validation.invalid` in the other modes.
 ### Reading and writing JSON by outside names
 
 `v.rename` reaches JSON only through a codec: the code that reads a struct
-from JSON, a query string or a form and writes it back. The codec takes the
-outside names from the validator with `v.nameOf` and `v.fieldNamed`:
+from JSON, a query string or a form and writes it back.
+[zefir-http](../../http/examples/README.md#input) has one for its requests
+and responses. For JSON that comes from elsewhere, a codec of your own takes
+the outside names from the validator with two functions:
 
-```zig
-pub fn nameOf(comptime T: type, comptime field: std.meta.FieldEnum(T)) []const u8
-pub fn fieldNamed(comptime T: type, name: []const u8) ?std.meta.FieldEnum(T)
-```
-
-- `v.nameOf(T, .tracking_number)` is `"trackingNumber"`: the name that the
-  entry gives the field with `v.rename`, or else its Zig name. It works for any
-  struct, with `field_rules` or without, and it is known at compile time.
+- `v.nameOf(T, field)` takes a struct type and a tag of
+  `std.meta.FieldEnum(T)`, both known at compile time, and returns the
+  field's outside name, a `[]const u8`: `v.nameOf(T, .tracking_number)` is
+  `"trackingNumber"`, the name that the entry gives the field with
+  `v.rename`, or else its Zig name. It works for any struct, with
+  `field_rules` or without.
 - `v.fieldNamed(T, key)` goes the other way, for the keys that a decoder
-  reads: the field, or `null` for a key that names none. It works at run time,
-  from a table built at compile time. A renamed field is found by its outside
-  name only, never by its Zig name.
+  reads: it takes a `[]const u8` and returns the field, a
+  `?std.meta.FieldEnum(T)`, or `null` for a key that names none. It works at
+  run time, from a table built at compile time. A renamed field is found by
+  its outside name only, never by its Zig name.
 
 This test shows a small codec of your own:
 
@@ -763,6 +831,8 @@ This test shows a small codec of your own:
   `v.fieldNamed`, and lets std.json fill the struct.
 - **`encode`** writes the outside names, from `v.nameOf`.
 - In between, the event goes through `v.transform` and `v.check`.
+
+**`src/parcel_events.zig`**
 
 ```zig
 const std = @import("std");
@@ -902,12 +972,9 @@ What each of them allocates is in [Memory](#memory).
 ### v.transformWith
 
 `v.transformWith(f)` runs a function of your own. `f` takes the allocator and
-the value and returns the new value:
-
-```zig
-fn (allocator: std.mem.Allocator, value: T) E!T // or, when it cannot fail:
-fn (allocator: std.mem.Allocator, value: T) T
-```
+the value and returns the new value: it is a
+`fn (allocator: std.mem.Allocator, value: T) E!T`, or a
+`fn (allocator: std.mem.Allocator, value: T) T` when it cannot fail.
 
 `T` is exactly the field type without `?`, and inside `v.each` the item type
 without `?`. Any type works, not only strings: on a `u32` field,
@@ -943,8 +1010,19 @@ fn sortTags(allocator: std.mem.Allocator, tags: []const []const u8) std.mem.Allo
     return copy;
 }
 
-// .tags = .{ v.transformWith(sortTags), v.maxItems(5), v.each(.{ v.trim, v.toLower }) },
+const Post = struct {
+    tags: []const []const u8,
+
+    pub const field_rules = .{
+        .tags = .{ v.transformWith(sortTags), v.maxItems(5), v.each(.{ v.trim, v.toLower }) },
+    };
+};
 ```
+
+`.{ .tags = &.{ " zig", "Ada" } }` becomes `.{ .tags = &.{ "ada", "zig" } }`:
+sorted before the transforms of its items, `" zig"` would have stayed first,
+since a space sorts before a letter. A list whose items are already trimmed,
+lowercased and sorted stays the same slice: nothing is copied.
 
 When `f` fails:
 
@@ -959,7 +1037,9 @@ When `f` fails:
   `fn toCents(_: std.mem.Allocator, euros: u32) error{Overflow}!u32` would add
   `Overflow`.
 
-The handler decides what each error means:
+So the handler of an order whose `amount` has `v.transformWith(toCents)`
+decides what each error means, and its `switch` compiles only while it names
+every error of the set:
 
 ```zig
 v.transform(arena.allocator(), &order) catch |err| switch (err) {
@@ -1082,12 +1162,12 @@ mistake, and a program calls `v.transform` on each:
 
 ```zig
 // Speaker: a transform after a rule
-.email = .{ v.email, v.trim },
+.email = .{ v.email, v.trim }, // compile error: transforms must come before the rules
 // TalkProposal: a string transform on a u16
-.duration_minutes = .{ v.rename("durationMinutes"), v.trim },
+.duration_minutes = .{ v.rename("durationMinutes"), v.trim }, // compile error: trim expects a string
 // Reviewer: two fields with one outside name
-.display_name = v.rename("displayName"),
-.login = v.rename("displayName"),
+.display_name = v.rename("displayName"), // compile error: display_name and login are both named "displayName" outside
+.login = v.rename("displayName"), // compile error: both are named "displayName" outside
 ```
 
 The build stops at the first mistake (paths and line numbers shortened, the
@@ -1142,7 +1222,10 @@ How to read them:
 
 ## validateSelf and v.fail
 
-A check across fields goes into `pub fn validateSelf(self: *const T) ?v.Violation`:
+A check across fields goes into `pub fn validateSelf(self: *const T) ?v.Violation`.
+This program checks the bookings of a trip and logs every violation:
+
+**`src/main.zig`**
 
 ```zig
 const std = @import("std");
@@ -1261,12 +1344,10 @@ name — and a malformed one is a programmer error:
 
 ## v.custom
 
-```zig
-pub fn custom(comptime code: []const u8, comptime message: []const u8, comptime f: anytype) v.Rule
-```
-
-A rule with your own predicate: it passes when `f` returns `true`; otherwise the
-violation has your code and message.
+`v.custom(code, message, f)` is a rule with your own predicate: it passes when
+`f` returns `true`; otherwise the violation has your code and message. All
+three are known at compile time, `code` and `message` as strings and `f` as a
+function, and the call returns a `v.Rule`, like any built-in rule.
 
 ```zig
 fn startsWithAt(s: []const u8) bool {
@@ -1364,14 +1445,15 @@ chooses the singular or the plural (`must have at least 1 item`,
 
 ### .withMessage
 
-```zig
-pub fn withMessage(comptime rule: v.Rule, comptime template: []const u8) v.Rule
-```
+`rule.withMessage(template)`, a method of `v.Rule`, returns a copy of the rule
+with another message; the code stays. The template is a `[]const u8` that must
+be known at compile time (a literal, a `const`, or `++` of them): the compiler
+fills in the placeholders, and the rule keeps the result as a static string.
 
-`rule.withMessage(template)` returns a copy of the rule with another message;
-the code stays. The template must be known at compile time (a literal, a
-`const`, or `++` of them): the compiler fills in the placeholders, and the rule
-keeps the result as a static string.
+This program gives the rules of a profile messages of their own and logs
+every violation:
+
+**`src/main.zig`**
 
 ```zig
 const std = @import("std");
@@ -1638,41 +1720,43 @@ never sees a NaN, nor `v.maxLength` invalid UTF-8.
 
 ### v.Violation
 
-```zig
-pub const Violation = struct {
-    code: []const u8,
-    message: []const u8,
-    field: ?[]const u8 = null,
-};
-```
+A violation is a `v.Violation`, a struct of three fields:
 
-- `code`: `validation.<kind>` for a built-in rule (`validation.not_empty`), a
-  precondition's code (`validation.finite`), `validation.invalid` for a
-  malformed `validateSelf` result outside Debug builds, or the `code` of
-  `v.custom` and `v.fail`. Codes are part of the [compatibility](#compatibility)
-  contract: branch on them, send them to clients, translate by them.
-- `message`: what the value must be, without the field name: a built-in English
-  message such as `must not be empty`, or your own from `.withMessage`,
-  `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
-- `field`: the path of the value from the root: `email`, `address.city`,
-  `items[2].name`, `[1].email` for a slice root. Fields appear by their
-  outside names: `speakers[1].displayName` for a field renamed with
-  `v.rename("displayName")`. `null` means the root value itself or, for `check`
-  only, a path that did not fit `path_buf`. In the result of `v.fail` or a
-  hand-built `validateSelf` result, it is the Zig name of a field of that
-  struct instead (`display_name`), which the walk turns into the field's path.
+- `code: []const u8`: `validation.<kind>` for a built-in rule
+  (`validation.not_empty`), a precondition's code (`validation.finite`),
+  `validation.invalid` for a malformed `validateSelf` result outside Debug
+  builds, or the `code` of `v.custom` and `v.fail`. Codes are part of the
+  [compatibility](#compatibility) contract: branch on them, send them to
+  clients, translate by them.
+- `message: []const u8`: what the value must be, without the field name: a
+  built-in English message such as `must not be empty`, or your own from
+  `.withMessage`, `v.custom` or `v.fail`. Always 1-512 bytes of valid UTF-8.
+- `field: ?[]const u8 = null`: the path of the value from the root: `email`,
+  `address.city`, `items[2].name`, `[1].email` for a slice root. Fields
+  appear by their outside names: `speakers[1].displayName` for a field
+  renamed with `v.rename("displayName")`. `null` means the root value itself
+  or, for `check` only, a path that did not fit `path_buf`. In the result of
+  `v.fail` or a hand-built `validateSelf` result, it is the Zig name of a
+  field of that struct instead (`display_name`), which the walk turns into
+  the field's path.
+
+A violation from a built-in rule, `v.custom` or `v.fail` never contains the
+checked value, so it is safe to log and to send to a client as it is. A
+hand-built `validateSelf` result is safe only when its `code` and `message` are
+static strings (see the warning in [validateSelf and v.fail](#validateself-and-vfail)).
 
 ### v.check
 
-```zig
-pub fn check(value: anytype, path_buf: []u8) ?v.Violation
-```
+`v.check(value, path_buf)` takes a pointer to the value (`anytype`) and the
+room for the path (`[]u8`), and returns `?v.Violation`. The program at the top
+of this guide calls it so:
 
 ```zig
+// v.check allocates no memory, so it needs room from you to write the path
+// of the field that failed, such as "seats"; violation.field points into it.
 var path_buf: [256]u8 = undefined;
 if (v.check(&request, &path_buf)) |violation| {
-    // violation.code, violation.message, violation.field: ?[]const u8
-    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+    logger.warn("Invalid sign-up", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
 ```
 
@@ -1692,23 +1776,25 @@ if (v.check(&request, &path_buf)) |violation| {
 
 ### v.checkAll and Report
 
-```zig
-pub fn checkAll(gpa: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!v.Report
-```
+`v.checkAll(gpa, value)` takes an allocator (`std.mem.Allocator`) and a
+pointer to the value, and returns a `v.Report`, or `error.OutOfMemory`. A
+report holds `violations: []const v.Violation` and `truncated: bool`. The
+program of [validateSelf and v.fail](#validateself-and-vfail) logs them all:
 
 ```zig
-const report = try v.checkAll(gpa, &request);
+const report = try v.checkAll(init.gpa, &trip);
 defer report.deinit();
 for (report.violations) |violation| {
-    logger.warn("Invalid request", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
+    logger.warn("Invalid trip", .{ .field = violation.field, .code = violation.code, .reason = violation.message });
 }
-if (report.truncated) logger.warn("More violations not reported", .{ .reported = report.violations.len });
 ```
 
 - `violations` are in walk order, at most one per value and at most 100
   (`v.max_report_violations`) in all; `truncated` is `true` exactly when there
-  was a 101st. The first violation equals the result of `check` (its `field`
-  too, when the path fits `path_buf`).
+  was a 101st: a program that logs the violations or sends them to a client
+  should then say that there were more, for example with one more record
+  when `report.truncated` is true. The first violation equals the result of
+  `check` (its `field` too, when the path fits `path_buf`).
 - The report owns its memory, like `std.json.Parsed`: one arena from `gpa`
   holds the list and every path, and paths have no length limit. Call `deinit`
   exactly once after every successful call, even for a valid value. After it
@@ -1725,27 +1811,6 @@ values at once, the same value included, when:
 - no thread changes the value during a call;
 - a `gpa` shared by `checkAll` calls on several threads is thread-safe;
 - `v.custom` functions and `validateSelf` are pure, as they must be anyway.
-
-### Violation
-
-```zig
-pub const Violation = struct {
-    code: []const u8,
-    message: []const u8,
-    field: ?[]const u8 = null,
-};
-```
-
-| Field | Content |
-| --- | --- |
-| `code` | `validation.<rule>` for a built-in rule (`validation.not_empty`); your code for `v.custom` and `v.fail`; `validation.finite` for NaN or an infinity in a float field; `validation.invalid` for a malformed `validateSelf` result outside Debug |
-| `message` | the rule's default message (`must not be empty`) or yours: 1-512 bytes of UTF-8, never containing the value (a default message has no field name either) |
-| `field` | the path of the value from the root, by the outside names of the fields (`email`, `address.city`, `items[2].name`, `[1].email`, `speakers[1].displayName`); `null` for the root itself |
-
-A violation from a built-in rule, `v.custom` or `v.fail` never contains the
-checked value, so it is safe to log and to send to a client as it is. A
-hand-built `validateSelf` result is safe only when its `code` and `message` are
-static strings (see the warning in [validateSelf and v.fail](#validateself-and-vfail)).
 
 ### Paths
 
@@ -1793,6 +1858,10 @@ of `v.check` and `v.transform` for `T` and every type below it, outside names,
 transforms and the bodies of `validateSelf` included, and does nothing at run
 time.
 
+A file of DTOs with both tests, `v.assertRules` and a value that must fail:
+
+**`src/users.zig`**
+
 ```zig
 const std = @import("std");
 const v = @import("validator");
@@ -1828,7 +1897,7 @@ test "CreateUserRequest rejects an invalid email" {
     const bad: CreateUserRequest = .{ .email = "ada.example.com", .name = "Ada", .birthday = "1990-12-10", .roles = &.{.admin} };
     const violation = v.check(&bad, &path_buf) orelse return error.NoViolation;
     try std.testing.expectEqualStrings("validation.email", violation.code);
-    try std.testing.expectEqualStrings("email", violation.field.?);
+    try std.testing.expectEqualStrings("email", violation.field orelse return error.NoField);
 }
 ```
 
@@ -1846,19 +1915,28 @@ test "CreateUserRequest rejects an invalid email" {
   the loop: `inline for (.{ CreateUserRequest, User }) |Dto| comptime v.assertRules(Dto);`.
 - `assertRules` cannot see a private `field_rules` and does not run the rules.
   The second test, a value that must fail, catches both.
-- For a DTO with transforms, a test of a value runs `v.transform` before
-  `v.check`, as a handler does:
 
-  ```zig
-  test "SignUp accepts an email with spaces around it" {
-      var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-      defer arena.deinit();
-      var req: SignUp = .{ .email = " Ada@Example.COM " }; // .email = .{ v.trim, v.toLower, v.email }
-      try v.transform(arena.allocator(), &req);
-      var path_buf: [256]u8 = undefined;
-      try std.testing.expectEqual(null, v.check(&req, &path_buf));
-  }
-  ```
+For a DTO with transforms, a test of a value runs `v.transform` before
+`v.check`, as a handler does:
+
+```zig
+const SignUp = struct {
+    email: []const u8,
+
+    pub const field_rules = .{
+        .email = .{ v.trim, v.toLower, v.email },
+    };
+};
+
+test "SignUp accepts an email with spaces around it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var req: SignUp = .{ .email = " Ada@Example.COM " };
+    try v.transform(arena.allocator(), &req);
+    var path_buf: [256]u8 = undefined;
+    try std.testing.expectEqual(null, v.check(&req, &path_buf));
+}
+```
 
 ## Compile errors
 
@@ -1985,8 +2063,8 @@ The limits are `comptime_int` constants and part of the contract (see below).
 
 Every rule by category, with an example of its entry in `field_rules`. Each
 heading links to the page of its category, and each rule to its section on that
-page. [all_rules.zig](all_rules.zig) declares every example, so
-`zig build test` compiles them all.
+page. Every example is an entry of a struct that compiles, so each one is
+written as it works.
 
 [Common](#common) · [Numbers](#numbers) · [Lists](#lists) · [Custom](#custom) ·
 [Strings](#strings) · [Formats](#formats) · [Encodings](#encodings) ·
@@ -2027,7 +2105,7 @@ page. [all_rules.zig](all_rules.zig) declares every example, so
 | [`v.uniqueBy(.key)`](lists.md#vuniquebykey) | `.lines = .{ v.maxItems(50), v.uniqueBy(.sku) }` | no two struct items of a slice or an array have equal values of the field `key` | `validation.unique_items` |
 | [`v.containsAll(.{ ... })`](lists.md#vcontainsallvalues) | `.scopes = v.containsAll(.{"openid"})` | every listed value is an item of a slice or an array | `validation.contains_all` |
 | [`v.containsNone(.{ ... })`](lists.md#vcontainsnonevalues) | `.roles = v.containsNone(.{.owner})` | no item of a slice or an array is a listed value | `validation.contains_none` |
-| [`v.each(rules)`](lists.md#veachrules) | `.emails = v.each(v.email)` | the rules of every item of a slice or an array | the inner rule's code |
+| [`v.each(rules)`](lists.md#veachrules) | `.emails = v.each(v.email)` | the transforms and the rules of every item of a slice or an array | the inner rule's code |
 
 ### [Custom](#vcustom)
 

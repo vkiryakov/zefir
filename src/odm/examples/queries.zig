@@ -3,7 +3,7 @@
 //! the raw paths, on the users of models.zig. odm writes each typed call as
 //! BSON and hands it to the driver; here the driver is
 //! `odm.testing.FakeDriver`, and the program prints what it got, as
-//! Extended JSON. `zig build test-odm` runs it.
+//! Extended JSON.
 
 const std = @import("std");
 const core = @import("core");

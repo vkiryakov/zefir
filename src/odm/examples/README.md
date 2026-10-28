@@ -1,14 +1,4 @@
-# odm
-
-> [!WARNING]
-> **No TLS yet: use it only in a network you trust.** odm reaches
-> MongoDB through zefir-mongo, which speaks plain TCP. SCRAM, the way it
-> logs in, never sends a password, but the commands and the documents of
-> every tenant travel unencrypted. Keep mongod and the service in a closed
-> network, the servers of tenants with servers of their own too, and give
-> each connection a user of its own with a long random password; across a
-> network you do not trust, use a tunnel: WireGuard, SSH or a service
-> mesh.
+# zefir-odm: a typed ODM for MongoDB in Zig
 
 **A typed ODM for MongoDB, for Zig services with many tenants.** MongoDB
 keeps *documents*, records like JSON objects, in *collections*. An ODM, an
@@ -20,12 +10,22 @@ nothing at run time; and what a query finds comes back as that struct.
 One registry keeps the connections and the tenants of a service: each
 tenant has a database of its own, on a shared server or on a server of
 its own, tenants come and go while the service runs, and a connection
-changes its credentials without a failed request. It is written against
+moves to a second user without a failed request. It is written against
 `std.Io` only, runs on [zio](https://github.com/lalinsky/zio) in
 production, and reaches MongoDB through zefir-mongo.
 
+> [!WARNING]
+> **No TLS yet: use it only in a network you trust.** odm reaches
+> MongoDB through zefir-mongo, which speaks plain TCP. SCRAM, the way it
+> logs in, never sends a password, but the commands and the documents of
+> every tenant travel unencrypted. Keep mongod and the service in a closed
+> network, the servers of tenants with servers of their own too, and give
+> each connection a user of its own with a long random password; across a
+> network you do not trust, use a tunnel: WireGuard, SSH or a service
+> mesh.
+
 > [!IMPORTANT]
-> **Not in v1 (TODO):**
+> **Not implemented yet (TODO):**
 >
 > - **Replica sets and sharded clusters**, with their discovery of servers
 >   and failover: zefir-mongo connects to one standalone mongod.
@@ -61,7 +61,7 @@ production, and reaches MongoDB through zefir-mongo.
 >   it.
 > - **Histograms of durations, an exporter of metrics, a span per
 >   operation**: `stats()` takes snapshots.
-> - **A driver of another author as a package of its own, built by CI**:
+> - **A driver of another author as a package of its own**:
 >   `FakeDriver` is the second implementation of the contract.
 > - **`upsertOne` with conditions built at run time**, an `odm.Filter` or
 >   an `odm.Update`, or with `in`, `nin` or `all` in its filter: use
@@ -114,7 +114,8 @@ while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user
   binds each tenant to a connection and a database; tenants come and go
   by events with versions, while the service runs.
 - **Credentials that change on the fly.** A connection moves to a new
-  login, and its old generation drains: no request fails.
+  login, and its old generation drains: when that login is a second user,
+  no request fails, see [Rotating credentials](#rotating-credentials).
 - **Errors that say whether to retry.** Each says whether the server may
   have run the call; the details are in the diagnostics of the session.
 - **Tests without MongoDB.** `odm.testing.FakeDriver` answers what a test
@@ -142,15 +143,15 @@ while (try adults.next(io, ctx, arena)) |user| app.info("Adult", .{ .name = user
 - [Tests without MongoDB](#tests-without-mongodb)
 - [For authors of drivers](#for-authors-of-drivers)
 
-Programs that `zig build e2e` in `tests/odm` builds and runs against
-mongod, checking what they print against this guide:
-[quick start](quick_start.zig) · [tenants](tenants.zig) ·
-[rotation](rotation.zig) · [errors](errors.zig).
-Programs that `zig build test-odm` runs without a server:
-[models](models.zig) · [queries](queries.zig) · [under App](app.zig).
-Tests that it runs:
-[the tests of an application](users_test.zig) ·
-[the conformance suite](conformance_test.zig).
+Every example of this guide is shown whole, and every program with what
+it printed. Programs against mongod:
+[quick start](#quick-start) · [tenants](#tenants) ·
+[rotation](#rotating-credentials) · [errors](#errors-and-what-is-safe-to-retry).
+Programs without a server:
+[models](#models) · [queries](#reading-and-changing-documents) · [under App](#under-zefirapp).
+Tests:
+[the tests of an application](#tests-without-mongodb) ·
+[the conformance suite](#for-authors-of-drivers).
 
 ## What an ODM is
 
@@ -220,29 +221,35 @@ records and core for deadlines:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "odm", .module = zefir.module("zefir-odm") },
-            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
-            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
-            .{ .name = "validator", .module = zefir.module("zefir-validator") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "odm", .module = zefir.module("zefir-odm") },
+                .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+                .{ .name = "validator", .module = zefir.module("zefir-validator") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -251,7 +258,7 @@ b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
 > odm imports zefir-core, zefir-validator and zefir-mongo-bson, and no
 > driver: zefir-mongo imports odm, to implement its contract. A package
 > that only declares models, shared by several services, needs odm and
-> mongo-bson alone.
+> mongo-bson, and validator for `field_rules`.
 
 You need a mongod to talk to. With Docker:
 
@@ -261,9 +268,10 @@ docker run --rm -p 27017:27017 mongo:9.0.4
 
 ## Quick start
 
-The customers of the shop of one tenant, acme. The program connects,
-makes the e-mail of a customer unique, signs four customers up, finds the
-adults, gives one a birthday, lets one go, and counts the adults again:
+The customers of the shop of one tenant, acme. The program,
+`quick_start.zig`, connects, makes the e-mail of a customer unique, signs
+four customers up, finds the adults, gives one a birthday, lets one go,
+and counts the adults again:
 
 ```zig
 //! The quick start of the guide: the customers of a shop, for the tenant
@@ -499,8 +507,7 @@ the text form of BSON that MongoDB's tools show:
 //! and `field_rules`, the rules of zefir-validator. The program hands odm
 //! `odm.testing.FakeDriver`, a driver that runs no query and keeps a
 //! journal of what odm sent it, and prints those documents as Extended
-//! JSON, the text MongoDB's tools show them in. `zig build test-odm` runs
-//! it.
+//! JSON, the text MongoDB's tools show them in.
 
 const std = @import("std");
 const core = @import("core");
@@ -738,12 +745,14 @@ and for each new tenant, whose database starts empty, see
 ### Optionals and null
 
 MongoDB has two ways to say "no value": a field that is null, and no
-field at all. odm keeps one of them: **it never writes a null.**
+field at all. odm keeps one of them: **it never writes a null for an
+optional.**
 
 - **Writing.** An optional that is null stays out of the document, at any
   depth: Ann has no `nickname` and no `profile`, and Bob's `profile` has
   no `site`. A null item of a list, `[]const ?E`, stays: it is an item,
-  not a field.
+  not a field. A `bson.Null` field, or a `bson.Value` that holds null, is
+  written as null: it is a value, not an optional.
 - **Reading.** A field that is not there reads as its default: the `age`
   of Cy is 0. An optional that is not there reads as null, and so does a
   null that another program wrote, as Cy's `nickname`. A required field
@@ -760,11 +769,11 @@ field at all. odm keeps one of them: **it never writes a null.**
   one of them, and the required key is in every document: the documents
   without the optional are in it with null, and two of them collide on
   the other keys, such as two users of one shop without a nickname under
-  `.{ .shop = .asc }, .{ .nickname = .asc }`. Partial indexes are not in
-  v1 (see the list at the top): keep such a uniqueness on optional keys
-  only, or check it in the application. A null that another program
-  wrote is in a sparse index too, so two such documents collide even in
-  a unique sparse index of one key.
+  `.{ .shop = .asc }, .{ .nickname = .asc }`. Partial indexes are not
+  implemented yet (see the TODO list at the top): keep such a uniqueness
+  on optional keys only, or check it in the application. A null that
+  another program wrote is in a sparse index too, so two such documents
+  collide even in a unique sparse index of one key.
 - **Filters and updates** follow from it: `.nickname = null` finds both
   kinds, and an update clears a field with `unset`, see
   [null and missing fields](#null-and-missing-fields).
@@ -774,7 +783,7 @@ field at all. odm keeps one of them: **it never writes a null.**
 | Zig | BSON |
 |---|---|
 | `bool` | boolean |
-| `i8`–`i32`, `u8`–`u16` | int32 |
+| `i8`–`i32`, `u8`–`u31` | int32 |
 | `i33`–`i64`, `u32`–`u63` | int64 |
 | `f64` | double |
 | `[]const u8` | string, in UTF-8 |
@@ -782,7 +791,7 @@ field at all. odm keeps one of them: **it never writes a null.**
 | a struct | document |
 | `[]const T`, `[N]T` | array |
 | `?T` | the value, or no field |
-| `bson.ObjectId`, `bson.DateTime`, `bson.Timestamp`, `bson.Binary`, `bson.Decimal128`, `bson.Regex`, `bson.RawDocument`, `bson.Value` | their own types |
+| `bson.ObjectId`, `bson.DateTime`, `bson.Timestamp`, `bson.Binary`, `bson.Decimal128`, `bson.Regex`, `bson.Null`, `bson.MinKey`, `bson.MaxKey`, `bson.RawDocument`, `bson.Value` | their own types |
 
 The compiler refuses the rest: `u64` and `usize`, as the integers of BSON
 are signed; `f32`, which a double would round; unions, pointers, `??T`,
@@ -862,7 +871,7 @@ each kind, and prints what odm sent for it:
 //! the raw paths, on the users of models.zig. odm writes each typed call as
 //! BSON and hands it to the driver; here the driver is
 //! `odm.testing.FakeDriver`, and the program prints what it got, as
-//! Extended JSON. `zig build test-odm` runs it.
+//! Extended JSON.
 
 const std = @import("std");
 const core = @import("core");
@@ -1256,7 +1265,8 @@ changes:
   `push`, `add_to_set`, `pull` and `pop` would change its length, and the
   model would not read the document again, so they do not compile.
 - **One update changes a path once**, as MongoDB refuses two changes of
-  one path, or of a struct and its field:
+  one path, or of a struct and its field, so a second change does not
+  compile:
 
   ```text
   // .{ .push = .{ .tags = "vip" }, .pull = .{ .tags = "student" } }
@@ -1351,7 +1361,7 @@ fn search(users: odm.Collection(User), io: std.Io, ctx: core.Context, arena: std
   in the query, and `execute` returns it: the chain needs no `try`
   between its steps.
 - The query is sent only by `execute`, `executeAs`, `first` and `count`,
-  as the line `search` shows: two conditions of the four, in an `$and`.
+  as the line `search` shows: two conditions of the three, in an `$and`.
 
 Changes work the same way: `odm.Update(User).init(arena).with(…)` adds
 the operators of a literal, and two `with` of `set` make one `$set`. On
@@ -2010,7 +2020,7 @@ $ APP_MONGO_SERVER=127.0.0.1:27018 APP_ADMIN_URI=mongodb://admin@127.0.0.1:27018
 2026-10-22T14:53:12.823Z INFO  [app] Rotated user=shop_a generation=3
 2026-10-22T14:53:13.421Z INFO  [app] Requests during the rotations made=200 failed=0
 2026-10-22T14:53:13.421Z INFO  [app] The same rotation again generation=3
-2026-10-22T14:53:13.453Z WARN  [mongo] 127.0.0.1:27118 refused a connection: AuthenticationFailed: Authentication failed.
+2026-10-22T14:53:13.453Z WARN  [mongo] 127.0.0.1:27018 refused a connection: AuthenticationFailed: Authentication failed.
 2026-10-22T14:53:13.453Z WARN  [odm] connection main: connect failed: AuthenticationFailed: Authentication failed.
 2026-10-22T14:53:13.453Z WARN  [app] Not rotated reason=AuthenticationFailed details="Authentication failed." generation=3
 2026-10-22T14:53:13.454Z INFO  [app] Done leases=0 forced=0
@@ -2022,9 +2032,7 @@ calls `replaceConnection` with its URI and password; once the call
 returned, the old generation is closed, and the secrets system drops the
 first user. Until then both users log in: the old generation may still
 open network connections, as its pool needs them, and they still get in.
-So no request fails: 200 here, with two rotations, there and back. The
-end-to-end tests of odm make about 5 500 calls of 16 tasks through three
-rotations, and none fails.
+So no request fails: 200 here, with two rotations, there and back.
 
 **Not a new password of the same user.** When the secrets system changes
 the password of the user in place, the server refuses the old password to
@@ -2033,14 +2041,12 @@ its calls until it drains, and opens a new connection when its pool needs
 one: under a growing load, after `maxIdleTimeMS`, after a connection
 broke. Its first refused login clears its pool and pauses it, so its calls
 get `AuthenticationFailed`, and the ones after `Unavailable`, until
-`replaceConnection` returns. In the end-to-end test of this case, with
-idle connections closed after 50 ms, each run saw about 3
-`AuthenticationFailed` and 50 `Unavailable` in that window, and no error
-after it. How many calls fall in the window depends on the load, so no
-test promises a number for it. The other order fails too: while the
-server does not know the new password, the new generation cannot log in,
-and the replacement rolls back, as the last part of `rotation.zig` shows:
-the driver's warning, the registry's, and generation 3 kept.
+`replaceConnection` returns; after it, no call fails. How many calls
+fall in that window depends on the load. The other order fails too:
+while the server does not know the new password, the new generation
+cannot log in, and the replacement rolls back, as the last part of
+`rotation.zig` shows: the driver's warning, the registry's, and
+generation 3 kept.
 
 **The same event again changes nothing.** `replaceConnection` with the
 settings of the current generation succeeds without a new generation, so
@@ -2107,7 +2113,7 @@ change. odm makes no call twice by itself.
 | `IncompleteWrite` | may have run | a write of several batches stopped in the middle |
 | `ProtocolViolation` | may have run | the reply broke MongoDB's protocol |
 | `CommandFailed` | may have run | the server answered `ok: 0`; its code is in the diagnostics |
-| `DuplicateKey` | may have run | a unique index refused a document: code 11000; the documents before it went in |
+| `DuplicateKey` | may have run | a unique index refused a document: code 11000, 11001 or 12582; the documents before it went in |
 | `WriteFailed` | may have run | the server refused a document for another reason |
 | `InvalidBson`, `DecodeFailed` | may have run | a document of the server is broken, or does not fit the model |
 | `OutOfMemory` | may have run | always: where it ran out is unknown |
@@ -2431,9 +2437,9 @@ its `init` makes no call to the network and starts no task,
 guides of the modules write App `core.App`: it is `zefir.App` of the
 umbrella module.
 
-The module below declares what App builds: the driver, the registry,
-which the factory `Odm.registry` makes on it, and `Tenants`, the bean of
-the service that binds its tenants in its `start`:
+The module below, `app.zig`, declares what App builds: the driver, the
+registry, which the factory `Odm.registry` makes on it, and `Tenants`,
+the bean of the service that binds its tenants in its `start`:
 
 ```zig
 //! The registry under zefir.App, without a server: a module declares the
@@ -2442,7 +2448,7 @@ the service that binds its tenants in its `start`:
 //! the order of their dependencies, starts the tenants, and at the stop
 //! shuts the registry down within its deadline, then frees it. The driver
 //! is `odm.testing.FakeDriver`, which runs no query; a service declares
-//! `mongo.OdmDriver` in its place. `zig build test-odm` runs it.
+//! `mongo.OdmDriver` in its place.
 
 const std = @import("std");
 const core = @import("core");
@@ -2661,7 +2667,7 @@ to the deadline a call is `DeadlineExceeded`, with a canceled token
 `Closed`.
 
 The users of the shop, as an application keeps them, on the `User` of
-[models.zig](#models):
+[models.zig](#models), in `Users.zig`:
 
 ```zig
 //! The users of a shop, as the application keeps them: a sign-up, which a
@@ -2728,7 +2734,7 @@ pub fn rename(users: Users, io: std.Io, ctx: core.Context, id: bson.ObjectId, na
 }
 ```
 
-And their tests:
+And their tests, `users_test.zig`:
 
 ```zig
 //! Tests of the users of the shop without MongoDB. Each runs `Users` on a
@@ -2943,7 +2949,6 @@ test "rename says whether the user was there" {
   with a panic.
 - The first test checks every model of the shop with `odm.assertModel`,
   as the compiler checks only the code that is used.
-- `zig build test-odm` runs these tests, in the build of zefir.
 
 ## For authors of drivers
 
@@ -2970,8 +2975,8 @@ what to write:
 error: odm.Client.init: my_driver.Client has no method insert; expected pub fn insert(self: *@This(), io: std.Io, ctx: core.Context, request: *const odm.Client.InsertRequest, options: odm.Client.CallOptions) odm.DriverError!odm.Client.InsertResult
 ```
 
-The rules of the contract, which the header of `src/odm/driver.zig`
-holds in full:
+The rules of the contract, in short; the header of `src/odm/driver.zig`
+holds them in full:
 
 1. A client is called from any task at once; a cursor serves one task at
    a time.
@@ -3031,7 +3036,8 @@ that passes it is "zefir compatible":
 
 Group C checks the contract without data; group D needs a server that runs
 the queries. The author of a driver runs the suite in the tests of the
-driver's package, through a harness, as here for `FakeDriver`:
+driver's package, through a harness, as `conformance_test.zig` does here
+for `FakeDriver`:
 
 ```zig
 //! A driver is "zefir compatible" when it passes the conformance suite of
@@ -3121,5 +3127,5 @@ test "the driver is zefir compatible" {
   runs in a task of its own, within 60 s; `Options.time_scale` stretches
   the times for a slow machine, and `.data = false` leaves out group D.
 
-`mongo.OdmDriver` passes both groups against mongod in `tests/odm`, and
-`FakeDriver` group C in the build of zefir, in this test.
+`mongo.OdmDriver`, the reference driver, passes both groups against
+mongod; `FakeDriver` passes group C, in the test above.

@@ -1,4 +1,4 @@
-# Encodings and other formats
+# zefir-validator: Encodings and other formats
 
 Rules for strings that carry encoded data or a standard format: `v.json`,
 `v.jwt`, `v.base32`, `v.base58`, `v.base64` and `v.base64Url` check encodings,
@@ -8,6 +8,8 @@ language tags, `v.semVer` versions, and `v.hexColor`, `v.rgbColor` and
 code outside `field_rules`: `v.isJson(s)`, `v.isBase64(s)`, …
 
 ```zig
+const v = @import("validator");
+
 const Upload = struct {
     metadata: []const u8,
     content: []const u8,

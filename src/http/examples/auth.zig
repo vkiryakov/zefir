@@ -6,14 +6,12 @@
 //! `requirePermission` sit in the middleware of the controllers that need
 //! a user, and refuse the request with 401 and 403.
 //!
-//! ```zig
 //! // main: the server's middleware, for every request
 //! .middleware = .{ &token_auth },
 //! // a protected controller
 //! .middleware = .{ auth.requireUser, auth.requirePermission("todos") },
 //! // a handler
 //! const user = try ctx.local(auth.CurrentUser);
-//! ```
 //!
 //! A real service verifies a signed token (a JWT) or asks a store of
 //! sessions instead of a table; the shape of the middleware stays the same.

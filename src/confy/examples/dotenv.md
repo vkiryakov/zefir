@@ -1,4 +1,4 @@
-# .env files
+# zefir-confy: .env files
 
 A `.env` file holds environment variables, one `NAME=value` per line. It is the
 place for secrets and machine-specific values that never go into version
@@ -24,7 +24,7 @@ control, and for personal overrides of the shared configuration.
 
 ## At a glance
 
-**`main.zig`**
+The configuration struct of this page:
 
 ```zig
 const Config = struct {
@@ -45,7 +45,7 @@ const Config = struct {
 };
 ```
 
-**`.env`**
+A `.env` file that sets it, read with `.env_prefix = "APP_"`:
 
 ```sh
 APP_NAME=zefir-demo
@@ -190,7 +190,7 @@ That makes optional layers free to list:
 
 ```zig
 .sources = &.{
-    .env(".env"),       // shared by the team, without secrets
+    .env(".env"), // shared by the team, without secrets
     .env(".env.local"), // personal overrides, in .gitignore
 },
 ```
@@ -205,9 +205,7 @@ still a problem.
 ## Problems
 
 A line with a syntax error is skipped, and the rest of the file is still read.
-This file:
-
-**`.env`**
+This `.env` file:
 
 ```sh
 APP_NAME=zefir-demo

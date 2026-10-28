@@ -4,8 +4,7 @@
 //! and `field_rules`, the rules of zefir-validator. The program hands odm
 //! `odm.testing.FakeDriver`, a driver that runs no query and keeps a
 //! journal of what odm sent it, and prints those documents as Extended
-//! JSON, the text MongoDB's tools show them in. `zig build test-odm` runs
-//! it.
+//! JSON, the text MongoDB's tools show them in.
 
 const std = @import("std");
 const core = @import("core");

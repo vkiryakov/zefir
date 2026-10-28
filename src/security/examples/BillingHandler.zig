@@ -1,3 +1,4 @@
+// Application code (src/BillingHandler.zig of the billing service): zefir-security ships none of these.
 //! The handler of billing.v1: it charges an order to the caller, whom the
 //! authenticator found by the token. Every method needs a caller.
 

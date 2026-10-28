@@ -1,4 +1,4 @@
-# http
+# zefir-http: an HTTP server for Zig services
 
 **Web services and APIs in Zig, with routes the compiler checks.** A web
 service answers HTTP requests: a browser asks for a page, an app sends JSON
@@ -54,8 +54,8 @@ tests, the same server runs in memory.
 >   reconnects gets the events from then on, since the server keeps no
 >   history to send it the ones it missed.
 
-A whole program: a controller, a server, and three requests to it. The
-server runs on the backend in memory, `http.testing`, which needs no
+A whole program, `minute.zig`: a controller, a server, and three requests to
+it. The server runs on the backend in memory, `http.testing`, which needs no
 network; on the network, `http.native` takes its place, and the controller
 stays the same.
 
@@ -199,15 +199,7 @@ GET /api/v1/todos
 - [The OpenAPI document](#the-openapi-document)
 - [Tests](#tests)
 - [Limits and timeouts](#limits-and-timeouts)
-- [Benchmark](#benchmark)
 - [Stopping gracefully](#stopping-gracefully)
-
-`zig build test-http` builds and runs "http in a minute", the service
-under zefir.App and the tests of the example app, and checks them against
-this guide. The service runs on
-the network: in `tests/http`, `zig build examples` starts it, sends it every
-curl command of this guide, and checks each response, and the log of the
-service, against what the guide shows.
 
 ## The todo service
 
@@ -235,7 +227,7 @@ flowchart LR
 ```
 
 The files of the service, each shown whole in the chapter where it is
-explained:
+explained, but `openapi.json`, which the tests write from the code:
 
 | File | What is in it |
 | --- | --- |
@@ -253,6 +245,7 @@ explained:
 | `errors.zig` | the error handler |
 | `public/index.html` | the web page |
 | `todos_test.zig` | tests without a network |
+| `middleware_test.zig` | tests of its authentication and CORS on their own |
 | `openapi.json` | the OpenAPI document of the API, which the tests keep up to date |
 
 In a project of your own they live in `src/`, and `public/` and
@@ -342,54 +335,73 @@ module, as `zefir.openapi`. Its tests need no zio:
 
 ```zig
 // build.zig of the todo service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
-const imports: []const std.Build.Module.Import = &.{
-    .{ .name = "http", .module = zefir.module("zefir-http") },
-    .{ .name = "core", .module = zefir.module("zefir-core") },
-    .{ .name = "validator", .module = zefir.module("zefir-validator") },
-    .{ .name = "confy", .module = zefir.module("zefir-confy") },
-    .{ .name = "log", .module = zefir.module("zefir-log") },
-    .{ .name = "zefir", .module = zefir.module("zefir") },
-};
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "todo-service",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = imports,
-    }),
-});
-exe.root_module.addImport("zio", zio.module("zio"));
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "http", .module = zefir.module("zefir-http") },
+        .{ .name = "core", .module = zefir.module("zefir-core") },
+        .{ .name = "validator", .module = zefir.module("zefir-validator") },
+        .{ .name = "confy", .module = zefir.module("zefir-confy") },
+        .{ .name = "log", .module = zefir.module("zefir-log") },
+        .{ .name = "zefir", .module = zefir.module("zefir") },
+    };
 
-const tests = b.addTest(.{
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/todos_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = imports,
-    }),
-});
-// The tests find the page and openapi.json by the paths the build gives.
-const paths = b.addOptions();
-paths.addOptionPathUntracked("public_dir", b.path("public"));
-paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
-tests.root_module.addOptions("paths", paths);
-const run_tests = b.addRunArtifact(tests);
-// openapi.json is an input of the run: Zig runs the tests again when the
-// file changes, not only when the code does.
-run_tests.addFileInput(b.path("openapi.json"));
-b.step("test", "Run the tests").dependOn(&run_tests.step);
-// zig build openapi: the same tests, which then write openapi.json. It has
-// side effects, so it runs every time, never from the cache.
-const update = b.addRunArtifact(tests);
-update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
-update.has_side_effects = true;
-b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
+    const exe = b.addExecutable(.{
+        .name = "todo-service",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    exe.root_module.addImport("zio", zio.module("zio"));
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/todos_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    // The tests find the page and openapi.json by the paths the build
+    // gives.
+    const paths = b.addOptions();
+    paths.addOptionPathUntracked("public_dir", b.path("public"));
+    paths.addOptionPathUntracked("openapi_json", b.path("openapi.json"));
+    tests.root_module.addOptions("paths", paths);
+    const run_tests = b.addRunArtifact(tests);
+    // openapi.json is an input of the run: Zig runs the tests again when
+    // the file changes, not only when the code does.
+    run_tests.addFileInput(b.path("openapi.json"));
+    // The tests of the middleware on their own, which need no paths.
+    const middleware_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/middleware_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    const test_step = b.step("test", "Run the tests");
+    test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&b.addRunArtifact(middleware_tests).step);
+
+    // zig build openapi: the same tests, which then write openapi.json. It
+    // has side effects, so it runs every time, never from the cache.
+    const update = b.addRunArtifact(tests);
+    update.setEnvironmentVariable("ZEFIR_OPENAPI_UPDATE", "1");
+    update.has_side_effects = true;
+    b.step("openapi", "Rewrite openapi.json from the code").dependOn(&update.step);
+}
 ```
 
 > [!TIP]
@@ -720,7 +732,8 @@ Ann's own, and Bob does not see them.
 
 A controller is a struct with a method for each route, and the routes are
 declared in it. Its dependencies are fields, pointers to objects that
-`Service.start` builds:
+`Service.start` builds. The controller of `/api/v1/todos`,
+`TodosV1Controller.zig`:
 
 ```zig
 //! The REST controller of todos, version 1: /api/v1/todos. It declares its
@@ -1268,13 +1281,16 @@ Content-Length: 15
 ```
 
 An OPTIONS request gets 204 with the methods of its path in `Allow`, unless
-the path has a route of `http.options` of its own. Before a path is matched it is taken apart in segments, and then each is decoded: a
-`%2F` inside `{id}` stays a `/` of the value. `.` and `..` resolve as RFC
-3986 says, an empty segment (`//`) matches no route, a slash at the end does
-not matter, the case of letters does.
+the path has a route of `http.options` of its own.
 
-The health check of the load balancer is a controller without a version,
-open to everybody, since it lists no `requireUser`:
+Before a path is matched it is taken apart in segments, and then each is
+decoded: a `%2F` inside `{id}` stays a `/` of the value. `.` and `..`
+resolve as RFC 3986 says, an empty segment (`//`) matches no route, a slash
+at the end does not matter, the case of letters does.
+
+The health check of the load balancer, `HealthController.zig`, is a
+controller without a version, open to everybody, since it lists no
+`requireUser`:
 
 ```zig
 //! GET /api/health, for the load balancer: a service route without a
@@ -1321,8 +1337,9 @@ Every one of them works in the same steps:
 5. check       the rules of field_rules: v.checkAll                           → 422, every violation
 ```
 
-The DTOs of the service describe all of it in one place, `field_rules`: per
-field, its outside name, its transforms and its rules, in this order.
+The DTOs of the service, in `dto.zig`, describe all of it in one place,
+`field_rules`: per field, its outside name, its transforms and its rules, in
+this order.
 
 ```zig
 //! The DTOs of /api/v1/todos: what a request brings in and what a response
@@ -1828,17 +1845,20 @@ return .{ .value = .from(todo), .status = 201 };
 
 The compiler does not see that number, so a route that answers otherwise
 lists its statuses in `.responses`, by the names of `std.http.Status`.
-`create` answers 201 for a new todo and 200 for a retry, the export writes
-CSV itself, and signing in is a redirect:
+`create` answers 201 for a new todo and 200 for a retry:
 
 ```zig
 // 201 for a new todo, 200 for a retry with the same Idempotency-Key.
 .responses = .{ .created = .{}, .ok = .{} },
 ```
 
+The export writes CSV itself:
+
 ```zig
 .responses = .{ .ok = .{ .content_type = "text/csv" } },
 ```
+
+Signing in is a redirect:
 
 ```zig
 .login = http.post("", .{ .form = LoginForm, .responses = .{ .see_other = .{} }, .max_body_bytes = 1024 }),
@@ -1879,6 +1899,8 @@ flowchart LR
     json --> after["onResponse, then out"]
     own --> after
 ```
+
+The error handler of the service, `errors.zig`:
 
 ```zig
 //! The error handler of the example app: the one place where errors become
@@ -2257,14 +2279,12 @@ knows its users by tokens, which come from its settings as `confy.Secret`:
 //! `requirePermission` sit in the middleware of the controllers that need
 //! a user, and refuse the request with 401 and 403.
 //!
-//! ```zig
 //! // main: the server's middleware, for every request
 //! .middleware = .{ &token_auth },
 //! // a protected controller
 //! .middleware = .{ auth.requireUser, auth.requirePermission("todos") },
 //! // a handler
 //! const user = try ctx.local(auth.CurrentUser);
-//! ```
 //!
 //! A real service verifies a signed token (a JWT) or asks a store of
 //! sessions instead of a table; the shape of the middleware stays the same.
@@ -2442,7 +2462,8 @@ cache-control: no-store
 Date: Sat, 17 Oct 2026 20:02:45 GMT
 ```
 
-A browser signs in with a form, and keeps its token in a cookie:
+A browser signs in with a form, and keeps its token in a cookie. The
+controller of `/api/session`, `SessionController.zig`:
 
 ```zig
 //! Signing a browser in and out: /api/session. The page posts a form with
@@ -2626,11 +2647,9 @@ the API's answers say so. The service's middleware for it:
 //! in the server's middleware, which runs before the route is chosen, so
 //! the preflight of any path reaches it.
 //!
-//! ```zig
 //! const origins = [_][]const u8{config.cors_origin};
 //! var cors: Cors = .{ .origins = &origins };
 //! // main: .middleware = .{ &cors, &token_auth },
-//! ```
 
 const std = @import("std");
 const http = @import("http");
@@ -2760,10 +2779,51 @@ streams of that user:
   names of its type, as `http.Json(T)` writes a response; a variant of
   `void` has the data `{}`.
 - **`.on_close`** names the method that runs once, when the stream has
-  ended: the client left, `close(key)`, the queue overflowed, or the server
-  stopped.
+  ended: the client left, `close(io, key)`, the queue overflowed, or the
+  server stopped.
 - **`close(io, key)`** ends the streams of a key, here when the user signs
   out: what was published before goes out first, then the end.
+
+In the controller of todos, the field `live` points to the manager of the
+streams, the `http.sse.Manager(dto.LiveEvent)` that `Service.start` makes
+with `init`. The handler of the `http.sse.get` route gives the stream of
+the client to the manager with `subscribe`, under the id of the user, and
+`publish` then writes to every stream of that id; `eventsClosed`, the
+`.on_close` of the route, logs the end of a stream:
+
+```zig
+pub fn events(self: *TodosV1Controller, ctx: *http.sse.Context) !void {
+    _ = try self.live.subscribe(ctx, try owner(ctx));
+}
+
+/// Once, when the stream has ended: the client left, `close`, a queue that
+/// overflowed or the stop of the server.
+pub fn eventsClosed(_: *TodosV1Controller, ctx: *http.sse.Context) void {
+    const user = ctx.locals.get(auth.CurrentUser) orelse return;
+    std.log.scoped(.todos).info("Live updates closed for {s}", .{user.id});
+}
+```
+
+`update`, as `create` and `delete` do, makes its change and then publishes
+it to the streams of the user: `publish` takes the request's
+`core.Context` and `io`, the key, and the event, here `todo.updated`,
+whose data is the `dto.TodoResponse` of the todo:
+
+```zig
+pub fn update(self: *TodosV1Controller, ctx: *http.Context) !http.Json(dto.TodoResponse) {
+    const path = try ctx.path(dto.TodoIdPath);
+    const body = try ctx.json(dto.UpdateTodoRequest);
+    const user = try owner(ctx);
+    const todo = try self.repo.update(ctx.operation(), ctx.io(), ctx.allocator(), user, path.id, .{
+        .title = body.title,
+        .done = body.done,
+        .priority = body.priority,
+        .due_date = body.due_date,
+    });
+    try self.live.publish(ctx.operation(), ctx.io(), user, .{ .event = .{ .@"todo.updated" = .from(todo) } });
+    return .{ .value = .from(todo) };
+}
+```
 
 In one terminal, the stream of Ann; `curl -N` shows each event as it comes:
 
@@ -2821,10 +2881,12 @@ Content-Length: 104
   route has none unless it sets one.
 - **A client that falls behind** fills its queue, 64 events or 256 KiB by
   default, and its stream is closed: memory does not grow. The client
-  reconnects and reads the list anew. An event longer than the queue's
-  `.max_bytes` alone fits no queue: `publish` returns `error.EventTooLarge`,
-  a 500, and logs it; the event goes to nobody, and the streams stay open.
-- **A stream that ends whole**, by `close(key)` or by a stop, ends its
+  reconnects and reads the list anew. An event longer than
+  `.queue.max_bytes` of `http.sse.ManagerOptions`, the options of the
+  manager's `init`, fits no queue even on its own: `publish` returns
+  `error.EventTooLarge`, a 500, and logs it; the event goes to nobody, and
+  the streams stay open.
+- **A stream that ends whole**, by `close(io, key)` or by a stop, ends its
   response with the last chunk, as any chunked response ends. On HTTP/1.1
   its connection then serves the next request, as keep-alive does, unless
   the server is stopping, which closes it. To an HTTP/1.0 client a stream
@@ -2845,6 +2907,8 @@ The page of the service and its files come from the directory `public/`:
 ```zig
 .static = &.{http.static("/", .{ .root = s.public_dir, .spa_fallback = "index.html" })},
 ```
+
+The page, `public/index.html`:
 
 ```html
 <!doctype html>
@@ -3120,9 +3184,9 @@ none of this is compiled.
 
 `http.testing.Backend` serves the same server, the same controllers and
 middleware, from memory: no sockets, and a test sees every response whole.
-The tests of the service start it with `Service.start`, as `main` does, read
-its settings with confy from an environment of their own, and keep the
-records of its access log:
+The tests of the service, `todos_test.zig`, start it with `Service.start`,
+as `main` does, read its settings with confy from an environment of their
+own, and keep the records of its access log:
 
 ```zig
 //! Tests of the example app without a network: `http.testing.Backend`
@@ -3483,8 +3547,267 @@ test "the OpenAPI document is openapi.json, which the service serves with a page
   the directory of the page, which `.static` needs, and `openapi.json`,
   which the last test compares with the document.
 
-The tests of `TokenAuth` and `Cors` on their own are in
-[middleware_test.zig](middleware_test.zig).
+`TokenAuth` and `Cors` have tests of their own, in `middleware_test.zig`.
+It builds a smaller server on the backend in memory: the two middleware in
+the order the service gives them, `Cors` first, since a preflight needs no
+user; an error handler that adds `WWW-Authenticate` to a 401, as the
+service's does; and two controllers of its own, the todos behind the same
+`requireUser` and `requirePermission` as the service's, and an open health
+check. Their handlers only answer:
+
+```zig
+// Application code (src/middleware_test.zig of the example app): zefir-http ships none of these.
+//! Tests of the example app's authentication and CORS without a network:
+//! `http.testing.Backend` serves, from memory, a small server with the
+//! app's `Cors` and `TokenAuth`, stand-in controllers and an error handler
+//! of its own. The settings come through confy, as in `main`, here from an
+//! environment of the test's own.
+
+const std = @import("std");
+const confy = @import("confy");
+const http = @import("http");
+const auth = @import("auth.zig");
+const Cors = @import("cors.zig").Cors;
+
+const testing = std.testing;
+
+/// The settings of the example app: the tokens of its two users and the
+/// origin of its web page.
+const Config = struct {
+    auth: struct {
+        /// APP_AUTH_ANN_TOKEN: Ann may read and delete todos.
+        ann_token: confy.Secret,
+        /// APP_AUTH_BOB_TOKEN: Bob may only read them.
+        bob_token: confy.Secret,
+    },
+    cors_origin: []const u8 = "https://app.example",
+};
+
+/// The todos: every method needs a user with the permission "todos", and
+/// deleting one needs "todos:delete" too.
+const TodosV1Controller = struct {
+    pub const http_routes = http.routes(.{
+        .prefix = "/v1/todos",
+        .middleware = .{ auth.requireUser, auth.requirePermission("todos") },
+        .methods = .{
+            .list = http.get("", .{}),
+            .delete = http.delete("/{id}", .{ .middleware = .{auth.requirePermission("todos:delete")} }),
+        },
+    });
+
+    pub fn list(_: *TodosV1Controller, ctx: *http.Context) !void {
+        const user = try ctx.local(auth.CurrentUser);
+        try ctx.response.text(user.id);
+    }
+    pub fn delete(_: *TodosV1Controller, _: *http.Context) !void {}
+};
+
+/// Open to anybody: no `requireUser` here.
+const HealthController = struct {
+    pub const http_routes = http.routes(.{ .methods = .{ .check = http.get("/health", .{}) } });
+
+    pub fn check(_: *HealthController, _: *http.Context) !void {}
+};
+
+const ApiError = struct { code: []const u8, message: []const u8 };
+
+/// A stand-in for the app's error handler: its own format, and
+/// `WWW-Authenticate` on every 401, which RFC 9110 asks for.
+const AppErrors = struct {
+    pub fn mapError(err: anyerror) http.ErrorResponse(ApiError) {
+        return .fallback(err, .{ .code = http.defaultCode(err), .message = http.defaultTitle(err) });
+    }
+
+    pub fn handle(_: *AppErrors, ctx: *http.Context, err: anyerror, _: *http.ErrorResponse(ApiError)) !http.ErrorAction {
+        if (err == error.Unauthenticated) try ctx.response.setHeader("www-authenticate", "Bearer");
+        return .respond;
+    }
+};
+
+/// The small server of these tests, on the backend in memory.
+const App = struct {
+    arena: std.heap.ArenaAllocator,
+    config: Config = undefined,
+    users: [2]auth.TokenAuth.User = undefined,
+    origins: [1][]const u8 = undefined,
+    token_auth: auth.TokenAuth = undefined,
+    cors: Cors = undefined,
+    todos_v1: TodosV1Controller = .{},
+    health: HealthController = .{},
+    app_errors: AppErrors = .{},
+    backend: http.testing.Backend,
+    server: http.Server = undefined,
+
+    /// Starts the app with the settings of `environ`; `app` stays where it
+    /// is until `stop`.
+    fn start(app: *App, environ: *const std.process.Environ.Map) !void {
+        app.* = .{ .arena = .init(testing.allocator), .backend = .init(testing.allocator) };
+        errdefer app.arena.deinit();
+        try confy.load(app.arena.allocator(), &app.config, .{
+            .io = testing.io,
+            .environ = environ,
+            .env_prefix = "APP_",
+            .sources = &.{.osEnv()},
+        });
+        app.users = .{
+            .{ .token = app.config.auth.ann_token, .id = "ann", .permissions = &.{ "todos", "todos:delete" } },
+            .{ .token = app.config.auth.bob_token, .id = "bob", .permissions = &.{"todos"} },
+        };
+        app.token_auth = .{ .users = &app.users };
+        app.origins = .{app.config.cors_origin};
+        app.cors = .{ .origins = &app.origins };
+        app.server = try .init(testing.allocator, .{
+            .controllers = .{ &app.todos_v1, &app.health },
+            // CORS first: a preflight needs no user.
+            .middleware = .{ &app.cors, &app.token_auth },
+            .error_handler = &app.app_errors,
+        }, .{
+            .listen = .{ .backend = app.backend.backend() },
+            .prefix = "/api",
+        });
+        app.server.start(testing.io) catch |err| {
+            app.server.deinit(testing.io);
+            return err;
+        };
+    }
+
+    fn stop(app: *App) void {
+        app.server.deinit(testing.io);
+        app.backend.deinit();
+        app.arena.deinit();
+    }
+
+    fn request(app: *App, method: std.http.Method, target: []const u8, headers: []const [2][]const u8) !http.testing.Response {
+        return app.backend.request(testing.io, .{ .method = method, .target = target, .headers = headers });
+    }
+};
+
+/// The environment of the tests: the two tokens.
+fn testEnviron() !std.process.Environ.Map {
+    var environ: std.process.Environ.Map = .init(testing.allocator);
+    errdefer environ.deinit();
+    try environ.put("APP_AUTH_ANN_TOKEN", "ann-secret");
+    try environ.put("APP_AUTH_BOB_TOKEN", "bob-secret");
+    return environ;
+}
+
+fn codeOf(res: *http.testing.Response) ![]const u8 {
+    return (try std.json.parseFromSliceLeaky(ApiError, res.arena.allocator(), res.body, .{})).code;
+}
+
+test "TokenAuth: no token is anonymous; requireUser is 401 and the app's handle adds WWW-Authenticate; requirePermission is 403" {
+    var environ = try testEnviron();
+    defer environ.deinit();
+    var app: App = undefined;
+    try app.start(&environ);
+    defer app.stop();
+
+    // No token: anonymous, and a route without requireUser serves it.
+    var health = try app.request(.GET, "/api/health", &.{});
+    defer health.deinit();
+    try testing.expectEqual(204, health.status);
+
+    // A route behind requireUser: 401 with WWW-Authenticate, without a
+    // token and with one nobody has.
+    for ([_][]const [2][]const u8{ &.{}, &.{.{ "authorization", "Bearer guess" }} }) |headers| {
+        var refused = try app.request(.GET, "/api/v1/todos", headers);
+        defer refused.deinit();
+        try testing.expectEqual(401, refused.status);
+        try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+        try testing.expectEqualStrings("unauthenticated", try codeOf(&refused));
+    }
+
+    // A known token, as a bearer token or as the session cookie.
+    var bob = try app.request(.GET, "/api/v1/todos", &.{.{ "authorization", "Bearer bob-secret" }});
+    defer bob.deinit();
+    try testing.expectEqual(200, bob.status);
+    try testing.expectEqualStrings("bob", bob.body);
+    var cookie = try app.request(.GET, "/api/v1/todos", &.{.{ "cookie", "theme=dark; session=ann-secret" }});
+    defer cookie.deinit();
+    try testing.expectEqualStrings("ann", cookie.body);
+
+    // Bob may not delete: 403, without WWW-Authenticate; Ann may.
+    var denied = try app.request(.DELETE, "/api/v1/todos/1", &.{.{ "authorization", "Bearer bob-secret" }});
+    defer denied.deinit();
+    try testing.expectEqual(403, denied.status);
+    try testing.expectEqualStrings("permission_denied", try codeOf(&denied));
+    try testing.expectEqual(null, denied.header("www-authenticate"));
+    var deleted = try app.request(.DELETE, "/api/v1/todos/1", &.{.{ "authorization", "Bearer ann-secret" }});
+    defer deleted.deinit();
+    try testing.expectEqual(204, deleted.status);
+}
+
+test "Cors: preflight 204; an error response carries Access-Control-Allow-Origin; Vary: Origin on every response but with *; no * with credentials" {
+    var environ = try testEnviron();
+    defer environ.deinit();
+    var app: App = undefined;
+    try app.start(&environ);
+    defer app.stop();
+    const origin = "https://app.example";
+
+    // The preflight of a page of its origin: 204, no body, no user needed.
+    var preflight = try app.request(.OPTIONS, "/api/v1/todos/1", &.{
+        .{ "origin", origin },
+        .{ "access-control-request-method", "DELETE" },
+        .{ "access-control-request-headers", "authorization" },
+    });
+    defer preflight.deinit();
+    try testing.expectEqual(204, preflight.status);
+    try testing.expectEqualStrings("", preflight.body);
+    try testing.expectEqualStrings(origin, preflight.header("access-control-allow-origin").?);
+    try testing.expectEqualStrings("GET, HEAD, POST, PUT, PATCH, DELETE", preflight.header("access-control-allow-methods").?);
+    try testing.expectEqualStrings("authorization, content-type, idempotency-key", preflight.header("access-control-allow-headers").?);
+    try testing.expectEqualStrings("true", preflight.header("access-control-allow-credentials").?);
+    try testing.expectEqualStrings("Origin", preflight.header("vary").?);
+
+    // The preflight of an origin it does not list gets none of it: the
+    // server answers OPTIONS itself, and the browser refuses the call.
+    var stranger = try app.request(.OPTIONS, "/api/v1/todos/1", &.{
+        .{ "origin", "https://evil.example" },
+        .{ "access-control-request-method", "DELETE" },
+    });
+    defer stranger.deinit();
+    try testing.expectEqual(204, stranger.status);
+    try testing.expectEqual(null, stranger.header("access-control-allow-origin"));
+    try testing.expectEqualStrings("DELETE, OPTIONS", stranger.header("allow").?);
+    // The answer depends on Origin all the same, and so does that of a
+    // request without one: a cache must keep them apart.
+    try testing.expectEqualStrings("Origin", stranger.header("vary").?);
+    var plain = try app.request(.GET, "/api/health", &.{});
+    defer plain.deinit();
+    try testing.expectEqual(null, plain.header("access-control-allow-origin"));
+    try testing.expectEqualStrings("Origin", plain.header("vary").?);
+
+    // The answer to an error carries the headers too, so that the page can
+    // read the 401.
+    var refused = try app.request(.GET, "/api/v1/todos", &.{.{ "origin", origin }});
+    defer refused.deinit();
+    try testing.expectEqual(401, refused.status);
+    try testing.expectEqualStrings(origin, refused.header("access-control-allow-origin").?);
+    try testing.expectEqualStrings("Origin", refused.header("vary").?);
+    try testing.expectEqualStrings("x-request-id", refused.header("access-control-expose-headers").?);
+
+    // Any origin: "*", and then never with credentials; the answer is the
+    // same for every origin, without Vary.
+    const any = [_][]const u8{"*"};
+    app.cors = .{ .origins = &any };
+    var open = try app.request(.GET, "/api/health", &.{.{ "origin", "https://other.example" }});
+    defer open.deinit();
+    try testing.expectEqualStrings("*", open.header("access-control-allow-origin").?);
+    try testing.expectEqual(null, open.header("access-control-allow-credentials"));
+    try testing.expectEqual(null, open.header("vary"));
+}
+```
+
+- **What a test sees is what the middleware decided.** `list` answers with
+  the id of the user that `TokenAuth` put into `ctx.locals`: `bob` for the
+  token of Bob, `ann` for the cookie `session` of Ann.
+- **The settings come through confy**, as in `main`, from an environment
+  of the test's own, `testEnviron`: the tokens are `confy.Secret`.
+- **The server borrows its middleware**:
+  `.middleware = .{ &app.cors, &app.token_auth }` gives it pointers. So
+  the last test gives `app.cors` the list `"*"`, any origin, and the next
+  request sees it.
 
 ## Limits and timeouts
 
@@ -3577,160 +3900,9 @@ handler first reads the body, or 413 at once for a body over the limit. A
 response sent before its body was read, a 401 say, reads and drops up to
 64 KiB of the body, so the connection can go on; for more, it closes.
 
-## Benchmark
-
-How many requests does a server of zefir-http answer in a second, and how
-long does one take? The benchmark `tests/http/bench/main.zig` measures
-both. Run it on Linux:
-
-```sh
-cd tests/http
-zig build bench
-```
-
-It is built with ReleaseFast, and so are zefir and zio under it; the run
-takes about a minute. On GitHub it runs only when asked, as the job
-`bench-http` of the workflow `.github/workflows/bench.yml`:
-`gh workflow run bench.yml --ref <branch>`. It is not a part of CI, and no
-check waits for it.
-
-**What it measures.** One process holds the server, on `http.native`, and
-the clients that load it, all on one zio runtime, and they talk over
-loopback, `127.0.0.1`. No network card and no other machine is on the way,
-so the time is that of zefir-http and zio; the clients share the CPUs with
-the server, so the server gets less than the whole machine. Each client
-opens one connection and keeps it alive, as a browser or a proxy in front
-of a service does, so that opening connections is not what is timed: it
-sends a request, reads the whole response, and only then sends the next.
-One connection has one request at work at a time, then, and 64 connections
-have 64. Each scenario asks for a path of its own:
-
-| Scenario | Request | What the server does |
-| --- | --- | --- |
-| plain text | `GET /text` | `ctx.response.text("hello, world")`: the least a request costs, from its head parsed to its response written |
-| JSON out | `GET /todos/42` | reads the path into `struct { id: u64 }`, returns an `http.Json(Todo)` |
-| JSON in and out | `POST /todos`, 33 bytes of JSON | reads the body with `ctx.json(NewTodo)`, returns 201 with an `http.Json(Todo)` |
-| static file, 1.8 KiB | `GET /index.html` | sends `public/index.html` of this guide, 1 845 bytes, through `http.static` |
-| chain of 5 middleware | `GET /chained` | runs five middleware before its text: three functions that return `.next`, a type whose `run` reads the clock and whose `onFinish` takes the duration, as an access log does, and `http.onResponse`, which sets a header |
-
-Each scenario runs with one connection, 20 000 requests, and with 64
-connections at once, 3 000 requests each, after a warm-up of a tenth as
-many that is not timed. All of it runs twice: on zio with one executor, a
-single thread for the server and its clients, and with four. A line gives
-the requests per second that the server answered, and the time of a
-request, from when its client sends it to when its whole response is read:
-p50, the median, p90 and p99, and max, the slowest, in microseconds.
-
-A run of commit 14b9c1d on a shared runner of GitHub Actions,
-ubuntu-latest: Ubuntu 24.04, 4 vCPUs of an AMD EPYC 7763, 16 GB of memory,
-[run 39110564012](https://github.com/vkiryakov/zefir/actions/runs/39110564012):
-
-```text
-zefir-http benchmark: fast build, linux x86_64; the server and its clients in one process, over loopback
-
-zio, 1 executor
-  scenario                 conns  requests  requests/s  p50 µs  p90 µs  p99 µs  max µs
-  plain text                   1     20000       41819     23.2     23.5     40.4     79.4
-  plain text                  64    192000       50796   1248.6   1287.6   1520.5  11410.2
-  JSON out                     1     20000       40795     23.7     24.1     41.6     74.8
-  JSON out                    64    192000       50381   1262.3   1296.2   1482.0  11569.0
-  JSON in and out              1     20000       39470     24.5     25.0     43.1     77.1
-  JSON in and out             64    192000       52101   1214.8   1361.7   1565.8  12096.4
-  static file, 1.8 KiB         1     20000       12876     76.2     91.7    102.6    228.5
-  static file, 1.8 KiB        64    192000       36103   1743.1   1871.3   1924.8  10863.6
-  chain of 5 middleware        1     20000       39985     24.3     24.7     42.0     73.8
-  chain of 5 middleware       64    192000       49732   1279.1   1311.1   1499.4  10375.6
-
-zio, 4 executors
-  scenario                 conns  requests  requests/s  p50 µs  p90 µs  p99 µs  max µs
-  plain text                   1     20000       12076     82.2     90.1    100.3    266.3
-  plain text                  64    192000      122440    498.5    729.5    914.8   4672.9
-  JSON out                     1     20000       11674     84.9     95.6    103.7    293.4
-  JSON out                    64    192000      120265    514.9    735.0    876.4   5562.1
-  JSON in and out              1     20000       11715     83.9     99.0    108.2    736.9
-  JSON in and out             64    192000      115812    551.3    659.4    751.8   4978.7
-  static file, 1.8 KiB         1     20000        7745    129.7    139.9    163.2   2267.2
-  static file, 1.8 KiB        64    192000       67869    894.2   1457.0   2536.6   4985.4
-  chain of 5 middleware        1     20000       12237     81.8     93.4    111.0    459.1
-  chain of 5 middleware       64    192000      116444    547.6    666.8    765.5   4531.3
-```
-
-Three runs of the commit on that CPU, this one,
-[39110560573](https://github.com/vkiryakov/zefir/actions/runs/39110560573)
-and [39110562340](https://github.com/vkiryakov/zefir/actions/runs/39110562340),
-gave these requests per second, from the lowest to the highest:
-
-| Scenario | 1 executor, 1 connection | 1 executor, 64 connections | 4 executors, 1 connection | 4 executors, 64 connections |
-| --- | ---: | ---: | ---: | ---: |
-| plain text | 41 454–42 579 | 49 896–51 028 | 11 754–12 076 | 122 440–124 104 |
-| JSON out | 40 632–41 660 | 49 447–50 381 | 11 601–11 846 | 119 795–121 567 |
-| JSON in and out | 39 178–40 231 | 51 582–52 346 | 11 715–12 105 | 115 771–116 842 |
-| static file, 1.8 KiB | 11 932–12 876 | 35 248–36 311 | 7 710–7 745 | 66 042–67 869 |
-| chain of 5 middleware | 39 537–40 740 | 48 541–49 732 | 11 971–12 245 | 114 986–117 427 |
-
-A shared runner is not the same machine every time, though: another run of
-the commit got an AMD EPYC 9V45, and answered 1.3 to 1.9 times as many
-requests per second on one executor, 1.7 to 2.4 times as many on four
-([run 39110943686](https://github.com/vkiryakov/zefir/actions/runs/39110943686)).
-
-How to read it:
-
-- **Requests per second** is how much the server does: the requests of a
-  line, divided by the time they all took. **p50, p90, p99 and max** are
-  what a client waits: half of the requests took p50 or less, one in a
-  hundred took longer than p99, and max is the slowest of all. The users of
-  a service feel its p99 more than its median.
-- **One connection** has one request at a time, so it shows how long a
-  request takes when nothing else waits; its requests per second are one
-  second divided by that time. On one executor, about 24 µs, the client's
-  part included.
-- **64 connections** always have a request waiting, so they show how many
-  requests a busy server answers. On one executor the 64 take turns on one
-  thread: about 51 000 requests per second, and each request waits for the
-  others, its p50 of about 1.25 ms: 64 requests at 51 000 per second.
-- **On one connection, one executor beats four:** about 42 000 requests
-  per second against 12 000. A request of a connection kept alive passes
-  between three tasks: the connection's task reads and parses it, then
-  starts the request's task, which runs the middleware and the handler,
-  and its watcher, which notices a client that leaves; the connection's
-  task waits for the first of the two to end, cancels the other, and writes
-  the response. On one executor each hand-off is a switch between
-  coroutines of one thread. On four, zio starts each new task on the next
-  executor in turn, so a request wakes other threads and waits for them to
-  wake its own, a few times over; with one connection nothing else runs in
-  the meantime, and those wake-ups take most of its 83 µs.
-- **On 64 connections, four executors beat one:** about 122 000 requests
-  per second against 51 000. There is always a request ready, so the four
-  threads work at once, and while one request waits for a hand-off, others
-  run. Not four times as many: the 64 clients run on the same four vCPUs,
-  and the hand-offs still cost. The service of this guide asks zio for
-  `.executors = .auto`, an executor per core: four, on this runner.
-- **JSON costs little.** Reading a small JSON body, or writing one, moves
-  the count by a few percent from plain text, either way.
-- **A static file costs calls to the system.** For each request the server
-  opens the file, one open for each component of its path (`/index.html`
-  has one), asks the system for its kind, size and time (`fstat`), which
-  `ETag` and `Last-Modified` come from, reads it through a buffer of
-  16 KiB, writes it, and closes it; the file goes through that buffer, with
-  no `sendfile`. zio makes each call without holding up its thread: the
-  request's task waits for it, as it waits for the network. With one
-  connection nothing fills those waits, and a request takes about 76 µs
-  instead of 23. With 64 connections other requests fill them: on one
-  executor a file then costs its thread about 8 µs more than plain text,
-  and the server answers about 30 percent fewer requests; on four, about
-  45 percent fewer.
-- **Five middleware cost about a microsecond** of a request on one
-  executor and one connection, and 2 percent of the requests per second on
-  64. That includes their `onFinish`, which runs on a task of its own once
-  the request has ended, as every `onFinish` does. On four executors and
-  one connection the chain is as fast as plain text: there the wake-ups
-  take the time.
-
-These numbers are what one runner measured with these small handlers: no
-promise for your machine, your handlers or your clients. Measure where the
-service runs, under the load it will have, and with the limits that matter
-there raised first: the mappings of memory, `vm.max_map_count`, and the
-open files, `ulimit -n`, in [Limits and timeouts](#limits-and-timeouts).
+How many requests a server answers in a second, and how long one takes,
+on one machine: [the benchmark of zefir-http](https://github.com/vkiryakov/zefir/blob/dev/tests/http/bench/README.md),
+on GitHub.
 
 ## Stopping gracefully
 
@@ -3838,12 +4010,12 @@ the beans of the service out of modules, starts them in order, watches
 them, and stops them all within one deadline. The guides of the modules
 write it `core.App`: it is `zefir.App` of the umbrella module.
 
-The module below declares what App builds: the backend in memory, a
-provider; `HealthController`, a controller; and `Servers`, whose function
-`httpServer` makes the server of them. App passes each parameter of that
-function by its type: its allocator, the config that `main` hands to
-`init`, the backend it built, and `core.app.Controllers(AppModule)`, the
-controllers of the module:
+The module below, in the program `app.zig`, declares what App builds: the
+backend in memory, a provider; `HealthController`, a controller; and
+`Servers`, whose function `httpServer` makes the server of them. App passes
+each parameter of that function by its type: its allocator, the config that
+`main` hands to `init`, the backend it built, and
+`core.app.Controllers(AppModule)`, the controllers of the module:
 
 ```zig
 //! The health check of the todo service under zefir.App, on the backend in

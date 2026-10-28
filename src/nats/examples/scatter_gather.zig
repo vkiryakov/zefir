@@ -6,9 +6,6 @@
 //! Settings, from the environment:
 //!
 //!   APP_NATS_URL   the server; nats://127.0.0.1:4222 by default
-//!
-//! In tests/nats, `zig build example-scatter_gather` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");
@@ -26,13 +23,14 @@ const Config = struct {
 };
 
 /// The warehouses: their stock of the product, and how long they take to
-/// answer.
+/// answer. Their answers come 300 ms apart, so they always come in this
+/// order.
 const Warehouse = struct { name: []const u8, units: u32, delay_ms: i64 };
 
 const warehouses = [_]Warehouse{
-    .{ .name = "berlin", .units = 12, .delay_ms = 10 },
-    .{ .name = "paris", .units = 30, .delay_ms = 40 },
-    .{ .name = "madrid", .units = 0, .delay_ms = 70 },
+    .{ .name = "berlin", .units = 12, .delay_ms = 100 },
+    .{ .name = "paris", .units = 30, .delay_ms = 400 },
+    .{ .name = "madrid", .units = 0, .delay_ms = 700 },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -81,11 +79,11 @@ pub fn main(init: std.process.Init) !void {
     try shop.connect();
     const shop_log = logger.scoped("shop");
 
-    // Everyone's answer: the stream ends after three replies, or after
-    // 500 ms, whichever comes first.
+    // Everyone's answer: the stream ends after three replies, or after two
+    // seconds, whichever comes first.
     {
         const replies = try shop.requestMany("inventory.stock", "sku-42", .{
-            .timeout = .{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } },
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
             .max_responses = warehouses.len,
         });
         defer replies.deinit();
@@ -106,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     // stream's deinit drops the replies that come later.
     {
         const replies = try shop.requestMany("inventory.stock", "sku-42", .{
-            .timeout = .{ .duration = .{ .raw = .fromMilliseconds(500), .clock = .awake } },
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } },
         });
         defer replies.deinit();
         var found: u32 = 0;

@@ -1,14 +1,4 @@
-# mongo
-
-> [!WARNING]
-> **No TLS yet: use it only in a network you trust.** zefir-mongo speaks
-> plain TCP. SCRAM, the way it authenticates, never sends the password
-> itself, but every command and every document travels unencrypted, and
-> whoever records a SCRAM exchange can try to guess the password offline.
-> Until the driver has TLS, keep mongod and its services in a closed
-> network, give each service a user of its own with a long random
-> password, and across a network you do not trust, use a tunnel:
-> WireGuard, SSH or a service mesh.
+# zefir-mongo: an async MongoDB driver for Zig
 
 **A MongoDB driver for Zig services.** MongoDB is a database of
 *documents*: records like JSON objects, kept in *collections*, such as the
@@ -22,8 +12,18 @@ collections with the operations of MongoDB's CRUD specification:
 `std.Io` only, and runs on [zio](https://github.com/lalinsky/zio) in
 production.
 
+> [!WARNING]
+> **No TLS yet: use it only in a network you trust.** zefir-mongo speaks
+> plain TCP. SCRAM, the way it authenticates, never sends the password
+> itself, but every command and every document travels unencrypted, and
+> whoever records a SCRAM exchange can try to guess the password offline.
+> Until the driver has TLS, keep mongod and its services in a closed
+> network, give each service a user of its own with a long random
+> password, and across a network you do not trust, use a tunnel:
+> WireGuard, SSH or a service mesh.
+
 > [!IMPORTANT]
-> **Not in v0.1 (TODO):**
+> **Not implemented yet (TODO):**
 >
 > - **One standalone mongod only.** Replica sets and sharded clusters come
 >   later. A client refuses any other server when it connects, with
@@ -43,7 +43,7 @@ production.
 > - **Sessions, transactions and change streams**, and compression of
 >   messages.
 > - **A strict connection string.** An option that would change what the
->   client does, and that v0.1 cannot do, is refused rather than skipped:
+>   client does, and that it cannot do yet, is refused rather than skipped:
 >   `retryWrites=true`, `w=majority`, `readPreference`, `replicaSet`,
 >   `tls=true` and others. A string copied from elsewhere may need
 >   trimming, see [The connection string](#the-connection-string).
@@ -98,8 +98,11 @@ while (try adults.next(io, op)) |doc| {
 - **Errors that say whether to retry.** Every error is one of 16 names,
   and each tells whether the server may have run the call; the details,
   the server's code and message among them, are in `mongo.Diagnostics`.
-- **Deadlines of zefir-core.** A call takes a `core.Context`: its deadline
-  becomes the server's `maxTimeMS`, and its token cancels the call.
+- **Deadlines of zefir-core.** A call takes a `mongo.OperationContext`,
+  which `.of(ctx)` makes of a `core.Context`: its deadline becomes the
+  server's `maxTimeMS`, and its token is checked before sending and after
+  the reply. The token is no alarm: to cut a call that waits, cancel its
+  task.
 - **Tests without MongoDB.** `mongo.testing.FakeServer` plays a script on
   loopback, and your code talks to it through a real client.
 - **No dependencies.** Only the standard library; zio comes from your
@@ -113,7 +116,7 @@ while (try adults.next(io, op)) |doc| {
 - [Quick start](#quick-start)
 - [Connecting](#connecting)
 - [Databases and collections](#databases-and-collections)
-- [Documents](#documents)
+- [Documents: zefir-mongo-bson](#documents-zefir-mongo-bson)
 - [Errors and what is safe to retry](#errors-and-what-is-safe-to-retry)
 - [Durable writes](#durable-writes)
 - [Deadlines and cancellation](#deadlines-and-cancellation)
@@ -123,14 +126,14 @@ while (try adults.next(io, op)) |doc| {
 - [Tests without MongoDB](#tests-without-mongodb)
 - [Under zefir-odm](#under-zefir-odm)
 
-Programs that `zig build e2e` in `tests/mongo` builds and runs against
-mongod, checking what they print against this guide:
-[quick start](quick_start.zig) · [connecting](connect.zig) ·
-[orders](orders.zig) · [reports](reports.zig) · [errors](errors.zig) ·
-[durable writes](durable.zig) · [under zefir.App](app.zig).
-Examples that `zig build test-mongo` runs without a server:
-[documents](documents.zig) · [a write cut short](import_test.zig) ·
-[deadlines](deadlines_test.zig) · [tests of an application](users_test.zig).
+Every example of this guide is shown whole, and every program with what it
+printed. The programs that talk to a mongod:
+[quick start](#quick-start) · [connecting](#what-can-go-wrong-at-the-start) ·
+[orders](#writing-and-reading-documents) · [reports](#reports-indexes-and-collections) · [errors](#errors-and-what-is-safe-to-retry) ·
+[durable writes](#durable-writes) · [under zefir.App](#under-zefirapp).
+The examples that need no server:
+[documents](#documents-zefir-mongo-bson) · [a write cut short](#a-write-cut-short) ·
+[deadlines](#deadlines-and-cancellation) · [tests of an application](#tests-without-mongodb).
 
 ## How MongoDB keeps data
 
@@ -150,8 +153,9 @@ flowchart LR
 - **Documents.** A document is a set of named fields, like a JSON object,
   with more types than JSON has: 32- and 64-bit integers, dates,
   ObjectIds, binary data, decimals. On the wire and on disk it is BSON, a
-  binary form of it, which zefir-mongo reads and writes itself, see
-  [Documents](#documents).
+  binary form of it, which zefir-mongo reads and writes with
+  zefir-mongo-bson, see
+  [Documents: zefir-mongo-bson](#documents-zefir-mongo-bson).
 - **`_id`.** Every document has an `_id`, unique in its collection. An
   insert gives a document without one an *ObjectId*: 12 bytes made of the
   time, a random part and a counter, so that services make unique ids
@@ -209,7 +213,9 @@ the client, which build the commands; copy them and keep them anywhere.
 
 ## Installation
 
-Add Zefir to your `build.zig.zon`; mongo ships since v0.9.0:
+Add Zefir to your `build.zig.zon`. mongo ships since v0.9.0, and
+mongo-bson, which the build below imports for documents, since v0.11.0:
+v0.9.0 and v0.10.0 had BSON inside mongo, as `mongo.bson`.
 
 ```sh
 zig fetch --save git+https://github.com/vkiryakov/zefir#dev
@@ -230,27 +236,33 @@ settings, log for records and core for deadlines:
 
 ```zig
 // build.zig
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "shop",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
-            .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
-            .{ .name = "zio", .module = zio.module("zio") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "core", .module = zefir.module("zefir-core") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "mongo", .module = zefir.module("zefir-mongo") },
+                .{ .name = "mongo-bson", .module = zefir.module("zefir-mongo-bson") },
+                .{ .name = "zio", .module = zio.module("zio") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -269,9 +281,9 @@ docker run --rm -p 27017:27017 mongo:9.0.4
 
 ## Quick start
 
-The customers of the shop. The program connects, makes the e-mail of a
-customer unique, signs four customers up, finds the adults, gives one a
-birthday, lets one go, and counts the adults again:
+The customers of the shop, in `quick_start.zig`. The program connects,
+makes the e-mail of a customer unique, signs four customers up, finds the
+adults, gives one a birthday, lets one go, and counts the adults again:
 
 ```zig
 //! The quick start of the guide: the customers of a shop, in the
@@ -509,7 +521,7 @@ tags; `retryWrites=true` and `retryReads=true`; `w`, `journal`,
 `wTimeoutMS` and `readConcernLevel`; `socketTimeoutMS` and
 `waitQueueTimeoutMS`; other mechanisms and `authMechanismProperties`;
 `mongodb+srv://`, several hosts, UNIX sockets and proxies. Skipped with a
-warning in the log, as they change nothing that v0.1 does:
+warning in the log, as they change nothing that the client does:
 `compressors`, `zlibCompressionLevel`, `heartbeatFrequencyMS`,
 `serverMonitoringMode`, `localThresholdMS`, `serverSelectionTryOnce`,
 `uuidRepresentation`, and the options that the client does not know.
@@ -537,7 +549,7 @@ asks the server in hello which mechanisms the user has, and takes
 SCRAM-SHA-256 when the list names it, SCRAM-SHA-1 when it does not. SCRAM
 derives keys from the password with thousands of rounds of hashing; the
 client keeps them, so only its first connection pays for that.
-SCRAM-SHA-256 takes a password of printable ASCII only in v0.1: another
+SCRAM-SHA-256 takes a password of printable ASCII only, for now: another
 one is `Unsupported` before anything is sent, and such a user needs
 SCRAM-SHA-1 credentials and `authMechanism=SCRAM-SHA-1`.
 
@@ -677,8 +689,9 @@ $ APP_MONGO_URI=mongodb://admin@127.0.0.1:27018 APP_MONGO_PASSWORD=change-me zig
   gives a connection that could not open: the server may be overloaded or
   restarting, and the call may go again later. A host name that does not
   resolve gets no labels: it is the name that is wrong.
-- **Connection strings** that ask for what v0.1 cannot do stop at `init`,
-  with what to do instead.
+- **Connection strings** that ask for what the client cannot do yet stop
+  at `init`, with what to do instead. The client's messages say v0.1: the
+  first version of zefir-mongo, which came with zefir v0.9.0.
 - `connect` may be called again after a failure; until it succeeds, a call
   is `Unavailable`: "connect() has not succeeded". A server of another
   kind is refused here too: a member of a replica set, a mongos or a
@@ -1147,7 +1160,16 @@ comes from the context. A collection name is checked before every
 operation: an empty one, one with `$` or NUL, or one that is not UTF-8,
 is `InvalidArgument`, and nothing is sent.
 
-## Documents
+## Documents: zefir-mongo-bson
+
+MongoDB's documents, and the commands that carry them, are BSON.
+zefir-mongo reads and writes them with zefir-mongo-bson, the module of
+Zefir for BSON. The build of [Installation](#installation) imports it as
+`mongo-bson`, and the programs of this guide name it `bson`:
+`const bson = @import("mongo-bson");`. Through the umbrella module it is
+`@import("zefir").mongo_bson`. It imports nothing but the standard
+library, so a program that only makes or reads documents needs neither
+zefir-mongo nor a server; zefir-odm writes its documents with it too.
 
 `documents.zig` writes a customer of the shop in each of the forms that
 the operations take, and prints the documents as Extended JSON, the text
@@ -1160,10 +1182,9 @@ MongoDB's tools show them in. It needs no server:
 //! field by field with `bson.Builder`; or a `bson.RawDocument`, bytes that
 //! are a document already. This program writes a customer of the shop in
 //! each form and prints the documents as Extended JSON, the text MongoDB's
-//! tools show them in. It needs no server: `zig build test-mongo` runs it.
+//! tools show them in. It needs zefir-mongo-bson only, and no server.
 
 const std = @import("std");
-const mongo = @import("mongo");
 const bson = @import("mongo-bson");
 
 const Status = enum { active, suspended };
@@ -1295,20 +1316,34 @@ cut short:     error.InvalidBson
    | Zig | BSON |
    |---|---|
    | `bool` | boolean |
-   | `i8`–`i32`, `u8`–`u16` | int32 |
-   | `i33`–`i64`, `u32` | int64 |
+   | `i8`–`i32`, `u8`–`u31`: the integers whose values all fit int32 | int32 |
+   | `i33`–`i64`, `u32`–`u63` | int64 |
    | `f32`, `f64` | double |
    | `[]const u8` | string, UTF-8 checked both ways |
    | an exhaustive `enum` | string, the name of its tag |
    | `?T` | null, or the value |
    | a struct | document |
-   | `[]const T`, `[N]T`, a tuple | array |
-   | `bson.ObjectId`, `bson.DateTime`, `bson.Binary`, `bson.Decimal128`, `bson.Timestamp`, `bson.Regex`, `bson.Value`, `bson.RawDocument` | as they are |
+   | `[]const T`, `[N]T` | array |
+   | a tuple | array, written only: `decode` reads an array into a slice or an `[N]T` |
+   | `bson.ObjectId`, `bson.DateTime`, `bson.Binary`, `bson.Decimal128`, `bson.Timestamp`, `bson.Regex`, `bson.Null`, `bson.MinKey`, `bson.MaxKey`, `bson.Value`, `bson.RawDocument` | as they are |
+   | `bson.OwnedDocument` | document, written only: `decode` reads a document into a `bson.RawDocument` |
+   | `bson.DbPointer`, `bson.JavaScriptWithScope` | as they are, read only: deprecated types, never written |
 
-   `u64`, `usize`, `isize` and `c_int` stop the build, as BSON's integers
-   are signed and of fixed sizes; so do unions, pointers other than
-   slices, and a type that holds itself. The message names the field and
-   says what to use instead.
+   `u64`, `usize`, `isize` and the C integer types, such as `c_int`, stop
+   the build, as BSON's integers are signed and of fixed sizes; so do
+   integers of more than 64 bits, floats other than `f32` and `f64`,
+   non-exhaustive enums, `??T`, unions, pointers other than slices, and a
+   type that holds itself. `bson.encode` also takes a pointer to an array
+   or to a tuple, such as a string literal or `&.{ a, b }`; `bson.decode`
+   does not. The message names the field and says what to use instead.
+
+   This table holds wherever zefir-mongo-bson writes or reads a struct,
+   so for every operation of zefir-mongo. zefir-odm narrows it for its
+   models: for one, it refuses `f32`, which a double would round, and it
+   never writes a null, as an optional that is null stays out of the
+   document. Its own table is in
+   [Types of fields](../../odm/examples/README.md#types-of-fields) of the
+   guide of odm.
 2. **Null.** A null optional goes as BSON null, and `.skip_nulls = true`
    leaves such fields out. In a filter the null stays: `.{ .email =
    maybe_email }` with a null matches the documents whose `email` is null
@@ -1316,7 +1351,7 @@ cut short:     error.InvalidBson
    and a `deleteMany` with it would delete them all. A null `_id` is the
    exception: an insert makes the `_id` there.
 3. **Decoding.** A field that the document lacks takes its default, an
-   optional one null; any other missing field is an error that names it.
+   optional one null; any other missing field is `error.MissingField`.
    Fields that the struct lacks are skipped, since servers add fields to
    their replies; `.unknown_fields = .fail` refuses them. An integer field
    takes an int32, an int64 or a whole double that fits it: a number that
@@ -1324,10 +1359,11 @@ cut short:     error.InvalidBson
    arena; `.copy_strings = false` leaves them pointing into the document.
 4. **Anonymous literals** are written where they go, with operators and
    paths as fields named `.@"$gte"` and `.@"address.city"`. A literal
-   number is an int32, or an int64 when it does not fit. A tuple is an
-   array, so the stages of a pipeline go as `.{ stage1, stage2 }`. `.{}`
-   is the empty document, which as a filter matches everything; in the
-   place of a list it is the empty list.
+   integer is an int32, or an int64 when it does not fit; a float literal,
+   such as `1.0`, is a double. A tuple is an array, so the stages of a
+   pipeline go as `.{ stage1, stage2 }`. `.{}` is the empty document,
+   which as a filter matches everything; in the place of a list it is the
+   empty list.
 5. **`bson.literal`** makes a document when the program compiles, in
    static bytes: no allocator and no `try`. It is for what does not
    change, such as a sort, a projection or the keys of an index.
@@ -1341,6 +1377,11 @@ cut short:     error.InvalidBson
    without copying. No bytes make a reader panic or read out of bounds:
    broken ones are `error.InvalidBson`. `dupe` copies a document into a
    `bson.OwnedDocument`, which frees its bytes with `deinit`.
+8. **Extended JSON** is what `{f}` prints of a `bson.RawDocument`, as in
+   the run above: Relaxed Extended JSON, the text of MongoDB's tools, for
+   logs and test messages. It goes one way only: zefir-mongo-bson
+   writes Extended JSON and reads none, so a document comes from the
+   codec, `bson.literal`, a `bson.Builder` or BSON bytes.
 
 Every operation takes its documents in any of these forms: a
 `bson.RawDocument`, a `bson.OwnedDocument`, or a struct or a literal that
@@ -1373,7 +1414,7 @@ is `.not_sent` goes through only once what stopped it has changed:
 | Error | Outcome | When |
 |---|---|---|
 | `InvalidArgument` | not sent | the call breaks a rule of the client: a bad name, an update without an operator, an empty `insertMany`, a document no message can hold, a bad connection string |
-| `Unsupported` | not sent | what v0.1 does not do: an option of the connection string, a server other than a standalone mongod of 7.0 or later, a password that SCRAM-SHA-256 cannot take |
+| `Unsupported` | not sent | what the client does not do yet: an option of the connection string, a server other than a standalone mongod of 7.0 or later, a password that SCRAM-SHA-256 cannot take |
 | `Closed` | not sent | the client or the cursor was closed |
 | `Unavailable` | not sent | no connection: the server is not there, or closed the connection while it opened; the pool is paused after a clear; `connect` has not succeeded |
 | `AuthenticationFailed` | not sent | the server refused the user |
@@ -1581,8 +1622,8 @@ as a whole. `partial` and the diagnostics say how far it came:
 The documents after `answered` may or may not be in. `partial.inserted_ids`
 holds the `_id` of every document, made before the first batch: look the
 doubtful ones up by them, with `.{ ._id = .{ .@"$in" = ids } }`, and send
-only the missing ones. A test shows it, with a server that goes away at
-the third batch:
+only the missing ones. A test, `import_test.zig`, shows it, with a server
+that goes away at the third batch:
 
 ```zig
 //! An import of ten customers, cut in the middle: what insertMany says
@@ -1837,8 +1878,9 @@ and a trace. `.of(ctx)` makes one.
   without one.
 
 One deadline covers all the calls made under it: in the handler of a
-request, every call takes what is left of the request's time. Tests
-against a scripted server that holds its replies show each case:
+request, every call takes what is left of the request's time. The tests
+of `deadlines_test.zig`, against a scripted server that holds its
+replies, show each case:
 
 ```zig
 //! Deadlines and cancellation, against a scripted server whose replies
@@ -2045,12 +2087,12 @@ watches them, and stops them all within one deadline. The client is a bean
 as it is. The guides of the modules write App `core.App`: it is
 `zefir.App` of the umbrella module.
 
-The module below declares what App builds. `Mongo` is a struct of
-factories, whose functions make beans: `mongoClient` the client, from the
-config that `main` hands to `init`; `usersDb` the database of the users,
-from that client and the generator of ObjectIds. The generator and the
-repository `Users` are providers, built by their `init`, whose parameters
-App passes by their types:
+`app.zig` signs a user up under App. Its module declares what App
+builds. `Mongo` is a struct of factories, whose functions make beans:
+`mongoClient` the client, from the config that `main` hands to `init`;
+`usersDb` the database of the users, from that client and the generator
+of ObjectIds. The generator and the repository `Users` are providers,
+built by their `init`, whose parameters App passes by their types:
 
 ```zig
 //! The users of the shop under zefir.App: a module declares the client of
@@ -2298,7 +2340,7 @@ the `sequence` of its documents for a write, and the number of the
 came; and `count(io, name)`, the commands of one name. With it a test
 checks what your code sent, and that it sent nothing twice.
 
-The users of the shop, as an application keeps them:
+`Users.zig`: the users of the shop, as an application keeps them:
 
 ```zig
 //! The users of the shop, as the application keeps them in the collection
@@ -2354,7 +2396,7 @@ pub fn byEmail(users: Users, io: std.Io, op: mongo.OperationContext, arena: std.
 }
 ```
 
-And their tests:
+And their tests, `users_test.zig`:
 
 ```zig
 //! Tests of the users of the shop without MongoDB. Each runs `Users` on a
@@ -2474,9 +2516,10 @@ test "byEmail asks for one document by its e-mail, and reads it into a User" {
   production.
 - The script comes before the server, and the server before the client,
   so that their `defer`s end the client first and the script last.
-- The build of zefir runs these tests, and those of
+- They need no MongoDB: they run with the other tests of your project,
+  with no server to start, as do the tests of
   [deadlines](#deadlines-and-cancellation) and of
-  [a write cut short](#a-write-cut-short), in `zig build test-mongo`.
+  [a write cut short](#a-write-cut-short).
 
 ## Under zefir-odm
 
@@ -2497,16 +2540,20 @@ to `odm.Registry.init`; the driver lives longer than the registry.
   waits for the sessions of a generation itself before it closes it.
 - **The operations are those of this guide.** odm's insert is an ordered
   `insertMany`; its updates are `updateOne`, `updateMany` and
-  `replaceOne`; its find is `find`, or `findOne` when it asks for one
-  document; then `countDocuments`, `createIndexes`, `aggregate` and
-  `runCommand`. odm builds the BSON, and the driver builds no command of
-  its own.
+  `replaceOne`; its deletes `deleteOne` and `deleteMany`; its find is
+  `find`, or `findOne` when it asks for one document; then
+  `countDocuments`, `createIndexes`, `aggregate` and `runCommand`. odm
+  builds the BSON, and the driver builds one command of its own, the
+  `{ping: 1}` of odm's `ping`.
 - **The errors keep their names**, and their diagnostics their texts and
   codes; a write that a unique index refused, codes 11000, 11001 and
   12582, is odm's `DuplicateKey`, with the index of the document.
 - **It is zefir compatible**: it passes both groups of odm's conformance
-  suite against mongod, and group C, the rules of the contract, against
-  `mongo.testing.FakeServer`.
+  suite against mongod: group C, the rules of the contract, such as
+  deadlines, cancellation, closing, memory and secrets, and group D, the
+  data, from inserts and indexes to queries, updates, deletes, counts,
+  aggregations and commands. Against `mongo.testing.FakeServer`, which
+  keeps no data, it passes group C.
 
-The guide of odm, [src/odm/examples/README.md](../../odm/examples/README.md),
-starts from its quick start.
+[The guide of zefir-odm](../../odm/examples/README.md) starts from its
+quick start.

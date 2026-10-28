@@ -1,4 +1,4 @@
-# security
+# zefir-security: JWT for Zig services (security.jwt)
 
 zefir-security is planned to hold the security of zefir services:
 authentication, authorization, MFA/TOTP, WebAuthn, TLS integration, CORS
@@ -113,10 +113,15 @@ and a signature. Here is one that orders gave Ann:
 eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IjIwMjYtMTAifQ.eyJpc3MiOiJvcmRlcnMiLCJzdWIiOiJ1c2VyLTciLCJhdWQiOlsib3JkZXJzIiwiYmlsbGluZyJdLCJpYXQiOjE3OTI2NzA0MDAsImV4cCI6MTc5MjY3MTMwMCwicm9sZXMiOlsiYnV5ZXIiXX0.O2qCht2ma0AURVamIEnpQNz-YMc9weaHZYs3l4VaZPttriA3wGcDmVX_17-V96HjT5p4BITZ0TrWVU7pHtYKCg
 ```
 
-Its header and its payload are JSON:
+Its header and its payload are JSON. The header:
 
 ```json
 {"alg":"EdDSA","typ":"JWT","kid":"2026-10"}
+```
+
+The payload:
+
+```json
 {"iss":"orders","sub":"user-7","aud":["orders","billing"],"iat":1792670400,"exp":1792671300,"roles":["buyer"]}
 ```
 
@@ -175,24 +180,31 @@ serves with http; billing takes rpc instead of http:
 
 ```zig
 // build.zig of the orders service
-const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
-const exe = b.addExecutable(.{
-    .name = "orders",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "security", .module = zefir.module("zefir-security") },
-            .{ .name = "validator", .module = zefir.module("zefir-validator") },
-            .{ .name = "confy", .module = zefir.module("zefir-confy") },
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-            .{ .name = "http", .module = zefir.module("zefir-http") },
-        },
-    }),
-});
-b.installArtifact(exe);
-b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "orders",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "security", .module = zefir.module("zefir-security") },
+                .{ .name = "validator", .module = zefir.module("zefir-validator") },
+                .{ .name = "confy", .module = zefir.module("zefir-confy") },
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "http", .module = zefir.module("zefir-http") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the service").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
 
 > [!TIP]
@@ -211,9 +223,9 @@ PEM file:
 openssl genpkey -algorithm ed25519 -out orders.pem
 ```
 
-A whole program: it reads the key from its settings, signs a token for
-user-7, verifies it as a route of orders would, and shows how billing
-refuses it, since the token is not meant for billing.
+A whole program, `minute.zig`: it reads the key from its settings, signs a
+token for user-7, verifies it as a route of orders would, and shows how
+billing refuses it, since the token is not meant for billing.
 
 ```zig
 const std = @import("std");
@@ -364,7 +376,7 @@ claims are enough. A field takes one of these types:
 | a struct | an object, with its own names and rules |
 
 - **Names.** A field's claim is its Zig name, or the name of `v.rename`, as
-  for the fields of a DTO in zefir-http and zefir-rpc. A name that is a URL,
+  for the fields of a DTO in zefir-http. A name that is a URL,
   as RFC 7519 suggests for claims that must not collide with others', goes
   into `pub const claim_names = .{ .is_root = "http://example.com/is_root" };`.
 - **Required or not.** A field without a default and not `?T` must be in
@@ -397,6 +409,9 @@ const verified = try verifier.verify(Claims, io, arena.allocator(), token, .{});
 logger.info("Token verified", .{
     .subject = verified.registered.subject,
     .roles = verified.claims.roles,
+    // jwt.Signer writes "iat" into every token.
+    .lifetime_s = verified.registered.expires_at - verified.registered.issued_at.?,
+});
 ```
 
 Everything in the result lives in the arena given to `verify`, the arena
@@ -427,19 +442,21 @@ openssl rand -base64 48                                          # an HMAC secre
 ```
 
 The files are PEM: a block of base64 between two marker lines. The runs
-of this guide use a sample key of orders, whose public key is:
+of this guide use a sample key of orders.
+
+> [!WARNING]
+> This sample key is for reading the guide alone. Its private half is
+> published with the sources of zefir, so anybody can sign tokens with
+> it: never let a service trust it. Make the keys of your services with
+> the commands above.
+
+The public half of the sample key, which no service may trust:
 
 ```text
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA1rQM3tcZwaeBG73FtMkSgozKMFHlEkT24K1KGN0rUAY=
 -----END PUBLIC KEY-----
 ```
-
-> [!WARNING]
-> This sample key is for reading the guide alone. Its private half is
-> published in this repository, in `cases.zig`, so anybody can sign tokens
-> with it: never let a service trust it. Make the keys of your services
-> with the commands above.
 
 Each kind of key loads with a function of its own, with the algorithm you
 name; a key of another curve than that algorithm's fails at once, when the
@@ -533,22 +550,30 @@ try b.useKeys(&keys);
 for ([_][]const u8{ old_token, new_token }) |token| {
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+    switch (result.outcome) {
+        .ok => |charge| try testing.expectEqualStrings("user-7", charge.customer),
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 // Step 3: the old key is gone, and a token it signed is refused.
 try b.useKeys(keys[1..]);
 var result = try b.charge(.{ .bearer = old_token });
 defer result.deinit();
-try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+switch (result.outcome) {
+    .ok => return error.TestUnexpectedResult,
+    .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+}
 ```
 
 ## Signing in
 
-The sign-in of orders, `POST /api/login`, is a controller of zefir-http
-that checks a user's name and secret and signs a token for them:
+The sign-in of orders, `POST /api/login`, is `LoginController.zig`, a
+controller of zefir-http that checks a user's name and secret and signs a
+token for them:
 
 ```zig
+// Application code (src/LoginController.zig of the orders service): zefir-security ships none of these.
 //! Signing in: POST /api/login. A user sends a name and a secret, and the
 //! answer is a token of orders, in the form that OAuth clients read (RFC
 //! 6749 §5.1). zefir has no passwords: here the users and their secrets
@@ -668,10 +693,11 @@ The header of a token of orders is `{"alg":"EdDSA","typ":"JWT","kid":"2026-10"}`
 the algorithm of the key, the type and the id of the key. `sign` refuses
 what it cannot write as a token that `verify` would take, with
 `jwt.SignError`: `InvalidClaims` for a string that is not UTF-8, a float
-that is not finite or a time past the year 9999, `TokenTooLarge` for a
-token over 8 KiB, `BadSignature` for a key that `deinit` wiped while the
-signer still used it, and `OutOfMemory`. They are mistakes of the program,
-so the error handler of orders answers them with 500.
+that is not finite, a lifetime under one second or a time before 1970 or
+past the year 9999, `TokenTooLarge` for a token over 8 KiB, `BadSignature`
+for a key that `deinit` wiped while the signer still used it, and
+`OutOfMemory`. They are mistakes of the program, so the error handler of
+orders answers them with 500.
 
 ## Errors
 
@@ -684,7 +710,7 @@ client:
 | --- | --- | --- |
 | `TokenTooLarge` | the token is over 8 KiB | the token is too large |
 | `Malformed` | not three parts; bad base64url or JSON; a claim or a member of the header that jwt reads, given twice; nesting deeper than 32; a member of the header of the wrong type | the token is malformed |
-| `UnsupportedAlgorithm` | `alg` is none of the six, `none` among them | the token's algorithm is not supported |
+| `UnsupportedAlgorithm` | `alg` is absent or none of the six, `none` among them | the token's algorithm is not supported |
 | `UnsupportedHeader` | the header has `crit`, or `cty` says the payload is a nested token | the token's header asks for what is not supported |
 | `WrongType` | `typ` is absent or none of the verifier's `token_types` | the token is of another type |
 | `UnknownKey` | no key of the verifier has this `kid`; or the token has no `kid` and the verifier more than one key | the token's key is unknown |
@@ -715,7 +741,8 @@ request keeps its own, as `JwtAuth` does.
 
 ## HTTP
 
-The middleware `JwtAuth` checks the token of every request of orders:
+The middleware `JwtAuth`, in `auth.zig`, checks the token of every
+request of orders:
 
 ```zig
 // Application code (src/auth.zig of the orders service): zefir-security ships none of these.
@@ -727,14 +754,12 @@ The middleware `JwtAuth` checks the token of every request of orders:
 //! reason kept for the answer. `requireUser` sits in the middleware of the
 //! controllers that need a user, and answers 401 with that reason.
 //!
-//! ```zig
 //! // main: the server's middleware, for every request
 //! .middleware = .{&jwt_auth},
 //! // a protected controller
 //! .middleware = .{auth.requireUser},
 //! // a handler
 //! const user = try ctx.local(auth.CurrentUser);
-//! ```
 
 const std = @import("std");
 const http = @import("http");
@@ -839,9 +864,11 @@ The error handler of orders adds that header to the 401 of `requireUser`.
 The sign-in refuses a wrong name or secret with an error of its own,
 `InvalidCredentials`, and its 401 says `Bearer` alone: the reason a token
 was refused is no answer to a mistyped secret, even while Ann's app still
-sends her expired token. The handler also maps the errors of `sign`:
+sends her expired token. The handler, `errors.zig`, also maps the errors
+of `sign`:
 
 ```zig
+// Application code (src/errors.zig of the orders service): zefir-security ships none of these.
 //! The error handler of the orders service: the one place where errors
 //! become responses. Every 401 carries `WWW-Authenticate`, as RFC 9110
 //! asks: that of `requireUser` with the reason when a token was refused
@@ -883,8 +910,8 @@ pub const AppErrors = struct {
 };
 ```
 
-The orders of a user stand behind `requireUser`, and read the user from
-`ctx.locals`:
+The controller of a user's orders, `OrdersController.zig`, stands behind
+`requireUser` and reads the user from `ctx.locals`:
 
 ```zig
 //! The orders of the signed-in user: GET /api/orders. Its routes stand
@@ -918,7 +945,8 @@ pub fn list(_: *OrdersController, ctx: *http.Context) !http.Json(OrdersResponse)
 }
 ```
 
-The whole service, on the backend in memory, with Ann's app as its client:
+The whole service, `orders.zig`, on the backend in memory, with Ann's app
+as its client:
 
 ```zig
 //! The orders service of the guide on the backend in memory, with Ann's
@@ -1099,9 +1127,10 @@ GET /api/orders with Ann's token, its signature changed
 → 401 WWW-Authenticate: Bearer error="invalid_token", error_description="the token's signature is invalid"
 ```
 
-The tests of orders run the same server on `http.testing.Backend`, with a
-key made for them and the time set by `jwt.testing.FixedClock`, so a token
-expires without a wait of 15 minutes ([Tests](#tests) tells more):
+The tests of orders, `auth_test.zig`, run the same server on
+`http.testing.Backend`, with a key made for them and the time set by
+`jwt.testing.FixedClock`, so a token expires without a wait of 15 minutes
+([Tests](#tests) tells more):
 
 ```zig
 //! Tests of the orders service without a network: `http.testing.Backend`
@@ -1254,9 +1283,10 @@ test "POST /api/login gives a token for 15 minutes" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const verified = try s.verifier.verify(auth.Claims, s.clock.io(), arena.allocator(), answer.access_token, .{});
-    try testing.expectEqualStrings("user-7", verified.registered.subject.?);
-    try testing.expectEqual(noon, verified.registered.issued_at.?);
-    try testing.expectEqual(15 * 60, verified.registered.expires_at - verified.registered.issued_at.?);
+    try testing.expectEqualDeep(@as(?[]const u8, "user-7"), verified.registered.subject);
+    const issued_at = verified.registered.issued_at orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(noon, issued_at);
+    try testing.expectEqual(15 * 60, verified.registered.expires_at - issued_at);
     try testing.expectEqual(1, verified.claims.roles.len);
     try testing.expectEqualStrings("buyer", verified.claims.roles[0]);
 
@@ -1264,7 +1294,7 @@ test "POST /api/login gives a token for 15 minutes" {
     var refused = try s.signIn("guess", null);
     defer refused.deinit();
     try testing.expectEqual(401, refused.status);
-    try testing.expectEqualStrings("Bearer", refused.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), refused.header("www-authenticate"));
 }
 
 test "GET /api/orders with the token sees the user" {
@@ -1279,6 +1309,7 @@ test "GET /api/orders with the token sees the user" {
     try testing.expectEqual(200, res.status);
     const mine = try std.json.parseFromSliceLeaky(OrdersController.OrdersResponse, res.arena.allocator(), res.body, .{});
     try testing.expectEqualStrings("user-7", mine.user);
+    try testing.expectEqual(1, mine.roles.len);
     try testing.expectEqualStrings("buyer", mine.roles[0]);
 }
 
@@ -1290,7 +1321,7 @@ test "without a token the request is anonymous, and a protected route says 401" 
     var res = try s.backend.request(s.clock.io(), .{ .method = .GET, .target = "/api/orders" });
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), res.header("www-authenticate"));
     // Nothing was refused: no token came.
     try testing.expectEqualStrings("", s.records.written());
 }
@@ -1307,7 +1338,7 @@ test "an expired token is 401 invalid_token with its description" {
     var res = try s.getOrders(token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token has expired\"", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer error=\"invalid_token\", error_description=\"the token has expired\""), res.header("www-authenticate"));
     // The log says why, and nothing of the token.
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=Expired claim=exp") != null);
     try testing.expect(std.mem.find(u8, s.records.written(), token) == null);
@@ -1341,7 +1372,7 @@ test "with an expired token and a wrong secret, POST /api/login refuses the secr
     var res = try s.signIn("guess", token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer"), res.header("www-authenticate"));
     try testing.expectEqualStrings("{\"code\":\"invalid_credentials\",\"message\":\"Wrong user or secret\"}", res.body);
 }
 
@@ -1356,7 +1387,7 @@ test "a token for billing alone is 401 at orders" {
     var res = try s.getOrders(token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token is not meant for this service\"", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer error=\"invalid_token\", error_description=\"the token is not meant for this service\""), res.header("www-authenticate"));
 }
 
 test "a token of orders without sub is 401 where a user is needed" {
@@ -1370,7 +1401,7 @@ test "a token of orders without sub is 401 where a user is needed" {
     var res = try s.getOrders(token);
     defer res.deinit();
     try testing.expectEqual(401, res.status);
-    try testing.expectEqualStrings("Bearer error=\"invalid_token\", error_description=\"the token lacks a required claim\"", res.header("www-authenticate").?);
+    try testing.expectEqualDeep(@as(?[]const u8, "Bearer error=\"invalid_token\", error_description=\"the token lacks a required claim\""), res.header("www-authenticate"));
     try testing.expect(std.mem.find(u8, s.records.written(), "Token refused reason=MissingClaim claim=sub") != null);
 }
 
@@ -1427,15 +1458,16 @@ test "after orders changes its key, a token of the old one still passes" {
 
 ## RPC
 
-Billing is a service of zefir-rpc. Its authenticator checks the token of
-every call, with the public key of orders from its settings:
+Billing is a service of zefir-rpc. Its authenticator, `JwtAuthenticator.zig`,
+checks the token of every call, with the public key of orders from its
+settings:
 
 ```zig
+// Application code (src/JwtAuthenticator.zig of the billing service): zefir-security ships none of these.
 //! The authenticator of the billing service: who calls, by the token that
 //! orders signed for its user. Billing has only public keys of orders,
 //! from its settings: it checks tokens, and cannot make one.
 //!
-//! ```zig
 //! // main of billing: the key of orders, APP_AUTH_ORDERS_KEY and
 //! // APP_AUTH_ORDERS_KEY_ID, and while it changes the other one,
 //! // APP_AUTH_OTHER_KEY and APP_AUTH_OTHER_KEY_ID, as in orders
@@ -1448,8 +1480,7 @@ every call, with the public key of orders from its settings:
 //! }
 //! const verifier: jwt.Verifier = try .init(.{ .keys = keys[0..key_count], .issuer = "orders", .audiences = &.{"billing"} });
 //! var authenticator: JwtAuthenticator = .{ .verifier = &verifier };
-//! // .authenticator = &authenticator in the options of rpc.Server
-//! ```
+//! // .authenticator = &authenticator among the parts of rpc.Server.init, next to .handlers
 
 const jwt = @import("security").jwt;
 const rpc = @import("rpc");
@@ -1503,8 +1534,8 @@ pub fn authenticate(self: *JwtAuthenticator, ctx: *const rpc.AuthContext) rpc.Au
   alone; a claim that orders adds later is skipped, and billing goes on
   working.
 
-The contract of billing, a package that billing and its clients share,
-and its handler, which charges an order to the caller:
+The contract of billing, `billing_api.zig`, the root of the package
+billing-api that billing and its clients share:
 
 ```zig
 //! The package billing-api: the contract of the billing service.
@@ -1543,7 +1574,11 @@ test "the rules of the requests are valid" {
 }
 ```
 
+The handler of billing, `BillingHandler.zig`, which charges an order to
+the caller:
+
 ```zig
+// Application code (src/BillingHandler.zig of the billing service): zefir-security ships none of these.
 //! The handler of billing.v1: it charges an order to the caller, whom the
 //! authenticator found by the token. Every method needs a caller.
 
@@ -1567,9 +1602,9 @@ pub fn charge(_: *BillingHandler, ctx: *rpc.Context, req: api.ChargeRequest) err
 The token reaches billing as the credentials of a call. Orders calls
 billing for the user it serves with the token that came with the request:
 `.{ .credentials = .{ .bearer = token } }` among the options of
-`client.call`, as the tests below do. The tests run billing on
-`rpc.testing.Server`, and sign their tokens as orders would, with a key of
-orders made for them; billing gets only its public half:
+`client.call`, as the tests below do. The tests, `rpc_auth_test.zig`, run
+billing on `rpc.testing.Server`, and sign their tokens as orders would,
+with a key of orders made for them; billing gets only its public half:
 
 ```zig
 //! Tests of the billing service without a network: `rpc.testing.Server`
@@ -1659,8 +1694,13 @@ test "billing takes the token of orders" {
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
     // The handler charged the user of the token.
-    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
-    try testing.expectEqual(42, result.outcome.ok.order_id);
+    switch (result.outcome) {
+        .ok => |charge| {
+            try testing.expectEqualStrings("user-7", charge.customer);
+            try testing.expectEqual(42, charge.order_id);
+        },
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 test "a token without billing among its audiences is unauthenticated" {
@@ -1672,8 +1712,13 @@ test "a token without billing among its audiences is unauthenticated" {
 
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", result.outcome.failure.message);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 }
 
 test "no token is anonymous, and a method that needs a user refuses it" {
@@ -1683,8 +1728,13 @@ test "no token is anonymous, and a method that needs a user refuses it" {
 
     var result = try b.charge(.none);
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
-    try testing.expectEqualStrings("Authentication required", result.outcome.failure.message);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Authentication required", failure.message);
+        },
+    }
 }
 
 test "an expired token is unauthenticated" {
@@ -1698,7 +1748,10 @@ test "an expired token is unauthenticated" {
     b.clock.set(noon + 16 * 60);
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+    }
 }
 
 test "Basic credentials and a token without sub are unauthenticated" {
@@ -1709,8 +1762,13 @@ test "Basic credentials and a token without sub are unauthenticated" {
     // Billing takes tokens alone.
     var basic = try b.charge(.{ .basic = .{ .user = "ann", .password = "ann-secret" } });
     defer basic.deinit();
-    try testing.expectEqual(.unauthenticated, basic.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", basic.outcome.failure.message);
+    switch (basic.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 
     // A token that orders signed for nobody: no caller to charge.
     const signer: jwt.Signer = try .init(&b.orders_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
@@ -1718,8 +1776,13 @@ test "Basic credentials and a token without sub are unauthenticated" {
     defer testing.allocator.free(token);
     var nobody = try b.charge(.{ .bearer = token });
     defer nobody.deinit();
-    try testing.expectEqual(.unauthenticated, nobody.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", nobody.outcome.failure.message);
+    switch (nobody.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 }
 
 test "while the key of orders changes, billing takes the tokens of both keys" {
@@ -1740,14 +1803,20 @@ test "while the key of orders changes, billing takes the tokens of both keys" {
     for ([_][]const u8{ old_token, new_token }) |token| {
         var result = try b.charge(.{ .bearer = token });
         defer result.deinit();
-        try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+        switch (result.outcome) {
+            .ok => |charge| try testing.expectEqualStrings("user-7", charge.customer),
+            .failure => return error.TestUnexpectedResult,
+        }
     }
 
     // Step 3: the old key is gone, and a token it signed is refused.
     try b.useKeys(keys[1..]);
     var result = try b.charge(.{ .bearer = old_token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+    }
 }
 ```
 
@@ -1810,8 +1879,8 @@ and that entry gets no pointer to the clock.
   has no handle meant for tests.
 
 The tests of this guide, [`auth_test.zig`](#http) and
-[`rpc_auth_test.zig`](#rpc), run with `zig build test-security` in this
-repository; a service runs its own with a test step of its `build.zig`.
+[`rpc_auth_test.zig`](#rpc), are ordinary Zig tests: a service runs its
+own with a test step of its `build.zig`.
 
 ## Security
 
@@ -1909,11 +1978,12 @@ it expires, and nothing takes it back early. So:
 | a time (NumericDate) | 0 to 253402300799 seconds, the end of the year 9999 | — |
 | the path of a violation | 256 bytes | `Details.path_buf` |
 
-- **Memory.** `verify` takes its memory from the arena it is given, about
-  twice the size of the token and the slices of your claims, and frees
-  nothing: the arena of the request frees it all. `sign` takes the token
-  from its allocator, which the caller frees, and frees its own buffers
-  before it returns.
+- **Memory.** `verify` takes its memory from the arena it is given: a few
+  sizes of the token, and for each list of your claims the memory of its
+  items, so a list of large structs can take more. It frees nothing: the
+  arena of the request frees it all. `sign` takes the token from its
+  allocator, which the caller frees, and frees its own buffers before it
+  returns.
 - **Many tasks at once.** A `Verifier` and a `Signer` never change after
   `init`, and own nothing: one of each serves every task of a service. The
   keys they borrow must live, unchanged, as long as they do: `deinit` a key

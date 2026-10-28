@@ -1,10 +1,12 @@
-# Common rules
+# zefir-validator: Common rules
 
 Rules for values of several kinds: `v.equals` and `v.notEquals` compare a value
 with one value, `v.oneOf` and `v.noneOf` with a list of values, and `v.empty` and
 `v.notEmpty` check that a string or a list is empty or not.
 
 ```zig
+const v = @import("validator");
+
 const Role = enum { admin, editor, viewer };
 
 const Team = struct {

@@ -13,9 +13,6 @@
 //!   APP_NATS_URL        the server; nats://127.0.0.1:4222 by default
 //!   APP_NATS_USER       the user
 //!   APP_NATS_PASSWORD   the password
-//!
-//! In tests/nats, `zig build example-user_password_auth` runs it against
-//! the server with users of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

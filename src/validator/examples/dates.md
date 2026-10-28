@@ -1,4 +1,4 @@
-# Dates
+# zefir-validator: Dates
 
 Rules for dates and times written as strings: Zig has no date type, so a DTO
 carries a date as the string it arrived as. `v.date`, `v.rfc3339`, `v.iso8601`
@@ -6,6 +6,8 @@ and `v.militaryTime` check a format; `v.minDate` and `v.maxDate` bound a date
 or a date-time.
 
 ```zig
+const v = @import("validator");
+
 const Booking = struct {
     check_in: []const u8,
     created_at: []const u8,

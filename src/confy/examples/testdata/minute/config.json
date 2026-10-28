@@ -1,0 +1,4 @@
+{
+  "http": { "port": 8080 },
+  "db": { "url": "postgres://localhost:5432/app" }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "zefir-demo",
+  "log_level": "info",
+  "http": {
+    "port": 8080,
+    "allowed_origins": ["http://localhost:3000"]
+  },
+  "db": {
+    "url": "postgres://localhost:5432/app",
+    "pool": { "size": 4 }
+  }
+}

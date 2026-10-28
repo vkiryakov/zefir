@@ -22,14 +22,14 @@
 //! defer broker.deinit();
 //!
 //! var server_side: mailbox.Server = .init(&broker);
-//! var server = try rpc.Server.init(gpa, .{ .transport = server_side.serverTransport(), .handlers = .{&users} });
+//! var server = try rpc.Server.init(gpa, .{ .handlers = .{&users} }, .{ .transport = server_side.serverTransport() });
 //! defer server.deinit(io);
 //! try server.start(io);
 //!
 //! var client_side: mailbox.Client = try .init(&broker, .{});
 //! defer client_side.deinit(io); // also after a connect that failed
 //! try client_side.connect(io);
-//! var client = try rpc.Client.init(gpa, .{ .transport = client_side.clientTransport() });
+//! var client = try rpc.Client.init(gpa, .{}, .{ .transport = client_side.clientTransport() });
 //! defer client.deinit();
 //! ```
 //!
@@ -503,8 +503,8 @@ pub const Client = struct {
     /// The reply queue and the task that reads it, once `connect` has run.
     replies: ?*Queue = null,
     task: std.Io.Future(void) = undefined,
-    /// The `std.Io` of `connect`: in Debug, `call` checks that it gets the
-    /// same.
+    /// The `std.Io` of `connect`: in safe builds, `call` checks that it gets
+    /// the same.
     io_vtable: ?*const std.Io.VTable = null,
 
     pub const Options = struct {

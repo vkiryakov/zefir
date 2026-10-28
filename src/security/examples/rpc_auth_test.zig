@@ -85,8 +85,13 @@ test "billing takes the token of orders" {
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
     // The handler charged the user of the token.
-    try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
-    try testing.expectEqual(42, result.outcome.ok.order_id);
+    switch (result.outcome) {
+        .ok => |charge| {
+            try testing.expectEqualStrings("user-7", charge.customer);
+            try testing.expectEqual(42, charge.order_id);
+        },
+        .failure => return error.TestUnexpectedResult,
+    }
 }
 
 test "a token without billing among its audiences is unauthenticated" {
@@ -98,8 +103,13 @@ test "a token without billing among its audiences is unauthenticated" {
 
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", result.outcome.failure.message);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 }
 
 test "no token is anonymous, and a method that needs a user refuses it" {
@@ -109,8 +119,13 @@ test "no token is anonymous, and a method that needs a user refuses it" {
 
     var result = try b.charge(.none);
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
-    try testing.expectEqualStrings("Authentication required", result.outcome.failure.message);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Authentication required", failure.message);
+        },
+    }
 }
 
 test "an expired token is unauthenticated" {
@@ -124,7 +139,10 @@ test "an expired token is unauthenticated" {
     b.clock.set(noon + 16 * 60);
     var result = try b.charge(.{ .bearer = token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+    }
 }
 
 test "Basic credentials and a token without sub are unauthenticated" {
@@ -135,8 +153,13 @@ test "Basic credentials and a token without sub are unauthenticated" {
     // Billing takes tokens alone.
     var basic = try b.charge(.{ .basic = .{ .user = "ann", .password = "ann-secret" } });
     defer basic.deinit();
-    try testing.expectEqual(.unauthenticated, basic.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", basic.outcome.failure.message);
+    switch (basic.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 
     // A token that orders signed for nobody: no caller to charge.
     const signer: jwt.Signer = try .init(&b.orders_key, .{ .issuer = "orders", .audiences = &.{ "orders", "billing" } });
@@ -144,8 +167,13 @@ test "Basic credentials and a token without sub are unauthenticated" {
     defer testing.allocator.free(token);
     var nobody = try b.charge(.{ .bearer = token });
     defer nobody.deinit();
-    try testing.expectEqual(.unauthenticated, nobody.outcome.failure.code);
-    try testing.expectEqualStrings("Invalid credentials", nobody.outcome.failure.message);
+    switch (nobody.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try testing.expectEqual(.unauthenticated, failure.code);
+            try testing.expectEqualStrings("Invalid credentials", failure.message);
+        },
+    }
 }
 
 test "while the key of orders changes, billing takes the tokens of both keys" {
@@ -166,12 +194,18 @@ test "while the key of orders changes, billing takes the tokens of both keys" {
     for ([_][]const u8{ old_token, new_token }) |token| {
         var result = try b.charge(.{ .bearer = token });
         defer result.deinit();
-        try testing.expectEqualStrings("user-7", result.outcome.ok.customer);
+        switch (result.outcome) {
+            .ok => |charge| try testing.expectEqualStrings("user-7", charge.customer),
+            .failure => return error.TestUnexpectedResult,
+        }
     }
 
     // Step 3: the old key is gone, and a token it signed is refused.
     try b.useKeys(keys[1..]);
     var result = try b.charge(.{ .bearer = old_token });
     defer result.deinit();
-    try testing.expectEqual(.unauthenticated, result.outcome.failure.code);
+    switch (result.outcome) {
+        .ok => return error.TestUnexpectedResult,
+        .failure => |failure| try testing.expectEqual(.unauthenticated, failure.code),
+    }
 }

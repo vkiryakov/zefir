@@ -6,9 +6,6 @@
 //! Settings, from the environment:
 //!
 //!   APP_NATS_URL   the server; nats://127.0.0.1:4222 by default
-//!
-//! In tests/nats, `zig build example-request_reply` runs it against the
-//! servers of the repository's docker-compose.yml.
 
 const std = @import("std");
 const confy = @import("confy");

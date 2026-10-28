@@ -1,29 +1,57 @@
-# log
+# zefir-log: structured logging for Zig services
 
-**Structured logging for Zig services.** A log is the diary of a running
-program: what it did, for whom, and what went wrong. This module writes that
-diary for a service. Every event becomes one line of JSON on stdout, where a
-log collector (Vector, Fluent Bit, Promtail and the like) picks it up and ships
-it to a log store, and there you search it. The message is a constant and the
-data goes in typed fields; the fields are checked when the program compiles,
-secrets come out as `[REDACTED]`, and levels change while the service runs.
+A log is the diary of a running program: what it did, for whom, and what
+went wrong. zefir-log writes that diary for a service. Every event becomes
+one line of JSON on stdout, where a log collector (Vector, Fluent Bit,
+Promtail and the like) picks it up and ships it to a log store, and there
+you search it. The message is a constant and the data goes in typed fields;
+the fields are checked when the program compiles, secrets come out as
+`[REDACTED]`, and levels change while the service runs.
+
+> [!IMPORTANT]
+> **Not implemented yet (TODO):**
+>
+> - **32-bit targets.** zefir-log builds for 64-bit targets only, such as
+>   x86_64 and aarch64; on a 32-bit target the build stops (see
+>   [Installation](#installation)).
+> - **Log files.** Records go to stdout or to a writer you own, which may
+>   write a file; zefir-log opens no log files of its own and rotates none.
+>   A log collector takes stdout.
+> - **Ready-made alerts.** A subscriber is your code: no Slack, pager or
+>   webhook client ships with zefir-log. This guide shows one for
+>   [Slack](#example-payment-errors-to-slack).
+> - **Export of the counters.** `stats()` returns them, and no Prometheus or
+>   OpenTelemetry exporter ships with zefir-log: a service shows them on a
+>   metrics endpoint of its own.
+
+A whole program: it creates the logger at the start of `main`, then logs
+that a user was created.
 
 ```zig
-const logger: log.Logger = try .init(init.gpa, init.io, .{
-    .service = .{ .name = "user-service", .version = "1.0.0" },
-    .mode = .{ .queued = .{} },
-});
-defer logger.deinit();
+const std = @import("std");
+const log = @import("log");
 
-const users = logger.scoped("users");
-users.info("User created", .{ .user_id = 42, .email = "ada@example.com", .password = password });
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service", .version = "1.0.0" },
+    });
+    defer logger.deinit();
+
+    const users = logger.scoped("users");
+    users.info("User created", .{ .user_id = 42, .email = "ada@example.com", .password = "hunter2" });
+}
 ```
 
-The record, one line on stdout (formatted here):
+```text
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
+```
+
+The record is one line on stdout. Formatted, it reads:
 
 ```json
 {
-  "timestamp": "2026-10-12T09:41:07.416Z",
+  "timestamp": "2026-10-12T09:41:07.415Z",
   "level": "info",
   "message": "User created",
   "service.name": "user-service",
@@ -43,8 +71,9 @@ The record, one line on stdout (formatted here):
   every handle sees it at once.
 - **Out of the way.** Logging never allocates after `init` and never returns
   an error. In queued mode, a call copies the record into a queue and goes on.
-- **Alerts and filters.** Subscribers get error records on threads of their
-  own; interceptors drop the noise before it is written.
+- **Alerts and filters.** Subscribers get the records of the levels they
+  ask for, such as error records for alerts, on threads of their own;
+  interceptors drop the noise before it is written.
 - **One stream.** std.log, from your code and from your libraries, goes
   through the same logger.
 
@@ -69,10 +98,10 @@ The record, one line on stdout (formatted here):
 - [Interceptors](#interceptors)
 - [Threads and Io](#threads-and-io)
 - [Limits](#limits)
-- [Performance](#performance)
 
-Examples that `zig build test` compiles and runs:
-[a service's main](service.zig) · [nested configuration, std.log and a trace](config.zig) · [queued mode with alerts](alerts.zig)
+Every program of this guide is shown whole, with what it printed. Three of
+them bring the chapters together:
+[a service's main](#scopes-and-levels) · [nested configuration, std.log and a trace](#example-nested-configuration-stdlog-and-a-trace) · [queued mode with alerts](#example-queued-mode-with-alerts)
 
 ## Why structured logs
 
@@ -146,26 +175,38 @@ This guide is on the `dev` branch, so the command fetches its latest commit; `--
 > operations only on integers of up to 32 bits, so the build stops with
 > `expected 32-bit integer type or smaller; found 64-bit integer type`.
 
-Then import the `zefir-log` module in `build.zig`:
+Then import the `zefir-log` module in `build.zig`, and `zefir-core` with it:
+a request's trace comes in a `core.Context`, and a stop with a deadline
+takes a `core.Deadline`.
 
 ```zig
-const zefir = b.dependency("zefir", .{
-    .target = target,
-    .optimize = optimize,
-});
+// build.zig
+const std = @import("std");
 
-const exe = b.addExecutable(.{
-    .name = "app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "log", .module = zefir.module("zefir-log") },
-        },
-    }),
-});
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const zefir = b.dependency("zefir", .{ .target = target, .optimize = optimize });
+
+    const exe = b.addExecutable(.{
+        .name = "app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "log", .module = zefir.module("zefir-log") },
+                .{ .name = "core", .module = zefir.module("zefir-core") },
+            },
+        }),
+    });
+    b.installArtifact(exe);
+    b.step("run", "Run the app").dependOn(&b.addRunArtifact(exe).step);
+}
 ```
+
+Every program of this guide is such a `src/main.zig`, and `zig build run`
+runs it.
 
 > [!TIP]
 > log is also part of the umbrella module: with `zefir.module("zefir")`
@@ -219,8 +260,8 @@ Run it. Each record is one line of JSON:
 $ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Application started","service.name":"user-service","service.version":"1.0.0","port":9000}
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","user_id":42,"email":"ada@example.com","password":"[REDACTED]"}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"warn","message":"Slow query","service.name":"user-service","service.version":"1.0.0","scope":"users","table":"users","ms":1250}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Payment failed","service.name":"user-service","service.version":"1.0.0","order_id":1001,"reason":"CardDeclined"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"warn","message":"Slow query","service.name":"user-service","service.version":"1.0.0","scope":"users","table":"users","ms":1250}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"error","message":"Payment failed","service.name":"user-service","service.version":"1.0.0","order_id":1001,"reason":"CardDeclined"}
 ```
 
 Lines like these are meant for programs. To read one yourself, pipe the output
@@ -242,14 +283,35 @@ $ zig build run | jq 'select(.message == "User created")'
 ```
 
 Or switch the logger to text with `.format = .text`, which reads well in a
-terminal (the service fields are left out):
+terminal. The same program with that one option:
+
+```zig
+const std = @import("std");
+const log = @import("log");
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service", .version = "1.0.0" },
+        .format = .text, // one line for people: the service fields are left out
+    });
+    defer logger.deinit();
+
+    logger.info("Application started", .{ .port = 9000 });
+
+    const users = logger.scoped("users");
+    users.info("User created", .{ .user_id = 42, .email = "ada@example.com", .password = "hunter2" });
+    users.warn("Slow query", .{ .table = "users", .ms = 1250 });
+
+    logger.err("Payment failed", .{ .order_id = 1001, .reason = error.CardDeclined });
+}
+```
 
 ```text
 $ zig build run
 2026-10-12T09:41:07.415Z INFO  Application started port=9000
 2026-10-12T09:41:07.415Z INFO  [users] User created user_id=42 email=ada@example.com password=[REDACTED]
-2026-10-12T09:41:07.416Z WARN  [users] Slow query table=users ms=1250
-2026-10-12T09:41:07.416Z ERROR Payment failed order_id=1001 reason=CardDeclined
+2026-10-12T09:41:07.415Z WARN  [users] Slow query table=users ms=1250
+2026-10-12T09:41:07.415Z ERROR Payment failed order_id=1001 reason=CardDeclined
 ```
 
 ### What a record holds
@@ -284,11 +346,12 @@ The logger writes a record only when its level reaches the threshold, which
 is `info` by default. In production, `trace` and `debug` records are skipped.
 The threshold can change while the program runs: for the whole program (see
 [Changing the level while the program runs](#changing-the-level-while-the-program-runs)),
-or for one part of it (see [Scopes and levels](#scopes-and-levels)).
+or for one part of it (see [Scopes and levels](#scopes-and-levels)). In
+[a service's main](#scopes-and-levels), at the threshold `info`:
 
 ```zig
-const logger: log.Logger = try .init(init.gpa, init.io, .{ .level = .info }); // the default
-logger.debug("Cache miss", .{ .key = key }); // below the threshold: skipped
+logger.info("Application started", .{ .port = 9000 });
+logger.debug("Loading configuration", .{}); // below the threshold: not written
 ```
 
 > [!TIP]
@@ -342,8 +405,8 @@ pub fn main(init: std.process.Init) !void {
 $ zig build run
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"debug","message":"Reading configuration","service.name":"user-service","service.version":"1.0.0","path":"config.json"}
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"debug","message":"Connecting to the database","service.name":"user-service","service.version":"1.0.0","host":"postgres.internal"}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"Application started","service.name":"user-service","service.version":"1.0.0","port":9000}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","user_id":42}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Application started","service.name":"user-service","service.version":"1.0.0","port":9000}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","user_id":42}
 ```
 
 Both start-up steps are in the log, and `Cache miss` is not: after
@@ -354,7 +417,8 @@ Both start-up steps are in the log, and `Cache miss` is not: after
   or when the configuration is reloaded. No restart is needed.
 - The starting threshold can come from the configuration. With confy, declare
   `log_level: log.Level = .info` in the configuration struct and pass
-  `.level = config.log_level`.
+  `.level = config.log_level`, as the [Slack example](#example-payment-errors-to-slack)
+  does.
 - `setLevel` changes the global threshold only: a scope with a rule of its own
   keeps it (see [Scopes and levels](#scopes-and-levels)).
 
@@ -393,6 +457,8 @@ logger.info("Configuration loaded", .{ .config = config });
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Configuration loaded","service.name":"billing","service.version":"2.1.0","config":{"port":9000,"database":{"host":"postgres.internal","password":"[REDACTED]","pool":{"min":2,"max":16}},"vault_key":"[REDACTED]","regions":["eu-west","us-east"]}}
 ```
 
+The configuration, with the declaration of its type, is in
+[Example: nested configuration, std.log and a trace](#example-nested-configuration-stdlog-and-a-trace).
 In text, a struct spreads into dotted keys:
 
 ```text
@@ -405,13 +471,16 @@ pointers ends. A pointer to an opaque type is logged through the type's
 
 The logger checks the fields when the program compiles. A field it cannot
 write, a field without a name or a name that records use themselves stops the
-build, and the error names the field and says what to do:
+build, and the error names the field and says what to do. Each of these calls
+stops the build:
 
 ```zig
-logger.info("User created", .{user_id}); // a field without a name
-logger.info("Listening", .{ .port = port }); // port is an anyerror!u16
-logger.info("Request", .{ .level = 3 }); // a name records use themselves
+logger.info("User created", .{user_id}); // compile error: a field without a name
+logger.info("Listening", .{ .port = port }); // compile error: port is an anyerror!u16
+logger.info("Request", .{ .level = 3 }); // compile error: a name records use themselves
 ```
+
+The errors, one for each call:
 
 ```text
 error: zefir.log: fields need names: write .{ .user_id = id }, not .{ id }
@@ -491,7 +560,11 @@ const ApiKey = struct {
 comptime {
     std.debug.assert(log.isSensitive(ApiKey));
 }
+```
 
+Then, in `main`, log keys of that type:
+
+```zig
 const key: ApiKey = .{ .value = "sk-live-123" };
 const backup: ?ApiKey = null;
 logger.info("Vault keys loaded", .{ .vault = "payments", .key = key, .backup = backup, .all = &[_]ApiKey{ key, key } });
@@ -501,7 +574,7 @@ The record (formatted here):
 
 ```json
 {
-  "timestamp": "2026-10-12T09:41:07.416Z",
+  "timestamp": "2026-10-12T09:41:07.415Z",
   "level": "info",
   "message": "Vault keys loaded",
   "service.name": "billing",
@@ -558,31 +631,50 @@ a part of `db`.
 Why that matters: production is slow, and you suspect the database pool. You
 want its `debug` records, but not those of the whole service, which would
 flood the log. So you lower the threshold for `db` alone, while the service
-runs, and raise it again when you are done:
+runs, and raise it again when you are done. A service's main that does it:
 
 ```zig
-const logger: log.Logger = try .init(init.gpa, init.io, .{
-    .service = .{ .name = "user-service", .version = "1.0.0" },
-    .level = .info,
-    .scopes = &.{.{ .prefix = "db", .level = .warn }},
-});
-defer logger.deinit();
+//! zefir-log in a service's main: a threshold for the whole service, one of
+//! its own for the database, and the database's threshold changed while the
+//! service runs, as an admin endpoint would change it.
 
-const pool = logger.scoped("db.pool");
-pool.info("Connection opened", .{ .connections = 1 }); // db logs from warn: not written
-pool.warn("Pool is almost full", .{ .connections = 19, .max = 20 });
+const std = @import("std");
+const log = @import("log");
 
-try logger.setScopeLevel("db", .debug); // say, from an admin endpoint
-pool.debug("Waiting for a connection", .{ .waiting_ms = 340 });
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "user-service", .version = "1.0.0" },
+        .level = .info,
+        .scopes = &.{.{ .prefix = "db", .level = .warn }},
+    });
+    defer logger.deinit();
 
-try logger.setScopeLevel("db", null); // back to the global threshold
-pool.debug("Connection reused", .{ .connections = 19 }); // not written again
+    logger.info("Application started", .{ .port = 9000 });
+    logger.debug("Loading configuration", .{}); // below the threshold: not written
+
+    const pool = logger.scoped("db.pool");
+    pool.info("Connection opened", .{ .connections = 1 }); // db logs from warn: not written
+    pool.warn("Pool is almost full", .{ .connections = 19, .max = 20 });
+
+    try logger.setScopeLevel("db", .debug); // say, from an admin endpoint
+    pool.debug("Waiting for a connection", .{ .waiting_ms = 340 });
+
+    try logger.setScopeLevel("db", null); // back to the global threshold
+    pool.debug("Connection reused", .{ .connections = 19 }); // not written again
+}
 ```
 
 ```text
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Application started","service.name":"user-service","service.version":"1.0.0","port":9000}
 {"timestamp":"2026-10-12T09:41:07.415Z","level":"warn","message":"Pool is almost full","service.name":"user-service","service.version":"1.0.0","scope":"db.pool","connections":19,"max":20}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"debug","message":"Waiting for a connection","service.name":"user-service","service.version":"1.0.0","scope":"db.pool","waiting_ms":340}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"debug","message":"Waiting for a connection","service.name":"user-service","service.version":"1.0.0","scope":"db.pool","waiting_ms":340}
 ```
+
+`Loading configuration` is below the global threshold, `info`, and
+`Connection opened` below the rule for `db`, `warn`. `Waiting for a
+connection` goes out while the rule says `debug`; `Connection reused` does
+not, since the rule is gone and the global threshold holds again.
 
 The threshold of a scope comes from the longest rule that matches its name;
 a scope without a rule uses the global threshold:
@@ -606,8 +698,13 @@ flowchart TD
 
 - Every handle sees a change at once, from any thread. A trailing dot in a
   prefix is ignored.
-- The starting rules can come from the configuration: confy can read
-  `.scopes` like any other option.
+- The starting rules can come from the configuration, from a JSON file
+  only: confy reads a `[]const log.ScopeRule` field from
+  `"scopes": [{ "prefix": "db", "level": "warn" }]`, and no environment
+  variable, `.env` or INI file can hold a list of structs. `log.Options`
+  itself cannot be a field of the configuration: its mode and output are
+  unions, which confy does not read. Read the level and the rules, and pass
+  them to `init`.
 - `scoped` copies the name, so it need not outlive the handle. A handle holds
   one scope, and `scoped` replaces it.
 
@@ -628,19 +725,23 @@ flowchart LR
 core reads that header into a `core.Context` (see the
 [core guide](../../core/examples/README.md)). `withContext(ctx)` gives a handle
 whose records carry the ids, and `.src = @src()` among the fields adds where in
-the code the record was logged:
+the code the record was logged. Billing logs a paid invoice so:
 
 ```zig
-const users = logger.scoped("users").withContext(ctx);
-users.info("User created", .{ .src = @src(), .user_id = 42 });
+const invoices = logger.scoped("billing.invoices").withContext(ctx);
+invoices.info("Invoice paid", .{ .src = @src(), .invoice_id = 1001, .amount = Money{ .cents = 1999 }, .receipt_digest = log.hex(&digest) });
 ```
 
 ```json
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"User created","service.name":"user-service","service.version":"1.0.0","scope":"users","source":{"file":"users.zig","line":12},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","user_id":42}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Invoice paid","service.name":"billing","service.version":"2.1.0","scope":"billing.invoices","source":{"file":"main.zig","line":77},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","invoice_id":1001,"amount":"19.99 EUR","receipt_digest":"9f86d081"}
 ```
 
 Now `trace_id = 4bf92f3577b34da6a3ce929d0e0e4736` in the log store finds this
-record together with the gateway's and billing's records of the same request.
+record together with the gateway's and the users service's records of the
+same request. `source` is the file and the line of the call; `amount` is a
+`Money`, whose own `format` writes `19.99 EUR`, and `log.hex` writes the bytes
+of the digest as hex. The whole program is in
+[Example: nested configuration, std.log and a trace](#example-nested-configuration-stdlog-and-a-trace).
 
 - `withContext` copies the trace and span ids of the context; a context
   without a trace gives a handle without them. The context's deadline and
@@ -655,25 +756,37 @@ record together with the gateway's and billing's records of the same request.
 | `.file_line` (the default) | `"source":{"file":"users.zig","line":12}`   |
 | `.full`                    | the column, the function and the module too |
 
+A level can have a mode of its own. In
+[Example: queued mode with alerts](#example-queued-mode-with-alerts), only
+error records write their call site:
+
 ```zig
-.source = .{ .default = .none, .err = .full }, // the call site of error records only, in full
+.source = .{ .default = .none, .err = .file_line }, // the call site of error records only
 ```
 
 ## std.log
 
 Libraries, and std itself, log through std.log. Route it into the logger, and
 their records land in the same JSON stream, under the same levels and scope
-rules:
+rules. Declare the bridge in the root file of the program, the one with
+`main`:
 
 ```zig
 pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
-...
+```
+
+Then, once the logger exists, call `logger.installStdLog()` to install
+the bridge that `std_options` declares. From that call on, the records
+that std, other libraries and zefir's own clients of NATS, MongoDB and
+Redis write through std.log go to this logger:
+
+```zig
 logger.installStdLog(); // std.log goes to the logger from here on
 std.log.scoped(.cache).info("warmed up {d} entries", .{128});
 ```
 
 ```json
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"info","message":"warmed up 128 entries","service.name":"billing","service.version":"2.1.0","scope":"cache"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"warmed up 128 entries","service.name":"billing","service.version":"2.1.0","scope":"cache"}
 ```
 
 - std.log's scope becomes the record's scope and its formatted text the
@@ -689,6 +802,105 @@ std.log.scoped(.cache).info("warmed up {d} entries", .{128});
 > `std.log.debug` is compiled out unless `std_options` also sets
 > `.log_level = .debug` (or a `.log_scope_levels` entry). std.log's arguments
 > are formatted by std.fmt, so redaction does not reach inside them.
+
+### Example: nested configuration, std.log and a trace
+
+The examples of [Fields](#fields), [Secrets](#secrets),
+[Tracing a request](#tracing-a-request) and std.log come from one program,
+the main of a billing service:
+
+```zig
+//! zefir-log with structured values: std.log routed through the logger, a
+//! nested configuration, keys of a type marked sensitive, a type with its
+//! own text, bytes as hex, the call site and a request's trace ids.
+
+const std = @import("std");
+const core = @import("core");
+const log = @import("log");
+
+/// std.log goes through the logger once `installStdLog` is called.
+pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
+
+/// A key from a vault: marked, so the logger never writes it.
+const ApiKey = struct {
+    value: []const u8,
+
+    pub const zefir_sensitive = true;
+};
+
+// A missing or private marker would leak the key: check it at compile time.
+comptime {
+    std.debug.assert(log.isSensitive(ApiKey));
+}
+
+/// An amount that logs as "19.99 EUR".
+const Money = struct {
+    cents: i64,
+
+    pub fn format(m: Money, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("{d}.{d:0>2} EUR", .{ @divTrunc(m.cents, 100), @abs(@rem(m.cents, 100)) });
+    }
+};
+
+const Config = struct {
+    port: u16,
+    database: struct {
+        host: []const u8,
+        password: []const u8, // redacted by its name
+        pool: struct { min: u8, max: u8 },
+    },
+    vault_key: ApiKey, // redacted by its type: the name is not a secret name
+    regions: []const []const u8,
+};
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "billing", .version = "2.1.0" },
+    });
+    defer logger.deinit();
+
+    // Libraries that log through std.log end up in the same stream.
+    logger.installStdLog(); // std.log goes to the logger from here on
+    std.log.scoped(.cache).info("warmed up {d} entries", .{128});
+
+    const config: Config = .{
+        .port = 9000,
+        .database = .{ .host = "postgres.internal", .password = "change-me", .pool = .{ .min = 2, .max = 16 } },
+        .vault_key = .{ .value = "sk-live-123" },
+        .regions = &.{ "eu-west", "us-east" },
+    };
+    logger.info("Configuration loaded", .{ .config = config });
+
+    const key: ApiKey = .{ .value = "sk-live-123" };
+    const backup: ?ApiKey = null;
+    logger.info("Vault keys loaded", .{ .vault = "payments", .key = key, .backup = backup, .all = &[_]ApiKey{ key, key } });
+
+    // In a request handler, the trace ids come from the request's context;
+    // here, from a trace built by hand.
+    const trace: core.TraceContext = .{
+        .trace_id = try .parseHex("4bf92f3577b34da6a3ce929d0e0e4736"),
+        .span_id = try .parseHex("00f067aa0ba902b7"),
+        .flags = .{ .sampled = true },
+        .state = .empty,
+    };
+    const ctx = core.Context.root.withTrace(trace);
+    const digest = [_]u8{ 0x9f, 0x86, 0xd0, 0x81 };
+    const invoices = logger.scoped("billing.invoices").withContext(ctx);
+    invoices.info("Invoice paid", .{ .src = @src(), .invoice_id = 1001, .amount = Money{ .cents = 1999 }, .receipt_digest = log.hex(&digest) });
+}
+```
+
+```text
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"warmed up 128 entries","service.name":"billing","service.version":"2.1.0","scope":"cache"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Configuration loaded","service.name":"billing","service.version":"2.1.0","config":{"port":9000,"database":{"host":"postgres.internal","password":"[REDACTED]","pool":{"min":2,"max":16}},"vault_key":"[REDACTED]","regions":["eu-west","us-east"]}}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Vault keys loaded","service.name":"billing","service.version":"2.1.0","vault":"payments","key":"[REDACTED]","backup":"[REDACTED]","all":"[REDACTED]"}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Invoice paid","service.name":"billing","service.version":"2.1.0","scope":"billing.invoices","source":{"file":"main.zig","line":77},"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":"00f067aa0ba902b7","invoice_id":1001,"amount":"19.99 EUR","receipt_digest":"9f86d081"}
+```
+
+The database password is redacted by its name, the vault key and every
+`ApiKey` by their type; `Money` writes its own text, and `log.hex` turns the
+digest into hex. The first record came through std.log.
 
 ## Output
 
@@ -841,14 +1053,18 @@ stdout.
 | Memory           | no queue                                    | `Options.queueBytes()`: 17 MiB with the defaults                       |
 | Good for         | tests, command-line tools, short programs   | services                                                               |
 
-The queue is set up by these options:
+The queue is set up by these options, here with their defaults, as
+[Example: queued mode with alerts](#example-queued-mode-with-alerts) sets
+them:
 
 ```zig
-.mode = .{ .queued = .{
-    .capacity = 4096, // records the queue holds: a power of two, at least 2
-    .batch_size = 128, // records per write
-    .overflow = .drop_new, // or .block
-} },
+.mode = .{
+    .queued = .{
+        .capacity = 4096, // records the queue holds: a power of two, at least 2
+        .batch_size = 128, // records per write
+        .overflow = .drop_new, // or .block
+    },
+},
 ```
 
 | `.overflow`           | When the queue is full                                    |
@@ -890,16 +1106,21 @@ flowchart LR
     shutdown --> deinit["logger.deinit()"]
 ```
 
+[Example: queued mode with alerts](#example-queued-mode-with-alerts) stops
+its logger so:
+
 ```zig
-const deadline: core.Deadline = .after(std.Io.Clock.awake.now(io), .fromSeconds(5));
+// Stop: write what is queued, for five seconds at most.
+const deadline: core.Deadline = .after(std.Io.Clock.awake.now(init.io), .fromSeconds(5));
 logger.shutdown(deadline.toTimeout()) catch |e| switch (e) {
     error.Timeout => std.debug.print("log: {d} records not written\n", .{logger.stats().pending}),
 };
-logger.deinit();
 ```
 
-`shutdown` refuses new records, lets the subscribers finish, writes the queue
-and stops the logger's threads, all within the timeout you give it:
+and `deinit` follows when `main` returns, through the `defer logger.deinit()`
+right after `init`. `shutdown` refuses new records, lets the subscribers
+finish, writes the queue and stops the logger's threads, all within the
+timeout you give it:
 
 ```mermaid
 sequenceDiagram
@@ -946,27 +1167,41 @@ full, stdout is closed, a write fails), the logger does not return an error to
 the code that logged: it counts what happened. `stats()` returns the counters,
 from any thread; a service usually shows them on its metrics endpoint.
 
-Say a burst of 10 000 records hits a queue of 64 slots:
+Say a burst of 10 000 records hits a queue of 64 slots, with
+`.overflow = .block`:
 
 ```zig
-const logger: log.Logger = try .init(init.gpa, init.io, .{
-    .mode = .{ .queued = .{ .capacity = 64 } },
-});
-defer logger.deinit();
+const std = @import("std");
+const log = @import("log");
 
-for (0..10_000) |i| logger.info("Cache refreshed", .{ .entry = i });
-logger.flush(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {};
+pub fn main(init: std.process.Init) !void {
+    // The records go to a writer that throws them away: this program shows
+    // only the counters.
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .mode = .{ .queued = .{ .capacity = 64, .overflow = .block } },
+        .output = .{ .writer = &discard.writer },
+    });
+    defer logger.deinit();
 
-const s = logger.stats();
-std.debug.print("accepted {d}, written {d}, dropped because the queue was full {d}\n", .{ s.accepted, s.written, s.dropped.queue_full });
+    for (0..10_000) |i| logger.info("Cache refreshed", .{ .entry = i });
+    logger.flush(.{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {};
+
+    const s = logger.stats();
+    std.debug.print("accepted {d}, written {d}, dropped because the queue was full {d}\n", .{ s.accepted, s.written, s.dropped.queue_full });
+}
 ```
 
 ```text
-accepted 10000, written 9975, dropped because the queue was full 25
+$ zig build run
+accepted 10000, written 10000, dropped because the queue was full 0
 ```
 
-The writer thread kept up with all but 25 records; a bigger `.capacity`, or
-`.overflow = .block`, would have kept them too. All the counters:
+With `.overflow = .block`, a call that found the queue full waited for room,
+so the burst lost nothing. With the default, `.drop_new`, a call never waits:
+the records that find no room are dropped and counted in
+`dropped.queue_full`, and how many depends on how fast the output takes them.
+A bigger `.capacity` absorbs a bigger burst. All the counters:
 
 | Field                                       | Counts                                                                                                              |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -1027,13 +1262,27 @@ written. An emergency record skips everything and goes straight to stderr,
 before the call returns:
 
 ```zig
-logger.emergency("Disk full", .{ .path = "/var/lib/app", .free_bytes = 0 });
+const std = @import("std");
+const log = @import("log");
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .mode = .{ .queued = .{} },
+    });
+    defer logger.deinit();
+
+    // The disk is full and the service is about to stop: the record goes to
+    // stderr before the call returns, whatever the queue still holds.
+    logger.emergency("Disk full", .{ .path = "/var/lib/app", .free_bytes = 0 });
+}
 ```
 
 ```text
-stderr:
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Disk full","path":"/var/lib/app","free_bytes":0}
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"error","message":"Disk full","path":"/var/lib/app","free_bytes":0}
 ```
+
+The record is on stderr; stdout gets nothing.
 
 - The record goes past the queue, the interceptors and the subscribers, also
   after `shutdown`, through the logger's own Io.
@@ -1065,6 +1314,7 @@ the program reads it with [confy](../../confy/examples/README.md), as a
 `build.zig`, next to log:
 
 ```zig
+// build.zig, in .imports next to log
 .{ .name = "confy", .module = zefir.module("zefir-confy") },
 ```
 
@@ -1151,17 +1401,9 @@ out of git:
 APP_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/XXXX
 ```
 
-Run it:
-
-```text
-$ zig build run
-{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Charge started","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"amount_cents":4200}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Charge declined","service.name":"orders","service.version":"3.0.0","scope":"payments","order_id":7,"reason":"card_expired"}
-{"timestamp":"2026-10-12T09:41:07.416Z","level":"error","message":"Upstream timeout","service.name":"orders","service.version":"3.0.0","scope":"http","path":"/v1/orders"}
-```
-
-stdout gets all three records, as always. The webhook gets one post, for the
-error in `payments`:
+Run it with `zig build run`. stdout gets all three records, as always, and
+the webhook gets one post, for the error in `payments`. The post and the
+channel below are samples of such a run, since it takes a channel of yours:
 
 ```json
 {"text":":rotating_light: *Charge declined* in `payments`\n```{\"timestamp\":\"2026-10-12T09:41:07.416Z\",\"level\":\"error\",\"message\":\"Charge declined\",\"service.name\":\"orders\",\"service.version\":\"3.0.0\",\"scope\":\"payments\",\"order_id\":7,\"reason\":\"card_expired\"}```"}
@@ -1255,10 +1497,10 @@ The rules:
 > safe builds.
 
 > [!NOTE]
-> The handler runs on the subscriber's thread, which is not a task of your
-> `io`. The example uses `init.io`, a `std.Io.Threaded`, which serves any
-> thread. Under an evented `io`, give the notifier a `std.Io.Threaded` of its
-> own; see [Threads and Io](#threads-and-io).
+> The handler runs on the subscriber's thread, which is the logger's, not a
+> task of a zio runtime. So in a service on zio, too, it posts through
+> `init.io`, which any thread may use, as here; the clients and servers of
+> the service take the runtime's `rt.io()`. See [Threads and Io](#threads-and-io).
 
 ## Interceptors
 
@@ -1325,30 +1567,116 @@ Subscribers and interceptors side by side:
 | May be slow       | yes                                 | no                                        |
 | Typical use       | Slack, a pager, metrics             | dropping noise                            |
 
+### Example: queued mode with alerts
+
+A service logs in queued mode, with a subscriber for alerts and an
+interceptor for health checks, and stops the logger with a deadline. Its
+main:
+
+```zig
+//! zefir-log in queued mode, as a service runs it: an alert subscriber for
+//! error records, an interceptor that drops health checks, the call site
+//! of error records only, and a stop with a deadline.
+
+const std = @import("std");
+const core = @import("core");
+const log = @import("log");
+
+/// Where alerts go. A real handler posts `event.line` to a webhook or a
+/// pager, with its own timeout: it runs on the subscriber's own thread, so
+/// it may take its time. That thread is the logger's, not a task of a zio
+/// runtime: post through `init.io`, which any thread may use. A failed post
+/// is best returned, or logged by the handler itself: a task it hands the
+/// post to logs like any caller, and its error record would come back as an
+/// alert.
+const Alerts = struct {
+    sent: std.atomic.Value(u32) = .init(0),
+
+    fn send(context: ?*anyopaque, event: *const log.Event) anyerror!void {
+        const alerts: *Alerts = @ptrCast(@alignCast(context orelse return error.NoContext));
+        _ = event; // a real handler posts event.line
+        _ = alerts.sent.fetchAdd(1, .monotonic);
+    }
+};
+
+/// Health checks would flood the log: drop them before they are written.
+fn dropHealthChecks(_: ?*anyopaque, event: *const log.Event) bool {
+    return !std.mem.eql(u8, event.scope, "http.health");
+}
+
+pub fn main(init: std.process.Init) !void {
+    const logger: log.Logger = try .init(init.gpa, init.io, .{
+        .service = .{ .name = "orders", .version = "3.0.0" },
+        .mode = .{
+            .queued = .{
+                .capacity = 4096, // records the queue holds: a power of two, at least 2
+                .batch_size = 128, // records per write
+                .overflow = .drop_new, // or .block
+            },
+        },
+        .source = .{ .default = .none, .err = .file_line }, // the call site of error records only
+    });
+    defer logger.deinit();
+
+    var alerts: Alerts = .{};
+    const subscription = try logger.subscribe(.{ .levels = &.{.err}, .context = &alerts, .handler = Alerts.send });
+    try logger.use(.{ .filter = dropHealthChecks });
+
+    logger.scoped("http.health").info("GET /health", .{ .status = 200 }); // dropped
+    const orders = logger.scoped("orders");
+    orders.info("Order placed", .{ .src = @src(), .order_id = 7, .total_cents = 4200 });
+    orders.err("Payment declined", .{ .src = @src(), .order_id = 7, .reason = "card_expired" });
+
+    logger.unsubscribe(subscription); // returns once the alert is handled
+
+    // Stop: write what is queued, for five seconds at most.
+    const deadline: core.Deadline = .after(std.Io.Clock.awake.now(init.io), .fromSeconds(5));
+    logger.shutdown(deadline.toTimeout()) catch |e| switch (e) {
+        error.Timeout => std.debug.print("log: {d} records not written\n", .{logger.stats().pending}),
+    };
+    std.debug.print("alerts sent: {d}, records filtered: {d}\n", .{ alerts.sent.load(.monotonic), logger.stats().filtered });
+}
+```
+
+```text
+$ zig build run
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"info","message":"Order placed","service.name":"orders","service.version":"3.0.0","scope":"orders","order_id":7,"total_cents":4200}
+{"timestamp":"2026-10-12T09:41:07.415Z","level":"error","message":"Payment declined","service.name":"orders","service.version":"3.0.0","scope":"orders","source":{"file":"main.zig","line":52},"order_id":7,"reason":"card_expired"}
+alerts sent: 1, records filtered: 1
+```
+
+The health check was dropped, the error record reached the subscriber, and
+only the error record carries its call site. The last line comes from
+`std.debug.print`, on stderr, once `shutdown` has written the queue.
+
 ## Threads and Io
 
-The logger works with the `std.Io` you give it, and with threads of its own:
+A service runs on [zio](https://github.com/lalinsky/zio), the async runtime
+of zefir's services: its clients, its servers and their tasks take `rt.io()`
+of the `zio.Runtime` that `main` creates. The logger takes `init.io`, the
+`io` that `main(init: std.process.Init)` gets, and has threads of its own:
 
-- **Your `io`** reads the clock and, in sync mode, writes stdout. Log from
-  threads or tasks of that `io`; with `std.Io.Threaded`, which
-  `main(init: std.process.Init)` gives you, that is any thread.
+- **Your `io`**, `init.io`, reads the clock and, in sync mode, writes
+  stdout. Any thread may log through it: `main`, the tasks of the zio
+  runtime and threads of your own. So the logger can start before the
+  runtime and stop after it.
 - **The logger's own threads**, the writer thread and one per subscriber, run
-  on a `std.Io.Threaded` the logger creates for itself, and so do its waits
-  for them; those waits keep a cancel request for the caller's task.
-- **A handler that logs** writes through that own Io too. In sync mode, under
-  an application `io` that is not a `std.Io.Threaded` (an evented one), it
-  could not share the output lock with the application's tasks, so those
-  records are dropped and counted in `hook_errors`: use queued mode there.
+  on an Io the logger creates for itself, and so do its waits for them; those
+  waits keep a cancel request for the caller's task.
+- **A handler that logs** writes through that own Io too. In sync mode it
+  shares the output lock with your threads when the logger has `init.io`;
+  under another `io`, such as `rt.io()`, the records a handler logs in sync
+  mode are dropped and counted in `hook_errors`.
 - **One logger per process.** Two loggers on one stdout do not coordinate
   their writes.
 
 > [!IMPORTANT]
-> The logger's threads are not tasks of your `io`: a handler runs on its
-> subscriber's thread, and in queued mode the writer thread calls a `.writer`
-> output. Under an evented `io`, make their calls through an `Io` that serves
-> any thread, such as a `std.Io.Threaded` of their own: a handler must not post
-> through the evented `io`, and a `File.Writer` made with it must not be the
-> queued output.
+> The logger's threads are not tasks of your zio runtime: a handler runs on
+> its subscriber's thread, and in queued mode the writer thread calls a
+> `.writer` output. Make their calls through `init.io`, which serves any
+> thread: a handler posts through `init.io`, as the
+> [Slack example](#example-payment-errors-to-slack) does, and a `File.Writer`
+> that is the queued output is made with `init.io`.
 
 ## Limits
 
@@ -1363,24 +1691,3 @@ The logger works with the `std.Io` you give it, and with threads of its own:
 | Subscribers, interceptors | 8 subscribers and 8 interceptors in the logger's life                                                            |
 | Emergency records         | 100 at once, then 100 per second                                                                                 |
 | Targets                   | 64-bit: the counters and queue positions are 64-bit atomics                                                      |
-
-## Performance
-
-```sh
-zig build bench
-```
-
-builds `src/log/bench.zig` with ReleaseFast and runs it; it also runs core's
-benchmarks. The scenarios cover sync and queued modes with 1 to 16 producers,
-real outputs, record sizes, batch sizes, hooks and bursts. For each, it prints
-the calls per second, the records written per second, the latency of one call
-(p50, p99, p99.9), the records dropped, the CPU time per call and the memory
-the logger allocated. A record goes to a writer that throws it away unless a
-scenario says otherwise, so the numbers measure the logger rather than a
-terminal. The typical record is a request log of 185 bytes of JSON.
-
-> [!NOTE]
-> The numbers will be published here once they are measured on an idle
-> machine: the first run shared the machine with other heavy work, so its
-> numbers said more about that load than about the logger. Until then, run the
-> command on your machine.

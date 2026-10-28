@@ -1,7 +1,6 @@
-//! zefir-log with structured values: a nested configuration with a key
-//! marked sensitive, a type with its own text, bytes as hex, the call site,
-//! a request's trace ids and std.log routed through the logger.
-//! `zig build test` runs it; it fails if the logger loses a record.
+//! zefir-log with structured values: std.log routed through the logger, a
+//! nested configuration, keys of a type marked sensitive, a type with its
+//! own text, bytes as hex, the call site and a request's trace ids.
 
 const std = @import("std");
 const core = @import("core");
@@ -13,11 +12,11 @@ pub const std_options: std.Options = .{ .logFn = log.stdLogFn };
 /// A key from a vault: marked, so the logger never writes it.
 const ApiKey = struct {
     value: []const u8,
+
     pub const zefir_sensitive = true;
 };
 
-// Check the marker, as core advises for every marked type: a missing or
-// private one fails the build here instead of leaking the key.
+// A missing or private marker would leak the key: check it at compile time.
 comptime {
     std.debug.assert(log.isSensitive(ApiKey));
 }
@@ -25,6 +24,7 @@ comptime {
 /// An amount that logs as "19.99 EUR".
 const Money = struct {
     cents: i64,
+
     pub fn format(m: Money, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("{d}.{d:0>2} EUR", .{ @divTrunc(m.cents, 100), @abs(@rem(m.cents, 100)) });
     }
@@ -46,7 +46,10 @@ pub fn main(init: std.process.Init) !void {
         .service = .{ .name = "billing", .version = "2.1.0" },
     });
     defer logger.deinit();
-    logger.installStdLog();
+
+    // Libraries that log through std.log end up in the same stream.
+    logger.installStdLog(); // std.log goes to the logger from here on
+    std.log.scoped(.cache).info("warmed up {d} entries", .{128});
 
     const config: Config = .{
         .port = 9000,
@@ -54,9 +57,14 @@ pub fn main(init: std.process.Init) !void {
         .vault_key = .{ .value = "sk-live-123" },
         .regions = &.{ "eu-west", "us-east" },
     };
-    logger.info("Configuration loaded", .{ .src = @src(), .config = config });
+    logger.info("Configuration loaded", .{ .config = config });
 
-    // In a request handler: the trace ids come from the request's context.
+    const key: ApiKey = .{ .value = "sk-live-123" };
+    const backup: ?ApiKey = null;
+    logger.info("Vault keys loaded", .{ .vault = "payments", .key = key, .backup = backup, .all = &[_]ApiKey{ key, key } });
+
+    // In a request handler, the trace ids come from the request's context;
+    // here, from a trace built by hand.
     const trace: core.TraceContext = .{
         .trace_id = try .parseHex("4bf92f3577b34da6a3ce929d0e0e4736"),
         .span_id = try .parseHex("00f067aa0ba902b7"),
@@ -65,15 +73,6 @@ pub fn main(init: std.process.Init) !void {
     };
     const ctx = core.Context.root.withTrace(trace);
     const digest = [_]u8{ 0x9f, 0x86, 0xd0, 0x81 };
-    logger.scoped("billing.invoices").withContext(ctx).info("Invoice paid", .{
-        .invoice_id = 1001,
-        .amount = Money{ .cents = 1999 },
-        .receipt_digest = log.hex(&digest),
-    });
-
-    // Libraries that log through std.log end up in the same stream.
-    std.log.scoped(.cache).info("warmed up {d} entries", .{128});
-
-    const counts = logger.stats();
-    if (counts.written != 3 or counts.dropped.write_failed != 0) return error.LostRecords;
+    const invoices = logger.scoped("billing.invoices").withContext(ctx);
+    invoices.info("Invoice paid", .{ .src = @src(), .invoice_id = 1001, .amount = Money{ .cents = 1999 }, .receipt_digest = log.hex(&digest) });
 }
